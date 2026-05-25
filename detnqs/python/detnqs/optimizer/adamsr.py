@@ -57,7 +57,7 @@ def adamsr(
     The second moment tracks the innovation q, not the carried predictor p.
     """
 
-    if shift < 0.0 and not callable(shift):
+    if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
     if not 0.0 <= beta1 < 1.0:
         raise ValueError("beta1 must satisfy 0 <= beta1 < 1")

@@ -27,11 +27,11 @@ type Tree = Any
 
 _CONFIG = {
     "chunk": 1024,
-    "bucket_min": 64,
+    "bucket_min": 512,
 }
 
 
-def configure(*, chunk: int | None = 1024, bucket_min: int = 64) -> None:
+def configure(*, chunk: int | None = 1024, bucket_min: int = 512) -> None:
     """Set the global shape policy.
 
     Args:

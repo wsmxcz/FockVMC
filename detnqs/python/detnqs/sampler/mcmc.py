@@ -11,27 +11,7 @@ import numpy as np
 
 from .. import utils
 from ..utils import precision
-
-
-def unique_dets(dets: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Unique determinants in first-occurrence order.
-
-    Returns:
-        unique:  shape (U, 2, nword) unique determinants.
-        first:   indices of first occurrences in the input.
-        inv:     input-to-unique index map.
-    """
-    dets = libdet.to_dets(dets)
-    n = dets.shape[0]
-    flat = np.ascontiguousarray(dets.reshape(n, -1))
-    key = flat.view(np.dtype((np.void, flat.dtype.itemsize * flat.shape[1]))).ravel()
-    _, first, inv = np.unique(key, return_index=True, return_inverse=True)
-    order = np.argsort(first, kind="stable")
-    first = first[order]
-    remap = np.empty(order.size, dtype=np.int64)
-    remap[order] = np.arange(order.size, dtype=np.int64)
-    inv = remap[inv].astype(np.int64, copy=False)
-    return np.ascontiguousarray(dets[first]), first.astype(np.int64), inv
+from .proposal import propose, unique_dets
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +27,8 @@ class SamplerState:
 
     chain:   unique chain determinants x.
     count:   walker multiplicity per unique determinant.
-    logabs:  cached log|psi_θ(x)|, refreshed at the start of each draw.
-    accept:  acceptance rate from the last draw.
+    logabs:  cached log|psi_theta(x)|, refreshed at the start of each draw.
+    accept:  acceptance rate from the last draw or burn-in.
     """
     key: jax.Array
     chain: np.ndarray
@@ -62,31 +42,44 @@ class MCSampler:
     """Compressed determinant-space Metropolis sampler.
 
     Physical target:
-        π(x)  ∝  |ψ(x)|²
+        pi(x)  proportional to |psi(x)|^2
 
     Markov reference:
-        η_α(x)  ∝  |ψ(x)|^α
+        eta_alpha(x)  proportional to |psi(x)|^alpha
 
-    Hamiltonian proposal:
-        q_A(y|x) = |H_xy| / d_A(x),   d_A(x) = Σ_z |H_xz|  (proposal graph)
+    Proposals:
+        ham:
+            Hamiltonian-weighted screened proposal.
 
-    MH acceptance:
-        log R(x→y) = α [log|ψ(y)| − log|ψ(x)|] + log d_A(x) − log d_A(y)
+        single:
+            Uniform single excitation in the fixed (N_alpha, N_beta) sector.
 
     Observation kernel:
-        B_β(y|x) = (1−β) δ_{xy} + β K(y|x)
-        K(y|x)   = |H_xy| / d_B(x)               (blur graph)
+        B_beta(y|x) = (1 - beta) delta_xy + beta K(y|x)
+        K(y|x)      = |H_xy| / d_B(x)
+
+    burn_in:
+        raw Metropolis moves run after initialization or reset.
+
+    n_discard:
+        raw Metropolis moves discarded before each production draw.
+
+    sweep_size:
+        raw Metropolis moves between two observation steps.
     """
 
-    n_sample:     int        = 1024
-    n_chain:      int        = 1024
-    n_discard:    int        = 1024
-    alpha:        float      = 1.0
-    proposal:     str        = "ham"
-    proposal_eps: float      = 1.0e-3
-    blur:         float      = 0.5
-    blur_kernel:  str        = "ham"
-    blur_eps:     float | None = 1.0e-3
+    n_sample:      int        = 1024
+    n_chain:       int        = 1024
+    burn_in:       int        = 1024
+    n_discard:     int        = 0
+    sweep_size:    int        = 1
+    reset_chains:  bool       = False
+    alpha:         float      = 1.0
+    proposal:      str        = "ham"
+    proposal_eps:  float      = 1.0e-3
+    blur:          float      = 0.5
+    blur_kernel:   str        = "ham"
+    blur_eps:      float | None = 1.0e-3
 
     def init(
         self,
@@ -97,20 +90,20 @@ class MCSampler:
         key: jax.Array,
         n_alpha: int,
         n_beta: int,
-        init: str | Any = "hf",
+        init_method: str | Any = "hf",
     ) -> SamplerState:
         """Initialise chains and run burn-in.
 
-        init:
-            "hf"     – lowest n_alpha/n_beta orbitals (Hartree-Fock).
-            "random" – random fixed-(n_alpha, n_beta) determinants.
-            array    – user-provided batch shaped (N, 2, nword); tiled if N ≠ n_chain.
+        init_method:
+            "hf"     - lowest n_alpha/n_beta orbitals (Hartree-Fock).
+            "random" - random fixed-(n_alpha, n_beta) determinants.
+            array    - user-provided batch shaped (N, 2, nword); tiled if N != n_chain.
         """
         n_chain = int(self.n_chain)
         nword   = int(hamiltonian.nword)
         norb    = int(hamiltonian.norb)
 
-        match init:
+        match init_method:
             case "hf":
                 det = np.zeros((1, 2, nword), dtype=np.uint64)
                 for p in range(int(n_alpha)):
@@ -130,10 +123,10 @@ class MCSampler:
                             chain[i, spin, p >> 6] |= np.uint64(1) << np.uint64(p & 63)
 
             case str():
-                raise ValueError("init must be 'hf', 'random', or a determinant batch")
+                raise ValueError("init_method must be 'hf', 'random', or a determinant batch")
 
             case _:
-                chain = libdet.to_dets(init)
+                chain = libdet.to_dets(init_method)
                 if chain.shape[0] != n_chain:
                     reps  = (n_chain + chain.shape[0] - 1) // chain.shape[0]
                     chain = np.tile(chain, (reps, 1, 1))[:n_chain]
@@ -148,7 +141,7 @@ class MCSampler:
         state = SamplerState(key=key, chain=chain, count=count, logabs=logabs)
 
         accepted = proposed = 0
-        for _ in range(int(self.n_discard)):
+        for _ in range(max(0, int(self.burn_in))):
             state, acc, prop, _ = self._move(theta, hamiltonian, model, state)
             accepted += acc
             proposed += prop
@@ -177,10 +170,20 @@ class MCSampler:
         ))
         timing["time_forward"] += perf_counter() - t
 
+        accepted = proposed = n_prop_edge = n_blur_edge = 0
+
+        for _ in range(max(0, int(self.n_discard))):
+            state, acc, prop, n_prop = self._move(
+                theta, hamiltonian, model, state, timing=timing,
+            )
+            accepted    += acc
+            proposed    += prop
+            n_prop_edge += n_prop
+
         det_parts:   list[np.ndarray] = []
         count_parts: list[np.ndarray] = []
-        accepted = proposed = n_prop_edge = n_blur_edge = 0
         remaining = int(self.n_sample)
+        sweep_size = max(1, int(self.sweep_size))
 
         while remaining > 0:
             take = min(int(self.n_chain), remaining)
@@ -206,13 +209,15 @@ class MCSampler:
             count_parts.append(obs_count)
             n_blur_edge += n_blur
 
-            state, acc, prop, n_prop = self._move(
-                theta, hamiltonian, model, state, timing=timing,
-            )
-            accepted    += acc
-            proposed    += prop
-            n_prop_edge += n_prop
-            remaining   -= take
+            for _ in range(sweep_size):
+                state, acc, prop, n_prop = self._move(
+                    theta, hamiltonian, model, state, timing=timing,
+                )
+                accepted    += acc
+                proposed    += prop
+                n_prop_edge += n_prop
+
+            remaining -= take
 
         obs, _, inv = unique_dets(np.concatenate(det_parts, axis=0))
         raw_count   = np.concatenate(count_parts).astype(np.int64, copy=False)
@@ -246,60 +251,47 @@ class MCSampler:
         *,
         timing: dict[str, float] | None = None,
     ) -> tuple[SamplerState, int, int, int]:
-        """Advance the compressed chain by one MH sweep.
+        """Advance the compressed chain by one raw Metropolis move.
 
         Returns:
             (next_state, n_accepted, n_proposed, n_prop_edge)
         """
-        if self.proposal != "ham":
-            raise ValueError("proposal must be 'ham'")
-
-        pa      = precision.asarray
-        rdtype  = precision.dtype("calc", "real", host=True)
-        tiny    = rdtype(precision.tiny("calc"))
+        pa     = precision.asarray
+        rdtype = precision.dtype("calc", "real", host=True)
 
         key, subkey = jax.random.split(state.key)
         seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
+        rng = np.random.default_rng(seed)
 
         chain  = state.chain
         count  = state.count.astype(np.int64, copy=False)
         logabs = pa(state.logabs, "calc", "real", host=True)
         n_row  = int(chain.shape[0])
 
-        t = perf_counter()
-        sample = hamiltonian.sample_edges(
-            chain, count, eps1=np.inf, eps2=float(self.proposal_eps), seed=seed,
+        batch = propose(
+            self.proposal,
+            hamiltonian,
+            chain,
+            count,
+            seed=seed,
+            eps=float(self.proposal_eps),
+            timing=timing,
         )
-        degree_x  = pa(np.asarray(sample.row_weight), "calc", "real", host=True)
-        n_edge    = int(np.asarray(sample.h).size)
-        if timing is not None:
-            timing["time_graph"] += perf_counter() - t
 
-        active    = np.flatnonzero((count > 0) & (degree_x > 0.0))
-        proposed  = int(np.sum(count[active]))
+        proposed = int(np.sum(batch.count))
+        if proposed == 0 or batch.dets.shape[0] == 0:
+            return replace(state, key=key), 0, proposed, int(batch.n_edge)
 
-        if proposed == 0 or n_edge == 0:
-            return replace(state, key=key), 0, proposed, n_edge
-
-        src_g      = np.asarray(sample.rows,   dtype=np.int64)
-        count_g    = np.asarray(sample.counts, dtype=np.int64)
-        pair_dets  = np.ascontiguousarray(np.asarray(sample.dets, dtype=np.uint64))
-        prop, _, dst_inv = unique_dets(pair_dets)
-
-        # Evaluate logabs and reverse degrees for novel proposals only.
-        prop_logabs  = np.empty(prop.shape[0], dtype=rdtype)
-        prop_degree  = np.empty(prop.shape[0], dtype=rdtype)
-        _, first, inv_lookup = unique_dets(np.concatenate([chain, prop], axis=0))
-        prop_first   = first[inv_lookup[n_row:]]
-        known        = prop_first < n_row
+        prop_logabs = np.empty(batch.dets.shape[0], dtype=rdtype)
+        _, first, inv_lookup = unique_dets(np.concatenate([chain, batch.dets], axis=0))
+        prop_first = first[inv_lookup[n_row:]]
+        known = prop_first < n_row
 
         if known.any():
             prop_logabs[known] = logabs[prop_first[known]]
-            prop_degree[known] = degree_x[prop_first[known]]
 
         if (~known).any():
-            prop_unk = np.ascontiguousarray(prop[~known])
-
+            prop_unk = np.ascontiguousarray(batch.dets[~known])
             t = perf_counter()
             prop_logabs[~known] = pa(
                 np.asarray(utils.host(utils.apply(model.logabs, theta, prop_unk))).reshape(-1),
@@ -308,27 +300,21 @@ class MCSampler:
             if timing is not None:
                 timing["time_forward"] += perf_counter() - t
 
-            t = perf_counter()
-            deg = hamiltonian.degrees(prop_unk, float(self.proposal_eps))
-            prop_degree[~known] = pa(np.asarray(deg.row_weight), "calc", "real", host=True)
-            if timing is not None:
-                timing["time_graph"] += perf_counter() - t
-
         log_ratio = (
-            rdtype(self.alpha) * (prop_logabs[dst_inv] - logabs[src_g])
-            + np.log(np.maximum(degree_x[src_g],      tiny))
-            - np.log(np.maximum(prop_degree[dst_inv], tiny))
+            rdtype(self.alpha) * (prop_logabs[batch.dst] - logabs[batch.src])
+            + pa(batch.log_qratio, "calc", "real", host=True)
         )
-        accept_prob  = np.clip(np.exp(np.minimum(rdtype(0.0), log_ratio)), rdtype(0.0), rdtype(1.0))
-        accepted_g   = np.random.default_rng(seed).binomial(count_g, accept_prob).astype(np.int64)
-        accepted     = int(accepted_g.sum())
+        accept_prob = np.clip(np.exp(np.minimum(rdtype(0.0), log_ratio)), rdtype(0.0), rdtype(1.0))
+        accepted_g = rng.binomial(batch.count, accept_prob).astype(np.int64)
+        accepted = int(accepted_g.sum())
 
         next_count = count.copy()
-        np.add.at(next_count, src_g, -accepted_g)
-        prop_count = np.zeros(prop.shape[0], dtype=np.int64)
-        np.add.at(prop_count, dst_inv, accepted_g)
+        np.add.at(next_count, batch.src, -accepted_g)
 
-        all_dets   = np.concatenate([chain, prop], axis=0)
+        prop_count = np.zeros(batch.dets.shape[0], dtype=np.int64)
+        np.add.at(prop_count, batch.dst, accepted_g)
+
+        all_dets   = np.concatenate([chain, batch.dets], axis=0)
         all_count  = np.concatenate([next_count, prop_count])
         all_logabs = np.concatenate([logabs, prop_logabs])
 
@@ -345,7 +331,7 @@ class MCSampler:
                 logabs = pa(all_logabs[first][keep], "calc", "real", host=True),
                 accept = accepted / proposed if proposed else 0.0,
             ),
-            accepted, proposed, n_edge,
+            accepted, proposed, int(batch.n_edge),
         )
 
     def _observe(
@@ -357,7 +343,7 @@ class MCSampler:
         *,
         timing: dict[str, float] | None = None,
     ) -> tuple[SamplerState, np.ndarray, np.ndarray, int]:
-        """Apply observation kernel B_β(y|x) to base samples.
+        """Apply observation kernel B_beta(y|x) to base samples.
 
         Returns:
             (next_state, obs_dets, obs_count, n_blur_edge)

@@ -24,22 +24,23 @@ class MCState(VState):
     Theory
     ------
     Physical target:
-        π_θ(x) ∝ |ψ_θ(x)|²
+        pi_theta(x) proportional to |psi_theta(x)|^2
 
-    Markov reference (sampled by MCSampler):
-        η_{θ,α}(x) ∝ |ψ_θ(x)|^α
+    Markov reference sampled by MCSampler:
+        eta_{theta, alpha}(x) proportional to |psi_theta(x)|^alpha
 
     Observation kernel:
         B(y|x)
 
     Observed reference:
-        ν(y) = Σ_x η_α(x) B(y|x)
+        nu(y) = sum_x eta_alpha(x) B(y|x)
 
     Importance weight:
-        ω(y) = |ψ(y)|² / r_ν(y),   r_ν(y) = Σ_x |ψ(x)|^α B(y|x)
+        omega(y) = |psi(y)|^2 / r_nu(y),
+        r_nu(y) = sum_x |psi(x)|^alpha B(y|x)
 
-    Computation is split across three graphs (proposal / blur / local-energy)
-    that may carry different eps thresholds.
+    Computation is split across three host-side graphs
+    (proposal / blur / local-energy) and one shared device-side model pool.
     """
 
     model:         Model
@@ -49,6 +50,7 @@ class MCState(VState):
     sampler_state: SamplerState
     n_alpha:       int
     n_beta:        int
+    init_method:   str | Any = "hf"
     eloc_eps1:     float = 1e-3
     eloc_eps2:     float = 1e-6
     eloc_sample:   int   = 64
@@ -63,7 +65,7 @@ class MCState(VState):
         n_alpha: int,
         n_beta: int,
         key: jax.Array,
-        init: str | Any = "hf",
+        init_method: str | Any = "hf",
         eloc_eps1: float = 1e-3,
         eloc_eps2: float = 1e-6,
         eloc_sample: int = 64,
@@ -75,12 +77,13 @@ class MCState(VState):
         )["params"]
         sampler_state = sampler.init(
             params, hamiltonian, model,
-            key=sample_key, n_alpha=int(n_alpha), n_beta=int(n_beta), init=init,
+            key=sample_key, n_alpha=int(n_alpha), n_beta=int(n_beta),
+            init_method=init_method,
         )
         return cls(
             model=model, params=params, hamiltonian=hamiltonian,
             sampler=sampler, sampler_state=sampler_state,
-            n_alpha=int(n_alpha), n_beta=int(n_beta),
+            n_alpha=int(n_alpha), n_beta=int(n_beta), init_method=init_method,
             eloc_eps1=float(eloc_eps1), eloc_eps2=float(eloc_eps2),
             eloc_sample=int(eloc_sample),
         )
@@ -103,7 +106,7 @@ class MCState(VState):
         sampler
             Non-Hamiltonian and non-network work inside MCSampler.draw:
             chain resampling, MH accept/reject bookkeeping, multiplicity updates,
-            compression, and observation bookkeeping.
+            compression, observation bookkeeping, and optional chain reset.
 
         graph
             All Hamiltonian graph work, including every call to
@@ -134,9 +137,21 @@ class MCState(VState):
         time_reduction     = 0.0
         time_backward = 0.0
 
+        sampler_state = self.sampler_state
+        if self.sampler.reset_chains:
+            t = perf_counter()
+            sampler_state = self.sampler.init(
+                self.params, self.hamiltonian, self.model,
+                key=sampler_state.key,
+                n_alpha=int(self.n_alpha),
+                n_beta=int(self.n_beta),
+                init_method=self.init_method,
+            )
+            time_sampler += perf_counter() - t
+
         t = perf_counter()
         sampler_state, batch, sampler_stats = self.sampler.draw(
-            self.params, self.hamiltonian, self.model, self.sampler_state,
+            self.params, self.hamiltonian, self.model, sampler_state,
         )
         draw_wall = perf_counter() - t
 
@@ -150,7 +165,7 @@ class MCState(VState):
         count      = pa(count_i64, "calc", "real", host=True)
         n_row      = int(x.shape[0])
 
-        # Stochastic eloc seed (advances sampler key without touching chain).
+        # Stochastic eloc seed advances the sampler key without touching chains.
         seed = 0
         if self.eloc_sample > 0:
             key, subkey   = jax.random.split(sampler_state.key)
@@ -201,7 +216,8 @@ class MCState(VState):
             )
 
             if geometry:
-                # Sample-space right hand side for minSR / AdamSR: b = 2 sqrt(w) (E_loc - E)
+                # Sample-space right hand side for minSR / AdamSR:
+                # b = 2 sqrt(w) (E_loc - E)
                 b_log = rdtype(2.0) * np.sqrt(w) * residual
 
                 geom = Geometry(
@@ -221,12 +237,16 @@ class MCState(VState):
 
         new_state = replace(self, sampler_state=sampler_state)
 
+        n_chain = max(1, int(np.sum(sampler_state.count)))
+        compression_ratio = float(sampler_state.chain.shape[0] / n_chain)
+
         stats = {
             "energy":        float(energy),
             "variance":      float(variance),
             "accept":        float(sampler_stats.get("accept", sampler_state.accept)),
             "ess":           float(ess),
             "ess_unique":    float(ess_unique),
+            "compression_ratio": float(compression_ratio),
             "n_sample":      float(np.sum(count_i64)),
             "n_unique":      float(n_row),
             "n_eval":        float(graph["pool"].shape[0]),
@@ -336,7 +356,7 @@ class MCState(VState):
         graph: dict[str, Any],
         n_row: int,
     ) -> np.ndarray:
-        """log unnormalized observed reference density r_ν(y)."""
+        """log unnormalised observed reference density r_nu(y)."""
         pa     = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
         tiny   = rdtype(precision.tiny("calc"))
@@ -452,7 +472,7 @@ class MCState(VState):
         row_logabs: np.ndarray,
         lognu: np.ndarray,
     ) -> tuple[np.ndarray, float, float]:
-        """Normalised estimator weights ω_k and ESS diagnostics."""
+        """Normalised estimator weights omega_k and ESS diagnostics."""
         pa     = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
         tiny   = rdtype(precision.tiny("calc"))

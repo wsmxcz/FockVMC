@@ -9,7 +9,7 @@ The goal is a small, explicit, high-performance research code:
 - `detnqs.model` owns neural wavefunction ansatzes.
 - `detnqs.vstate` owns variational estimators and dynamic physical state.
 - `detnqs.sampler` owns Markov-chain dynamics.
-- `detnqs.preconditioner` owns SR and minSR geometry.
+- `detnqs.optimizer` owns SR and minSR geometry.
 - `detnqs.driver` owns optimizer state and the training loop.
 - `detnqs.utils` owns shape and precision policy.
 
@@ -87,7 +87,7 @@ delta = O† a
 All variational states implement
 
 ```python
-state, loss, grad, stats, geometry = state.expect_and_grad(qgt=True)
+state, loss, grad, stats, geom = state.expect_and_grad(geometry=True)
 ```
 
 The returned `state` contains any advanced sampler state.  

@@ -36,26 +36,30 @@ def sr(
 ) -> optax.GradientTransformationExtraArgs:
     """Parameter-space stochastic reconfiguration.
 
-    SR uses the centered weighted Jacobian
+    Given
 
-        O = sqrt(w) * (J - <J>_w)
+        O = sqrt(w) * (J - <J>_w),
+        S = O^dagger O,
 
-    and transforms incoming updates g by solving
+    SR maps the incoming Optax update g to delta by solving
 
-        (S + shift I) delta = g,
-        S = O^† O.
+        (S + shift I) delta = g.
 
-    The returned delta is still an Optax update.  Apply learning-rate schedules,
-    signs, clipping, or momentum by composing this transform with Optax transforms.
+    This transform does not choose the optimization sign or learning rate.
+    Use optax.scale, optax.scale_by_schedule, clipping, or momentum outside it.
     """
-
-    if mode not in ("dense", "matvec"):
+    if mode not in {"dense", "matvec"}:
         raise ValueError("sr mode must be 'dense' or 'matvec'")
+
+    if not callable(shift) and shift < 0.0:
+        raise ValueError("shift must be non-negative")
 
     def init_fn(params: Tree) -> SRState:
         del params
+
         step = jnp.zeros((), dtype=jnp.int32)
         value = shift(step) if callable(shift) else shift
+
         return SRState(
             step=step,
             shift=jnp.asarray(value, dtype=precision.dtype("sr", "real")),
@@ -103,7 +107,11 @@ def sr(
             )
 
         delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta, theta)
-        return delta, SRState(step=state.step + 1, shift=shift_t)
+
+        return delta, SRState(
+            step=state.step + 1,
+            shift=shift_t,
+        )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
@@ -155,12 +163,11 @@ def _matvec_step(
         return jnp.concatenate(parts, axis=0) + shift.astype(v_flat.dtype) * v_flat
 
     delta_flat = linalg.solve_matvec(matvec, updates_flat, maxiter=maxiter)
-    return unravel(delta_flat)
+    return unravel(delta_flat.astype(updates_flat.dtype))
 
 
 def _blocks(coord, theta: Tree, x: Any, w: jax.Array) -> list[jax.Array]:
     """Build parameter blocks of O = sqrt(w) * (J - <J>_w)."""
-
     jac = jax.jacrev(lambda p: coord(p, x))(theta)
 
     blocks = []

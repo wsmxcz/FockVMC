@@ -12,7 +12,18 @@ LogPsi = Any
 
 
 def to_logabs(logpsi: LogPsi) -> Any:
-    """Return log|psi| from any supported wavefunction representation."""
+    """Return log|psi| from a supported wavefunction representation.
+
+    Supported representations:
+        real array:
+            log|psi|.
+
+        complex array:
+            log|psi| + i phase.
+
+        (sign, logabs):
+            signed real wavefunction representation.
+    """
     if isinstance(logpsi, tuple):
         return logpsi[1]
 
@@ -23,7 +34,11 @@ def to_logabs(logpsi: LogPsi) -> Any:
 
 
 def to_psi(logpsi: LogPsi) -> Any:
-    """Return a numerically shifted wavefunction value."""
+    """Return shifted wavefunction values.
+
+    The global shift does not change Rayleigh quotients or amplitude ratios.
+    It only improves numerical stability when exponentiating log-amplitudes.
+    """
     if isinstance(logpsi, tuple):
         sign, logabs = logpsi
         xp = np if isinstance(logabs, np.ndarray) else jnp
@@ -43,6 +58,7 @@ def to_ratio(num: LogPsi, den: LogPsi) -> Any:
         sign_num, logabs_num = num
         sign_den, logabs_den = den
         xp = np if isinstance(logabs_num, np.ndarray) else jnp
+
         safe_den = xp.where(sign_den != 0, sign_den, 1)
         return (sign_num / safe_den) * xp.exp(logabs_num - logabs_den)
 
@@ -51,17 +67,27 @@ def to_ratio(num: LogPsi, den: LogPsi) -> Any:
 
 
 class Model(nn.Module):
-    """Base class for determinant-space NQS models.
+    """Base class for determinant-space neural quantum states.
 
-    Raw output:
-        real           : log|psi|
-        complex        : log|psi| + i phase
-        (sign, logabs) : signed real wavefunction
+    Raw model output:
+        real:
+            log|psi|.
+
+        complex:
+            log|psi| + i phase.
+
+        (sign, logabs):
+            signed real wavefunction.
 
     Differentiated coordinate:
-        real           : log|psi|
-        complex        : [log|psi|, phase]
-        signed real    : logabs, with sign stopped
+        real:
+            log|psi|.
+
+        complex:
+            [log|psi|, phase].
+
+        signed real:
+            logabs with sign stopped.
     """
 
     def __call__(self, x: Any) -> LogPsi:
@@ -78,7 +104,7 @@ class Model(nn.Module):
         return out
 
     def logabs(self, theta: Tree, x: Any) -> Any:
-        """Evaluate log|psi(theta, x)|."""
+        """Evaluate log|psi_theta(x)|."""
         return to_logabs(self.logpsi(theta, x))
 
     def coord(self, theta: Tree, x: Any) -> Any:
@@ -94,13 +120,18 @@ class Model(nn.Module):
         return logpsi
 
     def cotangent(self, logpsi: LogPsi, dlogpsi: Any) -> Any:
-        """Map dL/dlogpsi to dL/dcoord."""
+        """Map dL/dlogpsi to dL/dcoord.
+
+        This method keeps optimizer-facing autodiff coordinates real. Complex
+        cotangents are represented by real and imaginary channels.
+        """
         if isinstance(logpsi, tuple):
             return np.real(dlogpsi) if isinstance(dlogpsi, np.ndarray) else jnp.real(dlogpsi)
 
         if jnp.issubdtype(jnp.asarray(logpsi).dtype, jnp.complexfloating):
             if isinstance(dlogpsi, np.ndarray):
                 return np.stack((np.real(dlogpsi), np.imag(dlogpsi)), axis=-1)
+
             return jnp.stack((jnp.real(dlogpsi), jnp.imag(dlogpsi)), axis=-1)
 
         return np.real(dlogpsi) if isinstance(dlogpsi, np.ndarray) else jnp.real(dlogpsi)

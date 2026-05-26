@@ -33,24 +33,30 @@ def minsr(
 ) -> optax.GradientTransformationExtraArgs:
     """Dense sample-space minimum-step SR.
 
-    minSR solves in sample space
+    Given
+
+        O = sqrt(w) * (J - <J>_w),
+        K = O O^dagger,
+
+    minSR solves
 
         (K + shift I) a = b,
-        K = O O^†,
 
-    and projects back to parameter space
+    and returns
 
-        delta = O^† a.
+        delta = O^dagger a.
 
-    This transform intentionally uses geometry.b rather than incoming updates.
-    Therefore it should normally appear before ordinary Optax transforms that
-    operate on the produced natural update.
+    The incoming Optax update is ignored. The right hand side is geometry.b.
     """
+    if not callable(shift) and shift < 0.0:
+        raise ValueError("shift must be non-negative")
 
     def init_fn(params: Tree) -> MinSRState:
         del params
+
         step = jnp.zeros((), dtype=jnp.int32)
         value = shift(step) if callable(shift) else shift
+
         return MinSRState(
             step=step,
             shift=jnp.asarray(value, dtype=precision.dtype("sr", "real")),
@@ -87,7 +93,11 @@ def minsr(
         )
 
         delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta, geometry.theta)
-        return delta, MinSRState(step=state.step + 1, shift=shift_t)
+
+        return delta, MinSRState(
+            step=state.step + 1,
+            shift=shift_t,
+        )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
@@ -102,7 +112,6 @@ def _step(
     fallback: bool,
 ) -> Tree:
     """One minSR solve on one fixed-shape bucket."""
-
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
 
@@ -111,23 +120,26 @@ def _step(
     theta_leaves, treedef = tree_util.tree_flatten(theta)
     jac_leaves = tree_util.tree_leaves(jac)
 
-    K_dtype = jnp.result_type(b_flat, *[p.dtype for p in theta_leaves])
-    K = jnp.zeros((nrow, nrow), dtype=K_dtype)
+    dtype = jnp.result_type(b_flat, *[p.dtype for p in theta_leaves])
+    K = jnp.zeros((nrow, nrow), dtype=dtype)
     blocks = []
 
     for J, p in zip(jac_leaves, theta_leaves, strict=True):
         wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
         mean = jnp.sum(wb * J, axis=0, keepdims=True)
-        O = (jnp.sqrt(wb) * (J - mean)).reshape(-1, p.size)
+        O = (jnp.sqrt(wb) * (J - mean)).reshape(-1, p.size).astype(dtype)
 
-        O = O.astype(K_dtype)
         blocks.append(O)
         K = K + O @ O.conj().T
 
     K = precision.asarray(K, "sr")
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
 
-    a = linalg.solve_dense(K, rhs, shift, fallback=fallback).astype(K_dtype)
-    leaves = [(O.conj().T @ a).reshape(p.shape) for O, p in zip(blocks, theta_leaves, strict=True)]
+    a = linalg.solve_dense(K, rhs, shift, fallback=fallback).astype(dtype)
+
+    leaves = [
+        (O.conj().T @ a).reshape(p.shape)
+        for O, p in zip(blocks, theta_leaves, strict=True)
+    ]
 
     return tree_util.tree_unflatten(treedef, leaves)

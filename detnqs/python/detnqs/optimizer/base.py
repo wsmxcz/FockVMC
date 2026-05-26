@@ -9,18 +9,29 @@ Tree = Any
 
 @dataclass(frozen=True, slots=True)
 class Geometry:
-    """Local variational geometry consumed by geometry-aware optimizers.
+    """Local geometry consumed by SR-like optimizers.
 
-    The variational state owns all physics and sampling.  The optimizer only sees
-    the local score geometry
+    The centered weighted Jacobian is
 
-        O = sqrt(w) * (J - <J>_w)
+        O = sqrt(w) * (J - <J>_w).
 
-    through a lightweight recipe: parameters, coordinate function, samples,
-    normalized or unnormalized weights, and the sample-space right hand side b.
+    Fields:
+        theta:
+            Parameters used to build the geometry.
 
-    No Hamiltonian, sampler, local-energy graph, or Markov-chain state belongs
-    to the optimizer.
+        coord:
+            Real autodiff coordinate, coord(theta, x).
+
+        x:
+            Sample axis used by the geometry.
+
+        w:
+            Non-negative sample weights. They may be normalized or
+            unnormalized; optimizers normalize them internally.
+
+        b:
+            Sample-space right hand side. minSR and AdamSR use b directly.
+            Parameter-space SR uses the incoming Optax update instead.
     """
 
     theta: Tree

@@ -8,11 +8,13 @@ from .batch import jvp
 from .batch import vjp
 from .numeric import normalize
 from .numeric import segment_logsumexp
+from .timer import Timer
 from .tree import device
 from .tree import host
 from .tree import vdot
 
 __all__ = [
+    "Timer",
     "apply",
     "batch",
     "bucket",

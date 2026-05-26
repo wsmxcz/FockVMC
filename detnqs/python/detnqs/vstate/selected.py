@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Any, Callable, Self
+from dataclasses import dataclass
+from dataclasses import replace
+from typing import Any
+from typing import Callable
+from typing import Self
 
 import jax
 import jax.numpy as jnp
@@ -11,14 +14,26 @@ from libdet import Hamiltonian
 from scipy.sparse import csr_matrix
 
 from .. import utils
-from ..model.base import Model, to_psi
+from ..model.base import Model
+from ..model.base import to_psi
 from ..optimizer import Geometry
 from ..utils import precision
 
 
 @dataclass(frozen=True, slots=True)
 class SelectedState:
-    """Variational state on a selected determinant space V."""
+    """Variational state on a selected determinant space V.
+
+    The Hamiltonian is projected to H[V, V]. The selected space can be evolved
+    by expanding connected determinants and then applying a user-provided
+    selector.
+
+    Estimator:
+        E_V = <psi_V|H[V,V]|psi_V> / <psi_V|psi_V>.
+
+    Variance:
+        var_V = ||H[V,V] psi_V - E_V psi_V||^2 / <psi_V|psi_V>.
+    """
 
     model: Model
     params: Any
@@ -35,7 +50,12 @@ class SelectedState:
         *,
         key: jax.Array,
     ) -> Self:
+        """Initialize from a user-provided selected determinant space."""
         v_dets = np.ascontiguousarray(libdet.to_dets(init_v))
+
+        if v_dets.shape[0] == 0:
+            raise ValueError("init_v must contain at least one determinant")
+
         nword = int(v_dets.shape[2])
 
         variables = model.init(
@@ -53,6 +73,7 @@ class SelectedState:
 
     @property
     def n_v(self) -> int:
+        """Number of determinants in the selected space."""
         return int(self.v_dets.shape[0])
 
     def evolve(
@@ -61,15 +82,21 @@ class SelectedState:
         *,
         eps: float | None = None,
     ) -> Self:
-        """Update the selected determinant space and rebuild H[V,V]."""
+        """Update the selected space and rebuild H[V, V].
 
+        If eps is provided, the current selected space is first expanded by
+        screened Hamiltonian-connected determinants. The selector then receives
+        log|psi| and the candidate determinant table, and returns the next V.
+        """
         dets = self.v_dets
 
         if eps is not None:
-            logpsi = utils.apply(self.model.logpsi, self.params, self.v_dets)
-            psi = np.asarray(utils.host(to_psi(logpsi))).reshape(-1)
+            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.v_dets)
+            jax.block_until_ready(logpsi_jax)
 
+            psi = np.asarray(to_psi(utils.host(logpsi_jax))).reshape(-1)
             coeffs = np.abs(psi).astype(np.float64, copy=False)
+
             norm = float(np.linalg.norm(coeffs))
             if norm > 0.0:
                 coeffs = coeffs / norm
@@ -85,12 +112,20 @@ class SelectedState:
             if ext.shape[0] > 0:
                 dets = np.ascontiguousarray(np.concatenate([self.v_dets, ext], axis=0))
 
-        logabs = np.asarray(
-            utils.host(utils.apply(self.model.logabs, self.params, dets))
-        ).reshape(-1)
-        logabs = precision.asarray(logabs, "calc", "real", host=True)
+        logabs_jax = utils.apply(self.model.logabs, self.params, dets)
+        jax.block_until_ready(logabs_jax)
 
-        v_dets = selector(logabs, dets)
+        logabs = precision.asarray(
+            np.asarray(utils.host(logabs_jax)).reshape(-1),
+            "calc",
+            "real",
+            host=True,
+        )
+
+        v_dets = np.ascontiguousarray(libdet.to_dets(selector(logabs, dets)))
+
+        if v_dets.shape[0] == 0:
+            raise ValueError("selector returned an empty determinant space")
 
         return replace(
             self,
@@ -99,98 +134,106 @@ class SelectedState:
         )
 
     def expect(self) -> tuple[Self, dict[str, float]]:
-        energy, norm, _, _ = self._energy_data(geometry=False)
-
-        return self, {
-            "energy": float(energy),
-            "norm": float(norm),
-            "n_v": float(self.n_v),
-        }
+        """Return projected energy statistics without a gradient."""
+        new_state, _, _, stats, _ = self._run(grad=False, geometry=False)
+        return new_state, stats
 
     def expect_and_grad(self, *, geometry: bool = False):
-        """Return energy, gradient, statistics, and optional optimizer geometry."""
+        """Return energy, gradient, statistics, and optional geometry."""
+        return self._run(grad=True, geometry=geometry)
 
-        energy, norm, cot, geom = self._energy_data(geometry=geometry)
+    def replace(self, **updates: Any) -> Self:
+        """Return a copy with updated fields."""
+        return replace(self, **updates)
 
-        grad = utils.vjp(
-            self.model.coord,
-            self.params,
-            self.v_dets,
-            utils.device(precision.asarray(cot, "model", "real", host=True)),
-        )
+    def _run(self, *, grad: bool, geometry: bool):
+        """Evaluate projected energy, optional gradient, and optional geometry."""
+        timer = utils.Timer()
+        pa = precision.asarray
+        rdtype = precision.dtype("calc", "real", host=True)
+
+        with timer("forward"):
+            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.v_dets)
+            jax.block_until_ready(logpsi_jax)
+            logpsi_h = utils.host(logpsi_jax)
+
+        with timer("reduce"):
+            psi = pa(
+                np.asarray(to_psi(logpsi_h)).reshape(-1),
+                "calc",
+                host=True,
+            )
+
+            hpsi = pa(
+                np.asarray(self.h_vv.dot(psi)).reshape(-1),
+                "calc",
+                host=True,
+            )
+
+            norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
+            energy = float((np.vdot(psi, hpsi) / norm).real)
+
+            residual = hpsi - rdtype(energy) * psi
+            variance = float((np.vdot(residual, residual) / norm).real)
+
+        gradient = None
+        geom = None
+
+        if grad:
+            with timer("backward"):
+                # dE / dlogpsi = 2 / norm * conj(psi) * (H psi - E psi).
+                dlogpsi = rdtype(2.0 / norm) * np.conjugate(psi) * residual
+                cot = self.model.cotangent(logpsi_h, dlogpsi)
+
+                gradient = utils.vjp(
+                    self.model.coord,
+                    self.params,
+                    self.v_dets,
+                    utils.device(pa(cot, "model", "real", host=True)),
+                )
+                jax.block_until_ready(gradient)
+
+                if geometry:
+                    w = pa(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
+                    sqrt_w = np.sqrt(w)
+
+                    b_log = np.zeros_like(dlogpsi)
+                    np.divide(dlogpsi, sqrt_w, out=b_log, where=sqrt_w > 0.0)
+
+                    geom = Geometry(
+                        theta=self.params,
+                        coord=self.model.coord,
+                        x=self.v_dets,
+                        w=utils.device(w),
+                        b=utils.device(
+                            pa(
+                                self.model.cotangent(logpsi_h, b_log),
+                                "sr",
+                                "real",
+                                host=True,
+                            )
+                        ),
+                    )
 
         stats = {
             "energy": float(energy),
-            "norm": float(norm),
+            "variance": float(variance),
             "n_v": float(self.n_v),
+            "time_forward": 0.0,
+            "time_reduce": 0.0,
+            "time_backward": 0.0,
         }
+        stats.update(timer.stats())
 
-        return self, energy, grad, stats, geom
-
-    def replace(self, **updates: Any) -> Self:
-        return replace(self, **updates)
-
-    def _energy_data(self, *, geometry: bool):
-        """Compute projected variational energy data on the selected space V."""
-
-        real_dtype = precision.dtype("calc", "real", host=True)
-
-        logpsi = utils.apply(self.model.logpsi, self.params, self.v_dets)
-        logpsi_h = utils.host(logpsi)
-
-        psi = precision.asarray(
-            np.asarray(utils.host(to_psi(logpsi))).reshape(-1),
-            "calc",
-            host=True,
-        )
-        hpsi = precision.asarray(
-            np.asarray(self.h_vv.dot(psi)).reshape(-1),
-            "calc",
-            host=True,
-        )
-
-        norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
-        energy = float((np.vdot(psi, hpsi) / norm).real)
-
-        # dE / dlogpsi = 2 / norm * conj(psi) * (H psi - E psi)
-        residual = hpsi - real_dtype(energy) * psi
-        dlogpsi = real_dtype(2.0 / norm) * np.conjugate(psi) * residual
-        cot = self.model.cotangent(logpsi_h, dlogpsi)
-
-        if not geometry:
-            return energy, norm, cot, None
-
-        w = precision.asarray(np.abs(psi) ** 2 / norm, "calc", "real", host=True)
-        sqrt_w = np.sqrt(w)
-
-        b_log = np.zeros_like(dlogpsi)
-        np.divide(dlogpsi, sqrt_w, out=b_log, where=sqrt_w > 0.0)
-
-        geom = Geometry(
-            theta=self.params,
-            coord=self.model.coord,
-            x=self.v_dets,
-            w=utils.device(precision.asarray(w, "sr", "real", host=True)),
-            b=utils.device(
-                precision.asarray(
-                    self.model.cotangent(logpsi_h, b_log),
-                    "sr",
-                    "real",
-                    host=True,
-                )
-            ),
-        )
-
-        return energy, norm, cot, geom
+        return self, energy, gradient, stats, geom
 
 
 def topk_selector(k: int) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    """Return a selector that keeps the K largest log-amplitude determinants."""
-
+    """Return a selector that keeps the k largest log-amplitude determinants."""
     k = int(k)
 
     def select(logabs: np.ndarray, dets: np.ndarray) -> np.ndarray:
-        dets = np.asarray(dets, dtype=np.uint64)
+        dets = libdet.to_dets(dets)
         logabs = np.asarray(logabs, dtype=np.float64).reshape(-1)
 
         if dets.shape[0] != logabs.shape[0]:

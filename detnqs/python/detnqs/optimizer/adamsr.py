@@ -20,7 +20,7 @@ Shift = float | Callable[[jax.Array], Any]
 
 
 class AdamSRState(NamedTuple):
-    """Optimizer state for native Adam-style minSR."""
+    """Optimizer state for Adam-style sample-space SR."""
 
     step: jax.Array
     p: Tree
@@ -37,26 +37,25 @@ def adamsr(
 ) -> optax.GradientTransformationExtraArgs:
     """Adam-style sample-space SR.
 
-    The carried predictor p is first projected into sample space:
+    The carried predictor p is projected to sample space:
 
         r = b - O p.
 
-    The adaptive diagonal metric is
+    The adaptive diagonal scale is
 
-        D_i = sqrt(v_mean / (v_hat_i + v_mean)),
+        D_i = sqrt(v_mean / (v_hat_i + v_mean)).
 
-    giving the sample-space system
+    AdamSR solves
 
-        (O D^2 O^† + shift I) a = r.
+        (O D^2 O^dagger + shift I) a = r,
 
-    The innovation and final update are
+    then returns
 
-        q = D^2 O^† a,
+        q     = D^2 O^dagger a,
         delta = p + q.
 
-    The second moment tracks the innovation q, not the carried predictor p.
+    The second moment tracks q, not p.
     """
-
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
     if not 0.0 <= beta1 < 1.0:
@@ -150,7 +149,6 @@ def _step(
     fallback: bool,
 ) -> tuple[Tree, Tree]:
     """One AdamSR solve on one fixed-shape bucket."""
-
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
 
@@ -161,7 +159,7 @@ def _step(
     p_leaves = tree_util.tree_leaves(p)
     v_leaves = tree_util.tree_leaves(v)
 
-    K_dtype = jnp.result_type(
+    dtype = jnp.result_type(
         b_flat,
         *[leaf.dtype for leaf in theta_leaves],
         *[leaf.dtype for leaf in jac_leaves],
@@ -172,26 +170,24 @@ def _step(
 
     v_hat_leaves = []
     v_hat_sum = 0.0
-    total_count = 0
+    size = 0
 
     for v_leaf in v_leaves:
-        v_hat = jnp.asarray(v_leaf) / bias
-        v_hat = jnp.maximum(v_hat, 0.0)
-
+        v_hat = jnp.maximum(jnp.asarray(v_leaf) / bias, 0.0)
         v_hat_leaves.append(v_hat)
         v_hat_sum = v_hat_sum + jnp.sum(v_hat)
-        total_count += v_hat.size
+        size += v_hat.size
 
-    v_mean = v_hat_sum / float(total_count)
+    v_mean = v_hat_sum / float(size)
     cold_start = (step == 0) | (v_mean == 0.0)
 
-    K = jnp.zeros((nrow, nrow), dtype=K_dtype)
-    Op = jnp.zeros((nrow,), dtype=K_dtype)
+    K = jnp.zeros((nrow, nrow), dtype=dtype)
+    Op = jnp.zeros((nrow,), dtype=dtype)
 
     blocks = []
     scales = []
 
-    for J, p_theta, p_leaf, v_hat in zip(
+    for J, theta_leaf, p_leaf, v_hat in zip(
         jac_leaves,
         theta_leaves,
         p_leaves,
@@ -200,16 +196,14 @@ def _step(
     ):
         wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
         mean = jnp.sum(wb * J, axis=0, keepdims=True)
-        O = (jnp.sqrt(wb) * (J - mean)).reshape(-1, p_theta.size).astype(K_dtype)
+        O = (jnp.sqrt(wb) * (J - mean)).reshape(-1, theta_leaf.size).astype(dtype)
 
-        v_mean_leaf = jnp.asarray(v_mean, dtype=v_hat.dtype)
-        denom = jnp.where(cold_start, 1.0, v_hat + v_mean_leaf)
-
-        d = jnp.sqrt(v_mean_leaf / denom)
+        denom = jnp.where(cold_start, 1.0, v_hat + jnp.asarray(v_mean, dtype=v_hat.dtype))
+        d = jnp.sqrt(jnp.asarray(v_mean, dtype=v_hat.dtype) / denom)
         d = jnp.where(cold_start, jnp.ones_like(d), d)
-        d = d.reshape(-1).astype(K_dtype)
+        d = d.reshape(-1).astype(dtype)
 
-        p_flat = jnp.asarray(p_leaf).reshape(-1).astype(K_dtype)
+        p_flat = jnp.asarray(p_leaf).reshape(-1).astype(dtype)
         OD = O * d.reshape((1, -1))
 
         blocks.append(O)
@@ -222,7 +216,7 @@ def _step(
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
     rhs = rhs - precision.asarray(Op, "sr").astype(K.dtype)
 
-    a = linalg.solve_dense(K, rhs, shift, fallback=fallback).astype(K_dtype)
+    a = linalg.solve_dense(K, rhs, shift, fallback=fallback).astype(dtype)
 
     q_leaves = []
     delta_leaves = []

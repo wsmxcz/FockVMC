@@ -21,9 +21,10 @@ def device(tree: Tree) -> Tree:
 
 def vdot(a: Tree, b: Tree) -> jax.Array:
     """Real part of the Hermitian PyTree inner product."""
-    out = jnp.array(0.0)
+    out = None
 
     for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True):
-        out = out + jnp.real(jnp.vdot(x, y))
+        term = jnp.real(jnp.vdot(x, y))
+        out = term if out is None else out + term
 
-    return out
+    return jnp.asarray(0.0) if out is None else out

@@ -4,7 +4,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import jax
 import optax
+
+from .utils import Timer
 
 Callback = Callable[[int, dict[str, float], "VMC"], bool | None]
 
@@ -13,25 +16,15 @@ Callback = Callable[[int, dict[str, float], "VMC"], bool | None]
 class VMC:
     """Minimal VMC driver.
 
-    The driver owns only optimizer state and the training loop.
+    The driver owns only optimizer state and the optimization loop.
 
-    The variational state owns:
-        - Hamiltonian physics,
-        - sampling state,
-        - estimator state,
-        - local variational geometry.
+    Data flow:
+        state.expect_and_grad -> optimizer.update -> apply_updates
 
-    The optimizer owns:
-        - gradient/update transformations,
-        - optimizer state.
-
-    The update convention follows Optax:
-
-        updates, opt_state = optimizer.update(...)
-        params = optax.apply_updates(params, updates)
-
-    Geometry-aware DetNQS optimizers receive geometry as an Optax extra arg.
-    Ordinary Optax transforms ignore it when wrapped with extra-args support.
+    The variational state owns physics, sampling, estimators, and local
+    geometry. Geometry-aware DetNQS optimizers consume geometry as an Optax
+    extra argument. Ordinary Optax transforms ignore it through
+    optax.with_extra_args_support.
     """
 
     state: Any
@@ -57,27 +50,36 @@ class VMC:
         )
 
     def step(self) -> dict[str, float]:
-        """Run one optimization step."""
+        """Run one optimization step and return scalar statistics."""
+        timer = Timer()
 
-        state, loss, grad, stats, geometry = self.state.expect_and_grad(
-            geometry=self.geometry,
-        )
+        with timer("total"):
+            state, loss, grad, stats, geometry = self.state.expect_and_grad(
+                geometry=self.geometry,
+            )
 
-        updates, self.opt_state = self.optimizer.update(
-            grad,
-            self.opt_state,
-            state.params,
-            geometry=geometry,
-            value=loss,
-            stats=stats,
-        )
+            # Keep optimizer timing from absorbing pending estimator work.
+            jax.block_until_ready(grad)
 
-        params = optax.apply_updates(state.params, updates)
-        self.state = state.replace(params=params)
+            with timer("optimizer"):
+                updates, self.opt_state = self.optimizer.update(
+                    grad,
+                    self.opt_state,
+                    state.params,
+                    geometry=geometry,
+                    value=loss,
+                    stats=stats,
+                )
+
+                params = optax.apply_updates(state.params, updates)
+                jax.block_until_ready(params)
+
+            self.state = state.replace(params=params)
 
         out = dict(stats)
         out["loss"] = float(loss)
         out["step"] = float(self.step_count)
+        out.update(timer.stats())
 
         self.step_count += 1
         return out
@@ -88,7 +90,6 @@ class VMC:
         callbacks: Sequence[Callback] = (),
     ) -> dict[str, float]:
         """Run several optimization steps."""
-
         stats: dict[str, float] = {}
 
         for _ in range(int(steps)):
@@ -103,5 +104,4 @@ class VMC:
 
     def reset_optimizer(self) -> None:
         """Reset optimizer state."""
-
         self.opt_state = self.optimizer.init(self.state.params)

@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-"""Global precision policy for DetNQS.
+"""Global dtype policy.
 
-Precision is a boundary policy, not an algorithmic detail. Core estimators
-should cast inputs at their boundaries and then run the mathematical kernel
-without scattered dtype decisions.
+Precision is a boundary policy. Kernels should cast inputs at their boundary
+and then run the mathematical calculation without scattered dtype decisions.
 
 Roles:
     model:
-        Neural-network forward pass and autodiff.
+        neural-network forward pass and autodiff.
 
     calc:
-        Energy, local energy, probabilities, and host reductions.
+        energy, local energy, probabilities, and host reductions.
 
     sr:
         SR/minSR matrices, RHS vectors, and linear solves.
-
-JAX x64 is always enabled because determinant bitstrings use uint64 and quantum
-chemistry calculations commonly require float64 arithmetic.
 """
 
 from typing import Any
@@ -58,19 +54,7 @@ def configure(
     calc: str | None = None,
     sr: str | None = None,
 ) -> None:
-    """Set the global precision profile.
-
-    Profiles:
-        single:
-            model = calc = sr = single
-
-        double:
-            model = calc = sr = double
-
-        mixed:
-            role precisions may be set independently. Defaults are
-            model=single, calc=double, sr=double.
-    """
+    """Set the global precision profile."""
     global _PROFILE, _ROLES
 
     profile = str(profile)
@@ -107,18 +91,7 @@ def configure(
 
 
 def dtype(role: str = "calc", kind: str = "real", *, host: bool = False) -> Any:
-    """Return the dtype assigned to a role.
-
-    Args:
-        role:
-            One of model, calc, or sr.
-
-        kind:
-            real or complex.
-
-        host:
-            If True, return a NumPy dtype. Otherwise return a JAX dtype.
-    """
+    """Return the dtype assigned to a role."""
     if role not in _ROLES:
         raise ValueError("role must be 'model', 'calc', or 'sr'")
 
@@ -136,19 +109,20 @@ def asarray(
     *,
     host: bool = False,
 ) -> Any:
-    """Cast an array or PyTree according to the precision policy.
-
-    If kind is None, each leaf keeps its real/complex character.
-    """
+    """Cast an array or PyTree according to the precision policy."""
     def cast_leaf(a):
-        arr = np.asarray(a) if host else jnp.asarray(a)
+        if host:
+            arr = np.asarray(a)
+            leaf_kind = kind
+            if leaf_kind is None:
+                leaf_kind = "complex" if np.issubdtype(arr.dtype, np.complexfloating) else "real"
+            return arr.astype(dtype(role, leaf_kind, host=True), copy=False)
 
+        arr = jnp.asarray(a)
         leaf_kind = kind
         if leaf_kind is None:
             leaf_kind = "complex" if jnp.issubdtype(arr.dtype, jnp.complexfloating) else "real"
-
-        out_dtype = dtype(role, leaf_kind, host=host)
-        return arr.astype(out_dtype, copy=False) if host else arr.astype(out_dtype)
+        return arr.astype(dtype(role, leaf_kind))
 
     return jax.tree.map(cast_leaf, x)
 

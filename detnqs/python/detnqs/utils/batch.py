@@ -1,18 +1,24 @@
 from __future__ import annotations
 
-"""Shape regularization for JAX kernels.
+"""Shape control for JAX kernels.
 
-This module centralizes the two shape-control patterns used by DetNQS.
+Two patterns are used throughout DetNQS.
 
 1. Streaming kernels
-   Functions such as model forward, Jrd, JVP, and VJP are separable over the
-   leading sample axis. They can be evaluated chunk by chunk and stitched
-   back together without changing the mathematical result.
+   The map is separable over the leading sample axis:
+
+       y_i = f_theta(x_i).
+
+   These kernels can be evaluated chunk by chunk without changing the result.
+   This is used for model forward passes, JVPs, and VJPs.
 
 2. Bucketed kernels
-   Functions such as dense SR/minSR are not separable over samples. They need
-   the full batch, but can be padded to a small set of power-of-two shapes to
-   reduce recompilation pressure.
+   The kernel couples samples inside the batch:
+
+       y = F_theta(x_1, ..., x_N).
+
+   These kernels are padded to a power-of-two bucket before JIT compilation.
+   Padding is only valid when the caller makes padded rows inactive.
 """
 
 from collections.abc import Callable
@@ -21,9 +27,8 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-type Tree = Any
+Tree = Any
 
 _CONFIG = {
     "chunk": 1024,
@@ -32,16 +37,7 @@ _CONFIG = {
 
 
 def configure(*, chunk: int | None = 1024, bucket_min: int = 512) -> None:
-    """Set the global shape policy.
-
-    Args:
-        chunk:
-            Leading-axis chunk size for streaming kernels.
-            Use None to disable streaming chunking.
-
-        bucket_min:
-            Minimum bucket size for non-streaming full-batch kernels.
-    """
+    """Set global shape policy for streaming and bucketed kernels."""
     if chunk is not None:
         chunk = int(chunk)
         if chunk <= 0:
@@ -57,23 +53,13 @@ def configure(*, chunk: int | None = 1024, bucket_min: int = 512) -> None:
 
 
 def apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
-    """Evaluate a leading-axis separable map.
-
-    Computes:
-        y = fun(theta, x)
-
-    If chunking is enabled, x is split along axis 0, each block is padded to
-    a fixed chunk size, evaluated under JIT, trimmed, and concatenated.
-    """
+    """Evaluate y_i = f_theta(x_i) over the leading axis."""
     chunk = _CONFIG["chunk"]
 
     if chunk is None:
         return _apply(fun, theta, x)
 
-    ys = [
-        _trim(_apply(fun, theta, xb), n, axis=0)
-        for xb, n in _chunks(x, chunk)
-    ]
+    ys = [_trim(_apply(fun, theta, xb), n, axis=0) for xb, n in _chunks(x, chunk)]
 
     if len(ys) == 1:
         return ys[0]
@@ -87,11 +73,7 @@ def jvp(
     tangent: Tree,
     x: Tree,
 ) -> tuple[Tree, Tree]:
-    """Evaluate a leading-axis separable JVP.
-
-    Computes:
-        y, dy = fun(theta, x), J(theta, x) tangent
-    """
+    """Evaluate y_i = f_theta(x_i) and dy_i = J_i tangent."""
     chunk = _CONFIG["chunk"]
 
     if chunk is None:
@@ -119,14 +101,7 @@ def vjp(
     x: Tree,
     cotangent: Tree,
 ) -> Tree:
-    """Evaluate a leading-axis separable VJP.
-
-    Computes:
-        g = J(theta, x)^T cotangent
-
-    For chunked execution, each block contributes one parameter cotangent and
-    the block cotangents are summed.
-    """
+    """Evaluate sum_i J_i^dagger cotangent_i."""
     chunk = _CONFIG["chunk"]
 
     if chunk is None:
@@ -147,13 +122,14 @@ def bucket(
     out_axes: int | tuple[int | None, ...] | None = 0,
     static_argnums: int | tuple[int, ...] = (),
 ) -> Tree:
-    """Run a non-streaming kernel on a power-of-two bucket.
+    """Run a non-streaming kernel on a padded power-of-two batch.
 
-    The first non-static argument with a mapped axis determines the true batch
-    size. All mapped arguments are padded to the same bucket size before JIT.
+    The first non-static mapped argument defines the true batch size N.
+    Mapped arguments are padded to
 
-    Use this for full-batch kernels whose samples interact with each other. 
-    Padding is valid only when padded rows are made inactive by the caller.
+        N_hat = 2 ** ceil(log2(max(N, bucket_min))).
+
+    Padded rows are not masked here. The caller must make them inactive.
     """
     if not isinstance(static_argnums, tuple):
         static_argnums = (int(static_argnums),)
@@ -161,23 +137,24 @@ def bucket(
     if not isinstance(in_axes, tuple):
         in_axes = (in_axes,) * len(args)
 
-    n = None
+    if len(in_axes) != len(args):
+        raise ValueError("in_axes length must match number of args")
 
+    n = None
     for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True)):
         if i in static_argnums or axis is None:
             continue
-
         n = int(jax.tree.leaves(arg)[0].shape[axis])
         break
 
     if n is None:
         return _jit(fun, static_argnums)(*args)
 
-    bucket_size = max(n, int(_CONFIG["bucket_min"]))
-    bucket_size = 1 << (bucket_size - 1).bit_length()
+    size = max(n, int(_CONFIG["bucket_min"]))
+    size = 1 << (size - 1).bit_length()
 
     padded = tuple(
-        arg if i in static_argnums or axis is None else _pad(arg, bucket_size, axis)
+        arg if i in static_argnums or axis is None else _pad(arg, size, axis)
         for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True))
     )
 
@@ -215,21 +192,15 @@ def _chunks(tree: Tree, size: int):
 
 def _pad(tree: Tree, size: int, axis: int) -> Tree:
     def pad_leaf(a):
-        a = np.asarray(jax.device_get(a))
-        pad_size = int(size) - int(a.shape[axis])
+        a = jnp.asarray(a)
+        pad = int(size) - int(a.shape[axis])
 
-        if pad_size <= 0:
-            return jnp.asarray(a)
+        if pad <= 0:
+            return a
 
-        shape = list(a.shape)
-        shape[axis] = int(size)
-
-        out = np.zeros(shape, dtype=a.dtype)
-        slc = [slice(None)] * a.ndim
-        slc[axis] = slice(0, a.shape[axis])
-        out[tuple(slc)] = a
-
-        return jnp.asarray(out)
+        width = [(0, 0)] * a.ndim
+        width[axis] = (0, pad)
+        return jnp.pad(a, width)
 
     return jax.tree.map(pad_leaf, tree)
 

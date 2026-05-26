@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, replace
-from typing import Any, Self
+from dataclasses import dataclass
+from dataclasses import replace
+from typing import Any
+from typing import Self
 
 import jax
 import jax.numpy as jnp
@@ -11,14 +13,25 @@ from libdet import Hamiltonian
 from scipy.sparse import csr_matrix
 
 from .. import utils
-from ..model.base import Model, to_psi
+from ..model.base import Model
+from ..model.base import to_psi
 from ..optimizer import Geometry
 from ..utils import precision
 
 
 @dataclass(frozen=True, slots=True)
 class ExactState:
-    """Exact variational state on the full fixed-particle determinant space."""
+    """Exact variational state on the full fixed-particle determinant space.
+
+    The determinant basis is enumerated once at initialization. The projected
+    Hamiltonian H[X, X] is stored as a CSR matrix.
+
+    Estimator:
+        E = <psi|H|psi> / <psi|psi>.
+
+    Variance:
+        var = ||H psi - E psi||^2 / <psi|psi>.
+    """
 
     model: Model
     params: Any
@@ -38,6 +51,7 @@ class ExactState:
         *,
         key: jax.Array,
     ) -> Self:
+        """Build the full determinant sector and initialize model parameters."""
         norb = int(hamiltonian.norb)
         nword = int(hamiltonian.nword)
         n_alpha = int(n_alpha)
@@ -79,89 +93,99 @@ class ExactState:
 
     @property
     def n_det(self) -> int:
+        """Number of determinants in the exact sector."""
         return int(self.dets.shape[0])
 
     def expect(self) -> tuple[Self, dict[str, float]]:
-        energy, norm, _, _ = self._energy_data(geometry=False)
-
-        return self, {
-            "energy": float(energy),
-            "norm": float(norm),
-            "n_det": float(self.n_det),
-        }
+        """Return exact energy statistics without a gradient."""
+        new_state, _, _, stats, _ = self._run(grad=False, geometry=False)
+        return new_state, stats
 
     def expect_and_grad(self, *, geometry: bool = False):
-        """Return energy, gradient, statistics, and optional optimizer geometry."""
+        """Return energy, gradient, statistics, and optional geometry."""
+        return self._run(grad=True, geometry=geometry)
 
-        energy, norm, cot, geom = self._energy_data(geometry=geometry)
+    def replace(self, **updates: Any) -> Self:
+        """Return a copy with updated fields."""
+        return replace(self, **updates)
 
-        grad = utils.vjp(
-            self.model.coord,
-            self.params,
-            self.dets,
-            utils.device(precision.asarray(cot, "model", "real", host=True)),
-        )
+    def _run(self, *, grad: bool, geometry: bool):
+        """Evaluate exact energy, optional gradient, and optional geometry."""
+        timer = utils.Timer()
+        pa = precision.asarray
+        rdtype = precision.dtype("calc", "real", host=True)
+
+        with timer("forward"):
+            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.dets)
+            jax.block_until_ready(logpsi_jax)
+            logpsi_h = utils.host(logpsi_jax)
+
+        with timer("reduce"):
+            psi = pa(
+                np.asarray(to_psi(logpsi_h)).reshape(-1),
+                "calc",
+                host=True,
+            )
+
+            hpsi = pa(
+                np.asarray(self.hmat.dot(psi)).reshape(-1),
+                "calc",
+                host=True,
+            )
+
+            norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
+            energy = float((np.vdot(psi, hpsi) / norm).real)
+
+            residual = hpsi - rdtype(energy) * psi
+            variance = float((np.vdot(residual, residual) / norm).real)
+
+        gradient = None
+        geom = None
+
+        if grad:
+            with timer("backward"):
+                # dE / dlogpsi = 2 / norm * conj(psi) * (H psi - E psi).
+                dlogpsi = rdtype(2.0 / norm) * np.conjugate(psi) * residual
+                cot = self.model.cotangent(logpsi_h, dlogpsi)
+
+                gradient = utils.vjp(
+                    self.model.coord,
+                    self.params,
+                    self.dets,
+                    utils.device(pa(cot, "model", "real", host=True)),
+                )
+                jax.block_until_ready(gradient)
+
+                if geometry:
+                    w = pa(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
+                    sqrt_w = np.sqrt(w)
+
+                    b_log = np.zeros_like(dlogpsi)
+                    np.divide(dlogpsi, sqrt_w, out=b_log, where=sqrt_w > 0.0)
+
+                    geom = Geometry(
+                        theta=self.params,
+                        coord=self.model.coord,
+                        x=self.dets,
+                        w=utils.device(w),
+                        b=utils.device(
+                            pa(
+                                self.model.cotangent(logpsi_h, b_log),
+                                "sr",
+                                "real",
+                                host=True,
+                            )
+                        ),
+                    )
 
         stats = {
             "energy": float(energy),
-            "norm": float(norm),
+            "variance": float(variance),
             "n_det": float(self.n_det),
+            "time_forward": 0.0,
+            "time_reduce": 0.0,
+            "time_backward": 0.0,
         }
+        stats.update(timer.stats())
 
-        return self, energy, grad, stats, geom
-
-    def replace(self, **updates: Any) -> Self:
-        return replace(self, **updates)
-
-    def _energy_data(self, *, geometry: bool):
-        """Compute exact energy data on the determinant space."""
-
-        real_dtype = precision.dtype("calc", "real", host=True)
-
-        logpsi = utils.apply(self.model.logpsi, self.params, self.dets)
-        logpsi_h = utils.host(logpsi)
-
-        psi = precision.asarray(
-            np.asarray(utils.host(to_psi(logpsi))).reshape(-1),
-            "calc",
-            host=True,
-        )
-        hpsi = precision.asarray(
-            np.asarray(self.hmat.dot(psi)).reshape(-1),
-            "calc",
-            host=True,
-        )
-
-        norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
-        energy = float((np.vdot(psi, hpsi) / norm).real)
-
-        # dE / dlogpsi = 2 / norm * conj(psi) * (H psi - E psi)
-        residual = hpsi - real_dtype(energy) * psi
-        dlogpsi = real_dtype(2.0 / norm) * np.conjugate(psi) * residual
-        cot = self.model.cotangent(logpsi_h, dlogpsi)
-
-        if not geometry:
-            return energy, norm, cot, None
-
-        w = precision.asarray(np.abs(psi) ** 2 / norm, "calc", "real", host=True)
-        sqrt_w = np.sqrt(w)
-
-        b_log = np.zeros_like(dlogpsi)
-        np.divide(dlogpsi, sqrt_w, out=b_log, where=sqrt_w > 0.0)
-
-        geom = Geometry(
-            theta=self.params,
-            coord=self.model.coord,
-            x=self.dets,
-            w=utils.device(precision.asarray(w, "sr", "real", host=True)),
-            b=utils.device(
-                precision.asarray(
-                    self.model.cotangent(logpsi_h, b_log),
-                    "sr",
-                    "real",
-                    host=True,
-                )
-            ),
-        )
-
-        return energy, norm, cot, geom
+        return self, energy, gradient, stats, geom

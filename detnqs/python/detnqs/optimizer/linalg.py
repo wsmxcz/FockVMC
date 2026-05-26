@@ -15,8 +15,7 @@ def solve_dense(
     *,
     fallback: bool = False,
 ) -> jax.Array:
-    """Solve (A + shift I) x = rhs for a Hermitian positive semidefinite A."""
-
+    """Solve (A + shift I) x = rhs for Hermitian positive semidefinite A."""
     matrix = jnp.asarray(matrix)
     rhs = jnp.asarray(rhs)
 
@@ -24,8 +23,10 @@ def solve_dense(
     real_dtype = jnp.real(jnp.zeros((), dtype=matrix.dtype)).dtype
     shift = jnp.asarray(shift, dtype=real_dtype)
 
-    eye = jnp.eye(matrix.shape[0], dtype=matrix.dtype)
-    system = matrix + shift.astype(matrix.dtype) * eye
+    system = matrix + shift.astype(matrix.dtype) * jnp.eye(
+        matrix.shape[0],
+        dtype=matrix.dtype,
+    )
 
     chol = jnp.linalg.cholesky(system)
     y = jsp_linalg.solve_triangular(chol, rhs, lower=True)
@@ -48,7 +49,7 @@ def solve_dense(
         inv = jnp.where(eigval > cutoff, 1.0 / eigval, 0.0)
         return eigvec @ (inv * (eigvec.conj().T @ vec))
 
-    return jax.lax.cond(ok, lambda args: x_chol, pinv_solve, (system, rhs))
+    return jax.lax.cond(ok, lambda _: x_chol, pinv_solve, (system, rhs))
 
 
 def solve_matvec(
@@ -58,10 +59,16 @@ def solve_matvec(
     maxiter: int = 64,
 ) -> jax.Array:
     """Solve A x = rhs by conjugate gradient."""
-
     rhs = jnp.asarray(rhs)
+
     real_dtype = jnp.real(jnp.zeros((), dtype=rhs.dtype)).dtype
     tol = 1.0e-4 if real_dtype == jnp.float32 else 1.0e-8
 
-    sol, _ = jsp_sparse.cg(matvec, rhs, tol=tol, atol=0.0, maxiter=maxiter)
+    sol, _ = jsp_sparse.cg(
+        matvec,
+        rhs,
+        tol=tol,
+        atol=0.0,
+        maxiter=int(maxiter),
+    )
     return sol

@@ -6,8 +6,11 @@ import numpy as np
 
 
 def normalize(w, mask=None) -> jax.Array:
-    """Return non-negative normalized weights."""
+    """Return non-negative weights normalized to sum one."""
     w = jnp.asarray(w)
+
+    if not jnp.issubdtype(w.dtype, jnp.inexact):
+        w = w.astype(jnp.float64)
 
     if mask is not None:
         w = jnp.where(jnp.asarray(mask), w, 0.0)
@@ -18,8 +21,11 @@ def normalize(w, mask=None) -> jax.Array:
 
 def segment_logsumexp(row_ptr: np.ndarray, values: np.ndarray, n_row: int) -> np.ndarray:
     """CSR row-wise logsumexp on host."""
+    row_ptr = np.asarray(row_ptr, dtype=np.int64)
     values = np.asarray(values)
+
     dtype = values.dtype if np.issubdtype(values.dtype, np.floating) else np.float64
+    values = values.astype(dtype, copy=False)
 
     out = np.full(int(n_row), -np.inf, dtype=dtype)
     count = np.diff(row_ptr)

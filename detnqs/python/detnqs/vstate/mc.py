@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from time import perf_counter
+from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any
 
 import jax
@@ -10,9 +10,12 @@ import libdet
 import numpy as np
 
 from detnqs import utils
-from ..model.base import Model, to_logabs, to_ratio
+from ..model.base import Model
+from ..model.base import to_logabs
+from ..model.base import to_ratio
 from ..optimizer import Geometry
-from ..sampler.mcmc import MCSampler, WalkerState
+from ..sampler.mcmc import MCSampler
+from ..sampler.mcmc import WalkerState
 from ..sampler.proposal import unique_dets
 from ..utils import precision
 from .base import VState
@@ -26,19 +29,16 @@ class MCState(VState):
         pi_theta(x) proportional to |psi_theta(x)|^2.
 
     Markov reference sampled by MCSampler:
-        eta_{theta, alpha}(x) proportional to |psi_theta(x)|^alpha.
+        eta_alpha(x) proportional to |psi_theta(x)|^alpha.
 
-    Observation kernel:
-        x ~ eta_alpha,  y ~ B(y|x).
+    Observation law:
+        x ~ eta_alpha, y ~ B(y|x).
 
-    Observed reference:
-        nu(y) = sum_x eta_alpha(x) B(y|x).
-
-    Unnormalised observed density:
-        r_nu(y) = sum_x |psi(x)|^alpha B(y|x).
+    Observed unnormalized density:
+        r_nu(y) = sum_x |psi_theta(x)|^alpha B(y|x).
 
     Importance weight:
-        omega(y) = |psi(y)|^2 / r_nu(y).
+        omega(y) = |psi_theta(y)|^2 / r_nu(y).
 
     The Hamiltonian graph is built on host by libdet. The neural model is
     evaluated once on a shared determinant pool and then reused by local
@@ -116,222 +116,210 @@ class MCState(VState):
         return self._run(grad=True, geometry=geometry)
 
     def _run(self, *, grad: bool, geometry: bool):
-        """One VMC pass: energy, optional gradient, optional geometry.
+        """Run one estimator pass.
 
-        Timing convention:
-            sampler:
+        Timing fields:
+            sample:
                 Counted-state bookkeeping, resampling, accept/reject, and
                 observation bookkeeping outside graph/model work.
 
             graph:
-                All libdet graph work: edges, degrees, sample_edges.
+                libdet graph work, including edges, degrees, and sample_edges.
 
             forward:
-                All neural-network forward evaluations.
+                neural-network forward evaluations.
 
-            reduction:
-                Local energy, lognu, weights, energy, and variance from
-                already-built graphs and evaluated logpsi values.
+            reduce:
+                local energy, lognu, weights, energy, and variance.
 
             backward:
                 VJP and optional geometry construction.
         """
-        t0 = perf_counter()
+        timer = utils.Timer()
         pa = precision.asarray
-
-        time_sampler = 0.0
-        time_graph = 0.0
-        time_forward = 0.0
-        time_reduction = 0.0
-        time_backward = 0.0
 
         sampler_state = self.sampler_state
 
         if self.sampler.reset_chains:
-            t = perf_counter()
-            sampler_state = self.sampler.init(
-                self.params,
-                self.hamiltonian,
-                self.model,
-                key=sampler_state.key,
-                n_alpha=int(self.n_alpha),
-                n_beta=int(self.n_beta),
-                init_method=self.init_method,
-            )
-            time_sampler += perf_counter() - t
+            with timer("sample"):
+                sampler_state = self.sampler.init(
+                    self.params,
+                    self.hamiltonian,
+                    self.model,
+                    key=sampler_state.key,
+                    n_alpha=int(self.n_alpha),
+                    n_beta=int(self.n_beta),
+                    init_method=self.init_method,
+                )
 
-        t = perf_counter()
         sampler_state, batch, sampler_stats = self.sampler.draw(
             self.params,
             self.hamiltonian,
             self.model,
             sampler_state,
         )
-        draw_wall = perf_counter() - t
 
-        time_sampler += float(sampler_stats.get("time_sampler", draw_wall))
-        time_graph += float(sampler_stats.get("time_graph", 0.0))
-        time_forward += float(sampler_stats.get("time_forward", 0.0))
+        timer.add("sample", sampler_stats.get("time_sample", 0.0))
+        timer.add("graph", sampler_stats.get("time_graph", 0.0))
+        timer.add("forward", sampler_stats.get("time_forward", 0.0))
 
-        t = perf_counter()
-        x = libdet.to_dets(batch.dets)
-        count_i64 = np.asarray(batch.count, dtype=np.int64)
-        count = pa(count_i64, "calc", "real", host=True)
-        n_row = int(x.shape[0])
+        with timer("reduce"):
+            row_dets = libdet.to_dets(batch.dets)
 
-        # Stochastic weak local-energy sampling advances only the RNG key.
-        seed = 0
-        if self.eloc_sample > 0:
-            key, subkey = jax.random.split(sampler_state.key)
-            seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
-            sampler_state = replace(sampler_state, key=key)
+            count_i64 = np.asarray(batch.count, dtype=np.int64)
+            count = pa(count_i64, "calc", "real", host=True)
+            n_row = int(row_dets.shape[0])
 
-        time_reduction += perf_counter() - t
+            # Weak local-energy sampling advances only the RNG key.
+            seed = 0
+            if self.eloc_sample > 0:
+                key, subkey = jax.random.split(sampler_state.key)
+                seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
+                sampler_state = replace(sampler_state, key=key)
 
-        t = perf_counter()
-        graph = self._graph(x, seed=seed)
-        time_graph += perf_counter() - t
+        with timer("graph"):
+            graph = self._graph(row_dets, seed=seed)
 
-        t = perf_counter()
-        logpsi_pool = utils.host(utils.apply(self.model.logpsi, self.params, graph["pool"]))
-        time_forward += perf_counter() - t
+        with timer("forward"):
+            logpsi_pool_jax = utils.apply(
+                self.model.logpsi,
+                self.params,
+                graph["pool_dets"],
+            )
+            jax.block_until_ready(logpsi_pool_jax)
+            logpsi_pool = utils.host(logpsi_pool_jax)
 
-        t = perf_counter()
+        with timer("reduce"):
+            row_logpsi = jax.tree.map(lambda a: a[graph["row_uid"]], logpsi_pool)
 
-        row_logpsi = jax.tree.map(lambda a: a[graph["row_uid"]], logpsi_pool)
-        row_logabs = pa(
-            np.asarray(to_logabs(row_logpsi)).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
+            row_logabs = pa(
+                np.asarray(to_logabs(row_logpsi)).reshape(-1),
+                "calc",
+                "real",
+                host=True,
+            )
 
-        lognu = self._lognu(
-            row_logabs=row_logabs,
-            logpsi_pool=logpsi_pool,
-            graph=graph,
-            n_row=n_row,
-        )
+            lognu = self._lognu(
+                row_logabs=row_logabs,
+                logpsi_pool=logpsi_pool,
+                graph=graph,
+                n_row=n_row,
+            )
 
-        eloc, n_weak_edges = self._eloc(
-            logpsi_pool=logpsi_pool,
-            graph=graph,
-            n_row=n_row,
-        )
+            eloc, n_edge_weak = self._eloc(
+                logpsi_pool=logpsi_pool,
+                graph=graph,
+                n_row=n_row,
+            )
 
-        w, ess, ess_unique = self._weights(
-            count=count,
-            row_logabs=row_logabs,
-            lognu=lognu,
-        )
+            w, ess = self._weights(
+                count=count,
+                row_logabs=row_logabs,
+                lognu=lognu,
+            )
 
-        energy = float(np.real(np.dot(w, eloc)))
-        residual = eloc - energy
-        variance = float(np.real(np.dot(w, np.abs(residual) ** 2)))
-
-        time_reduction += perf_counter() - t
+            energy = float(np.real(np.dot(w, eloc)))
+            residual = eloc - energy
+            variance = float(np.real(np.dot(w, np.abs(residual) ** 2)))
 
         gradient = None
         geom = None
 
         if grad:
-            t = perf_counter()
-            rdtype = precision.dtype("calc", "real", host=True)
+            with timer("backward"):
+                rdtype = precision.dtype("calc", "real", host=True)
 
-            # Energy gradient:
-            #
-            #   grad E = 2 Re <(E_loc - E) O>,
-            #
-            # where O is the log-derivative of the wave function.
-            dlogpsi = rdtype(2.0) * w * residual
-            cot = self.model.cotangent(row_logpsi, pa(dlogpsi, "calc", host=True))
+                # grad E = 2 Re <(E_loc - E) O>.
+                dlogpsi = rdtype(2.0) * w * residual
+                cot = self.model.cotangent(row_logpsi, pa(dlogpsi, "calc", host=True))
 
-            gradient = utils.vjp(
-                self.model.coord,
-                self.params,
-                x,
-                utils.device(pa(cot, "model", "real", host=True)),
-            )
-
-            if geometry:
-                # Sample-space right hand side for minSR / AdamSR:
-                #
-                #   b = 2 sqrt(w) (E_loc - E).
-                b_log = rdtype(2.0) * np.sqrt(w) * residual
-
-                geom = Geometry(
-                    theta=self.params,
-                    coord=self.model.coord,
-                    x=x,
-                    w=utils.device(pa(w, "sr", "real", host=True)),
-                    b=utils.device(
-                        pa(
-                            self.model.cotangent(row_logpsi, b_log),
-                            "sr",
-                            "real",
-                            host=True,
-                        )
-                    ),
+                gradient = utils.vjp(
+                    self.model.coord,
+                    self.params,
+                    row_dets,
+                    utils.device(pa(cot, "model", "real", host=True)),
                 )
+                jax.block_until_ready(gradient)
 
-            time_backward += perf_counter() - t
+                if geometry:
+                    # Sample-space right hand side for minSR / AdamSR:
+                    # b = 2 sqrt(w) (E_loc - E).
+                    b_log = rdtype(2.0) * np.sqrt(w) * residual
+
+                    geom = Geometry(
+                        theta=self.params,
+                        coord=self.model.coord,
+                        x=row_dets,
+                        w=utils.device(pa(w, "sr", "real", host=True)),
+                        b=utils.device(
+                            pa(
+                                self.model.cotangent(row_logpsi, b_log),
+                                "sr",
+                                "real",
+                                host=True,
+                            )
+                        ),
+                    )
 
         new_state = replace(self, sampler_state=sampler_state)
 
-        n_chains = max(1, int(np.sum(sampler_state.count)))
-        n_unique_chains = int(sampler_state.dets.shape[0])
-        n_samples = int(np.sum(count_i64))
-        n_unique_samples = int(n_row)
+        n_sample = int(np.sum(count_i64))
+        n_unique = int(n_row)
 
-        chain_unique_ratio = float(n_unique_chains / n_chains)
-        sample_unique_ratio = float(n_unique_samples / max(1, n_samples))
+        ess_frac = float(ess / max(1, n_sample))
+        unique_frac = float(n_unique / max(1, n_sample))
+
+        # Observation sampling and lognu construction both touch blur edges.
+        n_edge_blur = float(
+            sampler_stats.get("n_edge_blur", 0.0) + graph["n_edge_blur"]
+        )
 
         stats = {
             "energy": float(energy),
             "variance": float(variance),
             "accept": float(sampler_stats.get("accept", sampler_state.accept)),
             "ess": float(ess),
-            "ess_unique": float(ess_unique),
-            
-            "unique_chains": float(n_unique_chains),
-            "chain_uratio": float(chain_unique_ratio),
-            "unique_samples": float(n_unique_samples),
-            "sample_uratio": float(sample_unique_ratio),
-            "n_eval": float(graph["pool"].shape[0]),
-
-            "time_sampler": float(time_sampler),
-            "time_graph": float(time_graph),
-            "time_forward": float(time_forward),
-            "time_reduction": float(time_reduction),
-            "time_backward": float(time_backward),
-            "time_total": float(perf_counter() - t0),
+            "ess_frac": ess_frac,
+            "n_sample": float(n_sample),
+            "n_unique": float(n_unique),
+            "unique_frac": unique_frac,
+            "n_eval": float(graph["pool_dets"].shape[0]),
+            "n_edge_eloc": float(graph["n_edge_eloc"]),
+            "n_edge_weak": float(n_edge_weak),
+            "n_edge_proposal": float(sampler_stats.get("n_edge_proposal", 0.0)),
+            "n_edge_blur": n_edge_blur,
         }
+        stats.update(timer.stats())
 
         return new_state, energy, gradient, stats, geom
 
-    def _graph(self, x: np.ndarray, *, seed: int) -> dict[str, Any]:
-        """Build blur/local-energy graphs and one shared model-eval pool."""
-        n_row = int(x.shape[0])
+    def _graph(self, row_dets: np.ndarray, *, seed: int) -> dict[str, Any]:
+        """Build blur/local-energy graphs and one shared model-evaluation pool."""
+        n_row = int(row_dets.shape[0])
         rdtype = precision.dtype("calc", "real", host=True)
         pa = precision.asarray
 
         blur_eps = float(
-            self.sampler.proposal_eps if self.sampler.blur_eps is None else self.sampler.blur_eps
+            self.sampler.proposal_eps
+            if self.sampler.blur_eps is None
+            else self.sampler.blur_eps
         )
         eloc_eps = float(self.eloc_eps1)
         beta = float(np.clip(self.sampler.blur, 0.0, 1.0))
 
-        eloc_graph = self.hamiltonian.edges(x, eloc_eps)
-        eloc_col_dets = np.ascontiguousarray(np.asarray(eloc_graph.col_dets, dtype=np.uint64))
+        eloc_graph = self.hamiltonian.edges(row_dets, eloc_eps)
+        eloc_col_dets = np.ascontiguousarray(
+            np.asarray(eloc_graph.col_dets, dtype=np.uint64)
+        )
 
-        parts: list[np.ndarray] = [np.ascontiguousarray(x), eloc_col_dets]
+        parts: list[np.ndarray] = [np.ascontiguousarray(row_dets), eloc_col_dets]
         labels: list[str] = ["row", "eloc"]
 
         blur_graph = None
         blur_uid_label = ""
         blur_row_weight = np.zeros(n_row, dtype=rdtype)
         blur_source_weight = np.empty(0, dtype=rdtype)
-        n_blur_edges = 0
+        n_edge_blur = 0
 
         if beta > 0.0:
             same_graph = blur_eps == eloc_eps
@@ -340,7 +328,7 @@ class MCState(VState):
                 blur_graph = eloc_graph
                 blur_uid_label = "eloc"
             else:
-                blur_graph = self.hamiltonian.edges(x, blur_eps)
+                blur_graph = self.hamiltonian.edges(row_dets, blur_eps)
                 blur_col_dets = np.ascontiguousarray(
                     np.asarray(blur_graph.col_dets, dtype=np.uint64)
                 )
@@ -348,7 +336,8 @@ class MCState(VState):
                 labels.append("blur")
                 blur_uid_label = "blur"
 
-            n_blur_edges = int(np.asarray(blur_graph.h).size)
+            n_edge_blur = int(np.asarray(blur_graph.h).size)
+
             blur_row_weight = pa(
                 np.asarray(blur_graph.row_weight),
                 "calc",
@@ -356,8 +345,8 @@ class MCState(VState):
                 host=True,
             )
 
-            # For lognu(y), edges are traversed as y -> x, so the source
-            # degree d_B(x) is needed for every column determinant.
+            # For lognu(y), edges are traversed as y -> x, so d_B(x) is
+            # needed for every source determinant in the blur graph.
             blur_col_dets_for_deg = (
                 eloc_col_dets
                 if same_graph
@@ -365,6 +354,7 @@ class MCState(VState):
             )
 
             deg = self.hamiltonian.degrees(blur_col_dets_for_deg, blur_eps)
+
             blur_source_weight = pa(
                 np.asarray(deg.row_weight),
                 "calc",
@@ -376,7 +366,7 @@ class MCState(VState):
 
         if self.eloc_sample > 0:
             weak = self.hamiltonian.sample_edges(
-                x,
+                row_dets,
                 int(self.eloc_sample),
                 eps1=float(self.eloc_eps1),
                 eps2=float(self.eloc_eps2),
@@ -388,31 +378,31 @@ class MCState(VState):
                 parts.append(weak_dets)
                 labels.append("weak")
 
-        pool, _, inv = unique_dets(np.concatenate(parts, axis=0))
+        pool_dets, _, inv = unique_dets(np.concatenate(parts, axis=0))
 
         starts: dict[str, int] = {}
         offset = 0
 
-        for label, part in zip(labels, parts):
+        for label, part in zip(labels, parts, strict=True):
             starts[label] = offset
             offset += int(part.shape[0])
 
-        uid: dict[str, np.ndarray] = {
-            label: inv[starts[label] : starts[label] + parts[i].shape[0]].astype(np.int64)
-            for i, label in enumerate(labels)
+        uid = {
+            label: inv[starts[label] : starts[label] + part.shape[0]].astype(np.int64)
+            for label, part in zip(labels, parts, strict=True)
         }
 
         return {
-            "pool": pool,
+            "pool_dets": pool_dets,
             "row_uid": uid["row"],
             "blur_graph": blur_graph,
             "blur_uid": uid.get(blur_uid_label, np.empty(0, dtype=np.int64)),
             "blur_row_weight": blur_row_weight,
             "blur_source_weight": blur_source_weight,
-            "n_blur_edges": n_blur_edges,
+            "n_edge_blur": n_edge_blur,
             "eloc_graph": eloc_graph,
             "eloc_uid": uid["eloc"],
-            "n_eloc_edges": int(np.asarray(eloc_graph.h).size),
+            "n_edge_eloc": int(np.asarray(eloc_graph.h).size),
             "weak": weak,
             "weak_uid": uid.get("weak", np.empty(0, dtype=np.int64)),
         }
@@ -425,7 +415,7 @@ class MCState(VState):
         graph: dict[str, Any],
         n_row: int,
     ) -> np.ndarray:
-        """Compute log unnormalised observed reference density r_nu(y).
+        """Compute log r_nu(y).
 
         For beta > 0:
 
@@ -433,7 +423,7 @@ class MCState(VState):
                 (1 - beta_y) |psi(y)|^alpha
                 + beta sum_x |psi(x)|^alpha |H_xy| / d_B(x).
 
-        If d_B(y) = 0, beta_y = 0 and the stay term has coefficient 1.
+        If d_B(y) = 0, beta_y = 0 and the stay coefficient is one.
         """
         pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
@@ -466,7 +456,9 @@ class MCState(VState):
         blur_uid = graph["blur_uid"]
 
         source_logabs = pa(
-            np.asarray(to_logabs(jax.tree.map(lambda a: a[blur_uid], logpsi_pool))).reshape(-1),
+            np.asarray(
+                to_logabs(jax.tree.map(lambda a: a[blur_uid], logpsi_pool))
+            ).reshape(-1),
             "calc",
             "real",
             host=True,
@@ -503,7 +495,7 @@ class MCState(VState):
 
             E_loc(x) = H_xx + sum_y H_xy psi(y) / psi(x).
 
-        Optional weak part is added as an unbiased sampled correction.
+        The optional weak part is an unbiased sampled correction.
         """
         pa = precision.asarray
 
@@ -537,14 +529,14 @@ class MCState(VState):
 
         weak = graph["weak"]
         weak_uid = graph["weak_uid"]
-        n_weak_edges = 0
+        n_edge_weak = 0
 
         if weak is not None and weak_uid.size > 0:
             weak_rows = np.asarray(weak.rows, dtype=np.int64)
             weak_h = pa(np.asarray(weak.h), "calc", "real", host=True)
             weak_pgen = pa(np.asarray(weak.pgen), "calc", "real", host=True)
             weak_count = pa(np.asarray(weak.counts), "calc", "real", host=True)
-            n_weak_edges = int(weak_h.size)
+            n_edge_weak = int(weak_h.size)
 
             ratio = pa(
                 np.asarray(
@@ -558,14 +550,15 @@ class MCState(VState):
             )
 
             denom = np.maximum(
-                weak_pgen * precision.dtype("calc", "real", host=True)(self.eloc_sample),
+                weak_pgen
+                * precision.dtype("calc", "real", host=True)(self.eloc_sample),
                 precision.tiny("calc"),
             )
 
             eloc = eloc.astype(np.result_type(eloc, ratio), copy=False)
             np.add.at(eloc, weak_rows, (weak_count * weak_h / denom) * ratio)
 
-        return pa(eloc, "calc", host=True), n_weak_edges
+        return pa(eloc, "calc", host=True), n_edge_weak
 
     def _weights(
         self,
@@ -573,17 +566,18 @@ class MCState(VState):
         count: np.ndarray,
         row_logabs: np.ndarray,
         lognu: np.ndarray,
-    ) -> tuple[np.ndarray, float, float]:
-        """Normalise importance weights and compute ESS diagnostics.
+    ) -> tuple[np.ndarray, float]:
+        """Normalize importance weights.
 
         For each unique observed determinant y_i:
 
-            u_i = |psi(y_i)|^2 / r_nu(y_i),
+            u_i    = |psi(y_i)|^2 / r_nu(y_i),
             mass_i = count_i u_i,
-            w_i = mass_i / sum_j mass_j.
+            w_i    = mass_i / sum_j mass_j.
 
-        ``ess`` is the effective sample size over counted samples.
-        ``ess_unique`` is the support-level inverse participation ratio.
+        ESS is computed over counted samples:
+
+            ESS = (sum_i count_i u_i)^2 / sum_i count_i u_i^2.
         """
         pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
@@ -606,7 +600,7 @@ class MCState(VState):
 
         w = pa(mass / max(z, float(tiny)), "calc", "real", host=True)
 
-        ess = float(z * z / max(float(np.dot(count * u, u)), float(tiny)))
-        ess_unique = float(rdtype(1.0) / max(float(np.dot(w, w)), float(tiny)))
+        ess_denom = float(np.dot(count * u, u))
+        ess = float(z * z / max(ess_denom, float(tiny)))
 
-        return w, ess, ess_unique
+        return w, ess

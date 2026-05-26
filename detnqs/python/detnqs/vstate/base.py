@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any
+from typing import Protocol
 
 from ..model.base import Model
 
@@ -8,7 +9,21 @@ Tree = Any
 
 
 class VState(Protocol):
-    """Variational-state protocol consumed by the driver."""
+    """Variational-state protocol consumed by the VMC driver.
+
+    A variational state owns the physics and estimator. The driver only needs
+    three operations:
+
+        expect:
+            Return scalar estimator statistics without a gradient.
+
+        expect_and_grad:
+            Return energy, gradient, statistics, and optional optimizer
+            geometry.
+
+        replace:
+            Return a copy with updated fields, usually updated parameters.
+    """
 
     model: Model
     params: Tree

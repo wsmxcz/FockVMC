@@ -29,8 +29,10 @@ __all__ = [
 def to_dets(dets: Any) -> np.ndarray:
     """Return a contiguous determinant batch with shape (N, 2, nword)."""
     arr = np.asarray(dets, dtype=np.uint64)
+
     if arr.ndim != 3 or arr.shape[1] != 2 or arr.shape[2] <= 0:
         raise ValueError("determinants must have shape (N, 2, nword)")
+
     return np.ascontiguousarray(arr)
 
 
@@ -44,9 +46,11 @@ class Hamiltonian:
     @classmethod
     def rhf(cls, h1: Any, eri: Any, *, ecore: float = 0.0) -> "Hamiltonian":
         """Build a Hamiltonian from RHF one- and two-body integrals."""
-        h1_arr  = np.ascontiguousarray(np.asarray(h1,  dtype=np.float64))
+        h1_arr = np.ascontiguousarray(np.asarray(h1, dtype=np.float64))
         eri_arr = np.ascontiguousarray(np.asarray(eri, dtype=np.float64).reshape(-1))
+
         raw = _RawHamiltonian.rhf(h1_arr, eri_arr, float(ecore))
+
         return cls(raw, float(ecore))
 
     @property
@@ -62,12 +66,14 @@ class Hamiltonian:
         return self._ecore
 
     def hij(self, bra: Any, ket: Any) -> float:
-        """Return <bra|H|ket>. Each input must hold exactly one determinant."""
-        bras = to_dets(bra)
-        kets = to_dets(ket)
-        if bras.shape[0] != 1 or kets.shape[0] != 1:
+        """Return <bra|H|ket>. Each input must contain exactly one determinant."""
+        bra_arr = to_dets(bra)
+        ket_arr = to_dets(ket)
+
+        if bra_arr.shape[0] != 1 or ket_arr.shape[0] != 1:
             raise ValueError("hij expects exactly one bra and one ket determinant")
-        return float(self._raw.hij(bras, kets))
+
+        return float(self._raw.hij(bra_arr, ket_arr))
 
     def diags(self, dets: Any) -> np.ndarray:
         """Return diagonal elements H_ii for a determinant batch."""
@@ -83,9 +89,9 @@ class Hamiltonian:
     ) -> np.ndarray:
         """Return unique screened bra determinants connected from source kets.
 
-        With coeffs, screening uses |H_ai c_i| >= eps over i in kets.
+        With coeffs, screening uses |H_ai c_i| >= eps.
         Without coeffs, screening uses |H_ai| >= eps.
-        The exclude space defaults to kets.
+        The exclude space defaults to kets in the C++ layer when omitted.
         """
         ket_arr = to_dets(kets)
 
@@ -94,11 +100,19 @@ class Hamiltonian:
             coeff_arr = np.ascontiguousarray(
                 np.asarray(coeffs, dtype=np.float64).reshape(-1)
             )
+
             if coeff_arr.shape[0] != ket_arr.shape[0]:
                 raise ValueError("coeffs length must match number of kets")
 
         exclude_arr = None if exclude is None else to_dets(exclude)
-        out = self._raw.expand(ket_arr, float(eps), coeff_arr, exclude_arr)
+
+        out = self._raw.expand(
+            ket_arr,
+            float(eps),
+            coeff_arr,
+            exclude_arr,
+        )
+
         return np.array(out.dets, dtype=np.uint64, copy=True)
 
     def project(
@@ -111,30 +125,38 @@ class Hamiltonian:
     ) -> Projection:
         """Return screened H[bras, kets] @ coeffs.
 
-        bras define the output axis; kets and coeffs are aligned.
+        bras define the output axis.
+        kets and coeffs are aligned.
         Contributions with absolute value below eps are skipped.
         """
-        bras_arr  = to_dets(bras)
-        kets_arr  = to_dets(kets)
+        bras_arr = to_dets(bras)
+        kets_arr = to_dets(kets)
         coeff_arr = np.ascontiguousarray(
             np.asarray(coeffs, dtype=np.float64).reshape(-1)
         )
+
         if coeff_arr.shape[0] != kets_arr.shape[0]:
             raise ValueError("coeffs length must match number of kets")
-        return self._raw.project(bras_arr, kets_arr, coeff_arr, float(eps))
+
+        return self._raw.project(
+            bras_arr,
+            kets_arr,
+            coeff_arr,
+            float(eps),
+        )
 
     def edges(self, dets: Any, eps: float) -> Edges:
         """Return screened row connectivity for each determinant in dets."""
         return self._raw.edges(to_dets(dets), float(eps))
-    
+
     def degrees(self, dets: Any, eps: float) -> Degrees:
         """Return screened row degrees and absolute Hamiltonian row weights.
 
-        This is the lightweight counterpart of edges(). It computes only
-        row_nnz and row_weight without materializing connected determinants.
+        This is the lightweight counterpart of edges(). It computes row_nnz
+        and row_weight without materializing connected determinants.
         """
         return self._raw.degrees(to_dets(dets), float(eps))
-    
+
     def matrix(
         self,
         bras: Any,
@@ -144,19 +166,21 @@ class Hamiltonian:
     ) -> Matrix | csr_matrix:
         """Return exact sparse H[bras, kets].
 
-        When raw=True the internal Matrix object is returned directly.
+        When raw=True, the internal Matrix object is returned.
         Otherwise a scipy csr_matrix is returned.
         """
         bras_arr = to_dets(bras)
         kets_arr = bras_arr if kets is None else to_dets(kets)
+
         out = self._raw.matrix(bras_arr, kets_arr)
 
         if raw:
             return out
 
-        row_ptr = np.array(out.row_ptr, dtype=np.int32,   copy=True)
-        col     = np.array(out.col,     dtype=np.int32,   copy=True)
-        data    = np.array(out.h,       dtype=np.float64, copy=True)
+        row_ptr = np.array(out.row_ptr, dtype=np.int32, copy=True)
+        col = np.array(out.col, dtype=np.int32, copy=True)
+        data = np.array(out.h, dtype=np.float64, copy=True)
+
         return csr_matrix((data, col, row_ptr), shape=tuple(out.shape))
 
     def matvec(
@@ -168,24 +192,34 @@ class Hamiltonian:
     ) -> np.ndarray:
         """Return exact H[bras, kets] @ x.
 
-        kets defaults to bras when omitted.
+        kets defaults to bras.
         A 2D x is forwarded to the C++ matmat kernel.
         """
         bras_arr = to_dets(bras)
         kets_arr = bras_arr if kets is None else to_dets(kets)
-        x_arr    = np.asarray(x, dtype=np.float64)
+        x_arr = np.asarray(x, dtype=np.float64)
 
         if x_arr.ndim == 1:
             x_vec = np.ascontiguousarray(x_arr)
+
             if x_vec.shape[0] != kets_arr.shape[0]:
                 raise ValueError("x length must match number of kets")
-            return np.asarray(self._raw.matvec(bras_arr, kets_arr, x_vec), dtype=np.float64)
+
+            return np.asarray(
+                self._raw.matvec(bras_arr, kets_arr, x_vec),
+                dtype=np.float64,
+            )
 
         if x_arr.ndim == 2:
             x_mat = np.ascontiguousarray(x_arr)
+
             if x_mat.shape[0] != kets_arr.shape[0]:
                 raise ValueError("X must have shape (n_ket, n_rhs)")
-            return np.asarray(self._raw.matmat(bras_arr, kets_arr, x_mat), dtype=np.float64)
+
+            return np.asarray(
+                self._raw.matmat(bras_arr, kets_arr, x_mat),
+                dtype=np.float64,
+            )
 
         raise ValueError("x must be a 1D vector or a 2D matrix")
 
@@ -198,10 +232,13 @@ class Hamiltonian:
         eps2: float = 0.0,
         seed: int = 0,
     ) -> EdgeSamples:
-        """Return row statistics and optional sampled edges.
+        """Return window row statistics and optional sampled edges.
 
-        The sampled window is eps2 <= |H_ai| < eps1.  Passing eps1=np.inf
-        samples from the full screened row |H_ai| >= eps2.
+        The sampled window is eps2 <= |H_ai| < eps1.
+
+        If counts is omitted, only row_nnz and row_weight are returned.
+        If counts is provided, edges are sampled with probability
+        |H_ai| / row_weight within the window.
         """
         det_arr = to_dets(dets)
 
@@ -213,10 +250,17 @@ class Hamiltonian:
                 counts_arr = np.ascontiguousarray(
                     np.asarray(counts, dtype=np.int64).reshape(-1)
                 )
+
                 if counts_arr.shape[0] != det_arr.shape[0]:
                     raise ValueError("counts length must match number of determinants")
 
-        return self._raw.sample_edges(det_arr, counts_arr, float(eps1), float(eps2), int(seed))
+        return self._raw.sample_edges(
+            det_arr,
+            counts_arr,
+            float(eps1),
+            float(eps2),
+            int(seed),
+        )
 
     def sample_shell(
         self,
@@ -234,12 +278,12 @@ class Hamiltonian:
 
         kets and coeffs define the source wave function.
         A scalar counts broadcasts to all kets.
-        Sampled external determinants are returned in ShellSamples.dets.
         """
-        ket_arr   = to_dets(kets)
+        ket_arr = to_dets(kets)
         coeff_arr = np.ascontiguousarray(
             np.asarray(coeffs, dtype=np.float64).reshape(-1)
         )
+
         if coeff_arr.shape[0] != ket_arr.shape[0]:
             raise ValueError("coeffs length must match number of kets")
 
@@ -249,10 +293,12 @@ class Hamiltonian:
             counts_arr = np.ascontiguousarray(
                 np.asarray(counts, dtype=np.int64).reshape(-1)
             )
+
             if counts_arr.shape[0] != ket_arr.shape[0]:
                 raise ValueError("counts length must match number of kets")
 
         exclude_arr = None if exclude is None else to_dets(exclude)
+
         return self._raw.sample_shell(
             ket_arr,
             coeff_arr,

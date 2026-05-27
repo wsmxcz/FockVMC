@@ -34,11 +34,25 @@ class MCState(VState):
     Observation law:
         x ~ eta_alpha, y ~ B(y|x).
 
-    Observed unnormalized density:
-        r_nu(y) = sum_x |psi_theta(x)|^alpha B(y|x).
+    Degree-tilted blurred density:
+        The observed sample carries a source mass s(x).  For Hamiltonian blur,
+
+            s(x) = d_B(x) if d_B(x) > 0 else 1.
+
+        The unnormalized density used for reweighting is
+
+            r_tilde(y) = sum_x |psi(x)|^alpha s(x) B(y|x).
+
+        For non-empty Hamiltonian blur rows this becomes
+
+            r_tilde(y)
+              = (1 - beta) d_B(y) |psi(y)|^alpha
+                + beta sum_x |H_yx| |psi(x)|^alpha,
+
+        which only requires the first-order Hamiltonian graph of y.
 
     Importance weight:
-        omega(y) = |psi_theta(y)|^2 / r_nu(y).
+        omega(y) = sample_mass(y) |psi_theta(y)|^2 / r_tilde(y).
 
     The Hamiltonian graph is built on host by libdet. The neural model is
     evaluated once on a shared determinant pool and then reused by local
@@ -124,13 +138,13 @@ class MCState(VState):
                 observation bookkeeping outside graph/model work.
 
             graph:
-                libdet graph work, including edges, degrees, and sample_edges.
+                libdet graph work, including edges and sampled weak edges.
 
             forward:
                 neural-network forward evaluations.
 
             reduce:
-                local energy, lognu, weights, energy, and variance.
+                local energy, log-density, weights, energy, and variance.
 
             backward:
                 VJP and optional geometry construction.
@@ -168,6 +182,13 @@ class MCState(VState):
 
             count_i64 = np.asarray(batch.count, dtype=np.int64)
             count = pa(count_i64, "calc", "real", host=True)
+            sample_mass = pa(
+                np.asarray(batch.mass),
+                "calc",
+                "real",
+                host=True,
+            )
+
             n_row = int(row_dets.shape[0])
 
             # Weak local-energy sampling advances only the RNG key.
@@ -214,6 +235,7 @@ class MCState(VState):
 
             w, ess = self._weights(
                 count=count,
+                sample_mass=sample_mass,
                 row_logabs=row_logabs,
                 lognu=lognu,
             )
@@ -269,7 +291,8 @@ class MCState(VState):
         ess_frac = float(ess / max(1, n_sample))
         unique_frac = float(n_unique / max(1, n_sample))
 
-        # Observation sampling and lognu construction both touch blur edges.
+        # Observation sampling and log-density construction both touch blur
+        # edges, but neither performs second-order degree traversal.
         n_edge_blur = float(
             sampler_stats.get("n_edge_blur", 0.0) + graph["n_edge_blur"]
         )
@@ -294,7 +317,17 @@ class MCState(VState):
         return new_state, energy, gradient, stats, geom
 
     def _graph(self, row_dets: np.ndarray, *, seed: int) -> dict[str, Any]:
-        """Build blur/local-energy graphs and one shared model-evaluation pool."""
+        """Build blur/local-energy graphs and one shared model-evaluation pool.
+
+        The blur density uses the degree-tilted form
+
+            r_tilde(y)
+              = (1 - beta) d_B(y) |psi(y)|^alpha
+                + beta sum_x |H_yx| |psi(x)|^alpha.
+
+        Therefore only the first-order graph of row_dets is needed.  No
+        degrees() call on blur_col_dets is required.
+        """
         n_row = int(row_dets.shape[0])
         rdtype = precision.dtype("calc", "real", host=True)
         pa = precision.asarray
@@ -318,7 +351,6 @@ class MCState(VState):
         blur_graph = None
         blur_uid_label = ""
         blur_row_weight = np.zeros(n_row, dtype=rdtype)
-        blur_source_weight = np.empty(0, dtype=rdtype)
         n_edge_blur = 0
 
         if beta > 0.0:
@@ -340,23 +372,6 @@ class MCState(VState):
 
             blur_row_weight = pa(
                 np.asarray(blur_graph.row_weight),
-                "calc",
-                "real",
-                host=True,
-            )
-
-            # For lognu(y), edges are traversed as y -> x, so d_B(x) is
-            # needed for every source determinant in the blur graph.
-            blur_col_dets_for_deg = (
-                eloc_col_dets
-                if same_graph
-                else np.ascontiguousarray(np.asarray(blur_graph.col_dets, dtype=np.uint64))
-            )
-
-            deg = self.hamiltonian.degrees(blur_col_dets_for_deg, blur_eps)
-
-            blur_source_weight = pa(
-                np.asarray(deg.row_weight),
                 "calc",
                 "real",
                 host=True,
@@ -398,7 +413,6 @@ class MCState(VState):
             "blur_graph": blur_graph,
             "blur_uid": uid.get(blur_uid_label, np.empty(0, dtype=np.int64)),
             "blur_row_weight": blur_row_weight,
-            "blur_source_weight": blur_source_weight,
             "n_edge_blur": n_edge_blur,
             "eloc_graph": eloc_graph,
             "eloc_uid": uid["eloc"],
@@ -415,15 +429,25 @@ class MCState(VState):
         graph: dict[str, Any],
         n_row: int,
     ) -> np.ndarray:
-        """Compute log r_nu(y).
+        """Compute the unnormalized observed density.
 
-        For beta > 0:
+        Without blur:
 
-            r_nu(y) =
-                (1 - beta_y) |psi(y)|^alpha
-                + beta sum_x |psi(x)|^alpha |H_xy| / d_B(x).
+            r(y) = |psi(y)|^alpha.
 
-        If d_B(y) = 0, beta_y = 0 and the stay coefficient is one.
+        With degree-tilted Hamiltonian blur:
+
+            r_tilde(y)
+              = s(y) B(y|y) |psi(y)|^alpha
+                + beta sum_x |H_yx| |psi(x)|^alpha,
+
+        where s(y)=d_B(y) for non-empty blur rows and s(y)=1 for empty rows.
+        Thus
+
+            stay scale = (1 - beta) d_B(y), if d_B(y) > 0,
+                         1,                 if d_B(y) = 0.
+
+        The off-diagonal term has no source degree denominator.
         """
         pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
@@ -439,12 +463,19 @@ class MCState(VState):
             return logrho_row
 
         row_weight = pa(graph["blur_row_weight"], "calc", "real", host=True)
-        beta_y = np.where(row_weight > 0.0, beta, rdtype(0.0))
-        stay = rdtype(1.0) - beta_y
+
+        stay_scale = np.where(
+            row_weight > 0.0,
+            (rdtype(1.0) - beta) * row_weight,
+            rdtype(1.0),
+        )
 
         log_stay = np.full(n_row, -np.inf, dtype=rdtype)
-        stay_mask = stay > 0.0
-        log_stay[stay_mask] = np.log(stay[stay_mask]) + logrho_row[stay_mask]
+        stay_mask = stay_scale > 0.0
+        log_stay[stay_mask] = (
+            np.log(np.maximum(stay_scale[stay_mask], tiny))
+            + logrho_row[stay_mask]
+        )
 
         row_ptr = np.asarray(blur_graph.row_ptr, dtype=np.int64)
         col = np.asarray(blur_graph.col, dtype=np.int64)
@@ -464,17 +495,13 @@ class MCState(VState):
             host=True,
         )
 
-        source_weight = pa(graph["blur_source_weight"], "calc", "real", host=True)
-
         abs_h = np.abs(h)
-        source_deg = source_weight[col]
-        valid = (source_deg > 0.0) & (abs_h > 0.0)
+        valid = abs_h > 0.0
 
         terms = np.full(h.size, -np.inf, dtype=rdtype)
         terms[valid] = (
             alpha * source_logabs[col[valid]]
             + np.log(np.maximum(abs_h[valid], tiny))
-            - np.log(np.maximum(source_deg[valid], tiny))
         )
 
         log_blur = np.log(beta) + utils.segment_logsumexp(row_ptr, terms, n_row)
@@ -564,6 +591,7 @@ class MCState(VState):
         self,
         *,
         count: np.ndarray,
+        sample_mass: np.ndarray,
         row_logabs: np.ndarray,
         lognu: np.ndarray,
     ) -> tuple[np.ndarray, float]:
@@ -571,17 +599,23 @@ class MCState(VState):
 
         For each unique observed determinant y_i:
 
-            u_i    = |psi(y_i)|^2 / r_nu(y_i),
-            mass_i = count_i u_i,
+            u_i    = |psi(y_i)|^2 / r_tilde(y_i),
+            mass_i = sample_mass_i u_i,
             w_i    = mass_i / sum_j mass_j.
 
-        ESS is computed over counted samples:
+        With identity observation, sample_mass_i == count_i and this reduces
+        to the usual alpha-reference reweighting.
 
-            ESS = (sum_i count_i u_i)^2 / sum_i count_i u_i^2.
+        The ESS reported here is a grouped-mass diagnostic.  It is exact when
+        all observations merged into the same determinant have the same source
+        mass, and otherwise remains a stable concentration diagnostic.
         """
         pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
+
+        count = pa(count, "calc", "real", host=True)
+        sample_mass = pa(sample_mass, "calc", "real", host=True)
 
         logu = rdtype(2.0) * row_logabs - lognu
         finite = np.isfinite(logu)
@@ -592,7 +626,7 @@ class MCState(VState):
         u = np.zeros_like(logu, dtype=rdtype)
         u[finite] = np.exp(logu[finite] - rdtype(np.max(logu[finite])))
 
-        mass = count * u
+        mass = sample_mass * u
         z = float(mass.sum())
 
         if not np.isfinite(z) or z <= 0.0:
@@ -600,7 +634,10 @@ class MCState(VState):
 
         w = pa(mass / max(z, float(tiny)), "calc", "real", host=True)
 
-        ess_denom = float(np.dot(count * u, u))
+        # Approximate the per-observation denominator from grouped total mass.
+        # This reduces to the old exact formula when sample_mass == count.
+        safe_count = np.maximum(count, rdtype(1.0))
+        ess_denom = float(np.sum((sample_mass * sample_mass / safe_count) * u * u))
         ess = float(z * z / max(ess_denom, float(tiny)))
 
         return w, ess

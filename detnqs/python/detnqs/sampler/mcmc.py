@@ -21,10 +21,23 @@ class SampleBatch:
 
     The Markov chain state is x. The observed determinant is y after the
     optional observation kernel B(y|x).
+
+    count:
+        Number of observed walkers at each determinant.
+
+    mass:
+        Statistical mass entering the reweighted estimator.  For identity
+        observation, mass == count.  For degree-tilted blurred observation,
+
+            mass(y) = sum_{i: Y_i = y} s(X_i),
+
+        where s(x) = d_B(x) for non-empty blur rows and s(x) = 1 for empty
+        blur rows.
     """
 
     dets: np.ndarray
     count: np.ndarray
+    mass: np.ndarray
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +237,7 @@ class MCSampler:
 
         det_parts: list[np.ndarray] = []
         count_parts: list[np.ndarray] = []
+        mass_parts: list[np.ndarray] = []
 
         remaining = int(self.n_samples)
         n_chains = int(self.n_chains)
@@ -253,7 +267,7 @@ class MCSampler:
                     base_count = sample_count[keep]
                     state = replace(state, key=key)
 
-            state, obs_dets, obs_count, n_edge = self._observe(
+            state, obs_dets, obs_count, obs_mass, n_edge = self._observe(
                 hamiltonian,
                 state,
                 base_dets,
@@ -264,6 +278,7 @@ class MCSampler:
             with timer("sample"):
                 det_parts.append(obs_dets)
                 count_parts.append(obs_count)
+                mass_parts.append(obs_mass)
                 n_edge_blur += n_edge
 
             # Observations are separated by sweep_steps raw Metropolis moves.
@@ -284,13 +299,21 @@ class MCSampler:
         with timer("sample"):
             obs_dets, _, inv = unique_dets(np.concatenate(det_parts, axis=0))
             raw_count = np.concatenate(count_parts).astype(np.int64, copy=False)
+            raw_mass = np.concatenate(mass_parts).astype(
+                precision.dtype("calc", "real", host=True),
+                copy=False,
+            )
 
             obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
+            obs_mass = np.zeros(obs_dets.shape[0], dtype=raw_mass.dtype)
+
             np.add.at(obs_count, inv, raw_count)
+            np.add.at(obs_mass, inv, raw_mass)
 
             keep = obs_count > 0
             obs_dets = np.ascontiguousarray(obs_dets[keep])
             obs_count = obs_count[keep]
+            obs_mass = obs_mass[keep]
 
             accept = accepted / proposed if proposed else 0.0
 
@@ -303,7 +326,7 @@ class MCSampler:
 
         return (
             replace(state, accept=accept),
-            SampleBatch(dets=obs_dets, count=obs_count),
+            SampleBatch(dets=obs_dets, count=obs_count, mass=obs_mass),
             stats,
         )
 
@@ -359,7 +382,9 @@ class MCSampler:
 
             # Avoid duplicate model evaluations for proposals already present
             # in the current counted support.
-            _, first, inv_lookup = unique_dets(np.concatenate([dets, batch.dets], axis=0))
+            _, first, inv_lookup = unique_dets(
+                np.concatenate([dets, batch.dets], axis=0)
+            )
             prop_first = first[inv_lookup[n_row:]]
             known = prop_first < n_row
 
@@ -430,18 +455,36 @@ class MCSampler:
         base_count: np.ndarray,
         *,
         timer: utils.Timer | None = None,
-    ) -> tuple[WalkerState, np.ndarray, np.ndarray, int]:
-        """Apply the observation kernel B_beta(y|x) to counted base walkers."""
+    ) -> tuple[WalkerState, np.ndarray, np.ndarray, np.ndarray, int]:
+        """Apply the observation kernel B_beta(y|x) to counted base walkers.
+
+        With blur disabled, this returns identity observations with mass=count.
+
+        With Hamiltonian blur enabled, observations are still drawn from
+
+            B(y|x) = (1 - beta_x) delta_xy
+                   + beta_x |H_yx| / d_B(x),
+
+        but each realized observation carries source mass
+
+            s(x) = d_B(x) if d_B(x) > 0 else 1.
+
+        This degree-tilted mass is what removes the need for second-order
+        degree lookups when the observed density is evaluated in MCState.
+        """
         timer = utils.Timer() if timer is None else timer
+        rdtype = precision.dtype("calc", "real", host=True)
 
         with timer("sample"):
             beta = float(np.clip(self.blur, 0.0, 1.0))
+            base_count = base_count.astype(np.int64, copy=False)
 
             if beta <= 0.0:
                 return (
                     state,
                     np.ascontiguousarray(base_dets),
-                    base_count.astype(np.int64, copy=False),
+                    base_count,
+                    base_count.astype(rdtype, copy=False),
                     0,
                 )
 
@@ -455,67 +498,79 @@ class MCSampler:
             blur_eps = float(
                 self.proposal_eps if self.blur_eps is None else self.blur_eps
             )
-            base_count = base_count.astype(np.int64, copy=False)
 
+            # Draw attempted blur moves first. Rows with d_B=0 are corrected
+            # after row weights have been computed by sample_edges.
             move = rng.binomial(base_count, beta).astype(np.int64)
             stay = base_count - move
 
-            parts = [base_dets]
-            counts = [stay]
-
-            n_edge_blur = 0
-            move_rows = np.flatnonzero(move > 0)
-
-        if move_rows.size > 0:
-            with timer("sample"):
-                move_dets = np.ascontiguousarray(base_dets[move_rows])
-                move_count = move[move_rows].astype(np.int64, copy=False)
-
-            with timer("graph"):
-                sample = hamiltonian.sample_edges(
-                    move_dets,
-                    move_count,
-                    eps1=np.inf,
-                    eps2=blur_eps,
-                    seed=seed,
-                )
-
-            with timer("sample"):
-                n_edge_blur = int(np.asarray(sample.h).size)
-
-                row_weight = precision.asarray(
-                    np.asarray(sample.row_weight),
-                    "calc",
-                    "real",
-                    host=True,
-                )
-
-                # If K(.|x) is empty, the attempted blur move becomes a stay.
-                dead = row_weight <= 0.0
-                if dead.any():
-                    stay[move_rows[dead]] += move_count[dead]
-
-                if n_edge_blur > 0:
-                    sampled_dets = np.ascontiguousarray(
-                        np.asarray(sample.dets, dtype=np.uint64)
-                    )
-
-                    if sampled_dets.shape[0] > 0:
-                        sampled_count = np.asarray(sample.counts, dtype=np.int64)
-
-                        obs_dets, _, obs_inv = unique_dets(sampled_dets)
-                        obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
-                        np.add.at(obs_count, obs_inv, sampled_count)
-
-                        parts.append(obs_dets)
-                        counts.append(obs_count)
+        with timer("graph"):
+            sample = hamiltonian.sample_edges(
+                base_dets,
+                move,
+                eps1=np.inf,
+                eps2=blur_eps,
+                seed=seed,
+            )
 
         with timer("sample"):
+            row_weight = precision.asarray(
+                np.asarray(sample.row_weight),
+                "calc",
+                "real",
+                host=True,
+            )
+
+            # Empty blur rows use beta_x=0 and source mass s(x)=1.
+            dead = row_weight <= 0.0
+            if dead.any():
+                stay[dead] += move[dead]
+                move[dead] = 0
+
+            source_mass = np.where(row_weight > 0.0, row_weight, rdtype(1.0))
+            stay_mass = stay.astype(rdtype, copy=False) * source_mass
+
+            parts = [base_dets]
+            counts = [stay]
+            masses = [stay_mass]
+
+            n_edge_blur = int(np.asarray(sample.h).size)
+
+            if n_edge_blur > 0:
+                sampled_dets = np.ascontiguousarray(
+                    np.asarray(sample.dets, dtype=np.uint64)
+                )
+
+                if sampled_dets.shape[0] > 0:
+                    sampled_count = np.asarray(sample.counts, dtype=np.int64)
+                    sampled_rows = np.asarray(sample.rows, dtype=np.int64)
+
+                    sampled_mass_raw = (
+                        sampled_count.astype(rdtype, copy=False)
+                        * source_mass[sampled_rows]
+                    )
+
+                    obs_dets, _, obs_inv = unique_dets(sampled_dets)
+
+                    obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
+                    obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
+
+                    np.add.at(obs_count, obs_inv, sampled_count)
+                    np.add.at(obs_mass, obs_inv, sampled_mass_raw)
+
+                    parts.append(obs_dets)
+                    counts.append(obs_count)
+                    masses.append(obs_mass)
+
             obs_dets, _, inv = unique_dets(np.concatenate(parts, axis=0))
             raw_count = np.concatenate(counts).astype(np.int64, copy=False)
+            raw_mass = np.concatenate(masses).astype(rdtype, copy=False)
 
             obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
+            obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
+
             np.add.at(obs_count, inv, raw_count)
+            np.add.at(obs_mass, inv, raw_mass)
 
             keep = obs_count > 0
 
@@ -523,5 +578,6 @@ class MCSampler:
             replace(state, key=key),
             np.ascontiguousarray(obs_dets[keep]),
             obs_count[keep],
+            obs_mass[keep],
             n_edge_blur,
         )

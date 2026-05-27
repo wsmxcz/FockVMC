@@ -164,6 +164,11 @@ class MCState(VState):
                     n_alpha=int(self.n_alpha),
                     n_beta=int(self.n_beta),
                     init_method=self.init_method,
+                    alpha=(
+                        float(sampler_state.alpha)
+                        if self.sampler.alpha == "adaptive"
+                        else None
+                    ),
                 )
 
         sampler_state, batch, sampler_stats = self.sampler.draw(
@@ -172,6 +177,8 @@ class MCState(VState):
             self.model,
             sampler_state,
         )
+
+        alpha_step = float(sampler_state.alpha)
 
         timer.add("sample", sampler_stats.get("time_sample", 0.0))
         timer.add("graph", sampler_stats.get("time_graph", 0.0))
@@ -225,6 +232,7 @@ class MCState(VState):
                 logpsi_pool=logpsi_pool,
                 graph=graph,
                 n_row=n_row,
+                alpha=alpha_step,
             )
 
             eloc, n_edge_weak = self._eloc(
@@ -283,6 +291,14 @@ class MCState(VState):
                         ),
                     )
 
+        sampler_state = self._adaptive(
+            sampler_state=sampler_state,
+            row_logabs=row_logabs,
+            eloc=eloc,
+            energy=energy,
+            w=w,
+        )
+
         new_state = replace(self, sampler_state=sampler_state)
 
         n_sample = int(np.sum(count_i64))
@@ -311,6 +327,7 @@ class MCState(VState):
             "n_edge_weak": float(n_edge_weak),
             "n_edge_proposal": float(sampler_stats.get("n_edge_proposal", 0.0)),
             "n_edge_blur": n_edge_blur,
+            "alpha": alpha_step,
         }
         stats.update(timer.stats())
 
@@ -428,6 +445,7 @@ class MCState(VState):
         logpsi_pool: Any,
         graph: dict[str, Any],
         n_row: int,
+        alpha: float,
     ) -> np.ndarray:
         """Compute the unnormalized observed density.
 
@@ -453,7 +471,7 @@ class MCState(VState):
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
-        alpha = rdtype(self.sampler.alpha)
+        alpha = rdtype(alpha)
         beta = rdtype(np.clip(self.sampler.blur, 0.0, 1.0))
 
         logrho_row = pa(alpha * row_logabs, "calc", "real", host=True)
@@ -641,3 +659,79 @@ class MCState(VState):
         ess = float(z * z / max(ess_denom, float(tiny)))
 
         return w, ess
+
+    def _adaptive(
+        self,
+        *,
+        sampler_state: WalkerState,
+        row_logabs: np.ndarray,
+        eloc: np.ndarray,
+        energy: float,
+        w: np.ndarray,
+    ) -> WalkerState:
+        """Update adaptive alpha by residual-tilted moment matching."""
+        if self.sampler.alpha != "adaptive":
+            return sampler_state
+
+        pa = precision.asarray
+        rdtype = precision.dtype("calc", "real", host=True)
+        tiny = rdtype(precision.tiny("calc"))
+
+        alpha = float(np.clip(float(sampler_state.alpha), 0.0, 2.0))
+
+        ell = pa(np.asarray(row_logabs).reshape(-1), "calc", "real", host=True)
+        weight = pa(np.asarray(w).reshape(-1), "calc", "real", host=True)
+        residual = pa(
+            np.asarray(np.abs(eloc - energy)).reshape(-1),
+            "calc",
+            "real",
+            host=True,
+        )
+
+        valid = np.isfinite(ell) & np.isfinite(weight) & np.isfinite(residual)
+        valid &= weight > 0.0
+
+        if not valid.any():
+            return replace(sampler_state, alpha=alpha)
+
+        # Residual-tilted Born law: q*(x) proportional to pi(x)|E_loc(x)-E|.
+        target_mass = np.where(valid, weight * residual, rdtype(0.0))
+        z_target = float(np.sum(target_mass))
+
+        if not np.isfinite(z_target) or z_target <= float(tiny):
+            return replace(sampler_state, alpha=alpha)
+
+        m_target = float(np.sum(target_mass * ell) / z_target)
+
+        # Estimate E_{q_alpha}[ell] from Born-weighted rows.
+        log_ratio = (rdtype(alpha) - rdtype(2.0)) * ell
+        log_ratio = np.where(valid, log_ratio, -np.inf)
+        shift = float(np.max(log_ratio[valid]))
+
+        q_mass = np.zeros_like(weight, dtype=rdtype)
+        q_mass[valid] = weight[valid] * np.exp(log_ratio[valid] - rdtype(shift))
+
+        z_q = float(np.sum(q_mass))
+        if not np.isfinite(z_q) or z_q <= float(tiny):
+            return replace(sampler_state, alpha=alpha)
+
+        m_q = float(np.sum(q_mass * ell) / z_q)
+        centered = ell - rdtype(m_q)
+        var_q = float(np.sum(q_mass * centered * centered) / z_q)
+
+        # Fisher/Newton denominator with a small scale-aware ridge.
+        ridge = float(rdtype(1.0e-8) * (rdtype(1.0) + abs(rdtype(m_q))) ** 2)
+
+        if not np.isfinite(var_q) or var_q <= ridge:
+            return replace(sampler_state, alpha=alpha)
+
+        step = (m_target - m_q) / (var_q + ridge)
+
+        if not np.isfinite(step):
+            return replace(sampler_state, alpha=alpha)
+
+        # Conservative trust region; the bounds are semantic, not tunable knobs.
+        step = float(np.clip(step, -0.01, 0.01))
+        alpha_next = float(np.clip(alpha + step, 0.0, 2.0))
+
+        return replace(sampler_state, alpha=alpha_next)

@@ -50,8 +50,10 @@ class WalkerState:
     Internal representation:
         {(x_u, m_u, log|psi(x_u)|)}, with sum_u m_u = n_chains.
 
-    Walker identities are not stored because the VMC estimators used here
-    depend only on the current counted empirical measure.
+    alpha:
+        Numeric exponent used by the reference law in this state.  When the
+        sampler is configured with alpha="adaptive", MCState updates this
+        scalar after each estimator pass.
     """
 
     key: jax.Array
@@ -59,6 +61,7 @@ class WalkerState:
     count: np.ndarray
     logabs: np.ndarray
     accept: float = 0.0
+    alpha: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +82,11 @@ class MCSampler:
         walker. thermal_steps are run after initialization/reset,
         discard_steps before each production draw, and sweep_steps separate
         consecutive observations.
+
+    alpha:
+        A numeric value gives a fixed reference exponent.  The string
+        "adaptive" initializes the exponent at 1.0 and lets MCState update the
+        numeric value stored in WalkerState.alpha.
     """
 
     n_samples: int = 1024
@@ -89,7 +97,7 @@ class MCSampler:
     sweep_steps: int = 1
     reset_chains: bool = False
 
-    alpha: float = 1.0
+    alpha: float | str = 1.0
     proposal: str = "ham"
     proposal_eps: float = 1.0e-3
 
@@ -107,6 +115,7 @@ class MCSampler:
         n_alpha: int,
         n_beta: int,
         init_method: str | Any = "hf",
+        alpha: float | None = None,
     ) -> WalkerState:
         """Initialize counted walkers and run thermalization.
 
@@ -118,6 +127,13 @@ class MCSampler:
         n_chains = int(self.n_chains)
         if n_chains <= 0:
             raise ValueError("n_chains must be positive")
+
+        if isinstance(self.alpha, str):
+            if self.alpha != "adaptive":
+                raise ValueError("alpha must be a float or 'adaptive'")
+            alpha_value = 1.0 if alpha is None else float(alpha)
+        else:
+            alpha_value = float(self.alpha)
 
         nword = int(hamiltonian.nword)
         norb = int(hamiltonian.norb)
@@ -177,7 +193,13 @@ class MCSampler:
             host=True,
         )
 
-        state = WalkerState(key=key, dets=dets, count=count, logabs=logabs)
+        state = WalkerState(
+            key=key,
+            dets=dets,
+            count=count,
+            logabs=logabs,
+            alpha=alpha_value,
+        )
 
         accepted = 0
         proposed = 0
@@ -200,6 +222,13 @@ class MCSampler:
         if int(self.n_samples) <= 0:
             raise ValueError("n_samples must be positive")
 
+        if isinstance(self.alpha, str):
+            if self.alpha != "adaptive":
+                raise ValueError("alpha must be a float or 'adaptive'")
+            alpha_value = float(state.alpha)
+        else:
+            alpha_value = float(self.alpha)
+
         timer = utils.Timer()
 
         # Parameters change during optimization. Refresh cached log|psi| before
@@ -216,6 +245,7 @@ class MCSampler:
                     "real",
                     host=True,
                 ),
+                alpha=alpha_value,
             )
 
         accepted = 0
@@ -357,6 +387,7 @@ class MCSampler:
             seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
             rng = np.random.default_rng(seed)
 
+            alpha = rdtype(state.alpha)
             dets = state.dets
             count = state.count.astype(np.int64, copy=False)
             logabs = pa(state.logabs, "calc", "real", host=True)
@@ -407,7 +438,7 @@ class MCSampler:
 
         with timer("sample"):
             log_ratio = (
-                rdtype(self.alpha) * (prop_logabs[batch.dst] - logabs[batch.src])
+                alpha * (prop_logabs[batch.dst] - logabs[batch.src])
                 + pa(batch.log_qratio, "calc", "real", host=True)
             )
 
@@ -443,6 +474,7 @@ class MCSampler:
                 count=merged_count[keep],
                 logabs=pa(all_logabs[first][keep], "calc", "real", host=True),
                 accept=accepted / proposed if proposed else 0.0,
+                alpha=float(state.alpha),
             )
 
         return next_state, accepted, proposed, int(batch.n_edge)

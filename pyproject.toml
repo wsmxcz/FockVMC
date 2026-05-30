@@ -16,7 +16,6 @@ license-files = ["LICENSE"]
 
 authors = [
   { name = "Zheng (Alex) Che", email = "wsmxcz@gmail.com" },
-  { name = "libdet Authors" },
 ]
 
 dependencies = [

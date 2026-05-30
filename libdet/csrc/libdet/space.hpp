@@ -18,13 +18,10 @@ namespace libdet {
 /*
  * Determinant-driven finite-space search.
  *
- * This file answers the question:
+ * Given a bra and a finite ket space, find connected kets in that space.
  *
- *   Given a bra determinant and a finite ket space, which kets are connected
- *   by the Hamiltonian?
- *
- * It should be used for matrix, matvec, matmat, and projection. It should not
- * be used to generate an unrestricted external neighborhood.
+ * Used by matrix, matvec, matmat, and project. This path does not generate
+ * unrestricted external bras.
  */
 
 [[nodiscard]] inline u64 orb_fp(int p) noexcept {
@@ -145,42 +142,42 @@ private:
     std::vector<KeyId> items_;
 };
 
-struct SelSingle {
-    i32 id = -1;
-    int occ = 0;
-    int vir = 0;
+struct HalfSingle {
+    i32 spin = -1;
+    int i = 0;
+    int a = 0;
     double sign = 1.0;
 };
 
-struct SelDouble {
-    i32 id = -1;
-    int occ_i = 0;
-    int occ_j = 0;
-    int vir_a = 0;
-    int vir_b = 0;
+struct HalfDouble {
+    i32 spin = -1;
+    int i = 0;
+    int j = 0;
+    int a = 0;
+    int b = 0;
     double sign = 1.0;
 };
 
-struct Mate {
-    i32 other = -1;
-    i32 det = -1;
+struct SpinMate {
+    i32 spin = -1;
+    i32 ket = -1;
 };
 
-class DetSpace {
+class KetSpace {
 public:
-    explicit DetSpace(DetBatchView dets)
-        : nword(dets.nword),
+    explicit KetSpace(DetBatchView kets)
+        : nword(kets.nword),
           alpha(nword, 0x0f1234ab5678cdefULL),
           beta(nword, 0x1a2b3c4d5e6f7081ULL) {
-        copy_batch(det_words, dets);
+        copy_batch(ket_words, kets);
 
-        aid.resize(dets.n_dets);
-        bid.resize(dets.n_dets);
+        alpha_id.resize(kets.n_dets);
+        beta_id.resize(kets.n_dets);
 
-        for (std::size_t idx = 0; idx < dets.n_dets; ++idx) {
-            const DetRef d = dets[idx];
-            aid[idx] = alpha.find_or_add(d.alpha());
-            bid[idx] = beta.find_or_add(d.beta());
+        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+            const DetRef ket = kets[iket];
+            alpha_id[iket] = alpha.find_or_add(ket.alpha());
+            beta_id[iket] = beta.find_or_add(ket.beta());
         }
 
         build_mates();
@@ -188,61 +185,61 @@ public:
         build_residues();
     }
 
-    [[nodiscard]] std::span<const Mate> alpha_mates(i32 alpha_id) const noexcept {
-        const std::size_t lo = alpha_off[static_cast<std::size_t>(alpha_id)];
-        const std::size_t hi = alpha_off[static_cast<std::size_t>(alpha_id) + 1u];
+    [[nodiscard]] std::span<const SpinMate> alpha_mates(i32 alpha_spin) const noexcept {
+        const std::size_t lo = alpha_off[static_cast<std::size_t>(alpha_spin)];
+        const std::size_t hi = alpha_off[static_cast<std::size_t>(alpha_spin) + 1u];
 
-        return {alpha_pair.data() + lo, hi - lo};
+        return {alpha_mate.data() + lo, hi - lo};
     }
 
-    [[nodiscard]] std::span<const Mate> beta_mates(i32 beta_id) const noexcept {
-        const std::size_t lo = beta_off[static_cast<std::size_t>(beta_id)];
-        const std::size_t hi = beta_off[static_cast<std::size_t>(beta_id) + 1u];
+    [[nodiscard]] std::span<const SpinMate> beta_mates(i32 beta_spin) const noexcept {
+        const std::size_t lo = beta_off[static_cast<std::size_t>(beta_spin)];
+        const std::size_t hi = beta_off[static_cast<std::size_t>(beta_spin) + 1u];
 
-        return {beta_pair.data() + lo, hi - lo};
+        return {beta_mate.data() + lo, hi - lo};
     }
 
-    [[nodiscard]] i32 find_with_alpha(i32 alpha_id, i32 beta_id) const noexcept {
-        const auto s = alpha_mates(alpha_id);
+    [[nodiscard]] i32 find_with_alpha(i32 alpha_spin, i32 beta_spin) const noexcept {
+        const auto mates = alpha_mates(alpha_spin);
 
         const auto it = std::lower_bound(
-            s.begin(),
-            s.end(),
-            beta_id,
-            [](const Mate& e, i32 x) { return e.other < x; }
+            mates.begin(),
+            mates.end(),
+            beta_spin,
+            [](const SpinMate& e, i32 x) { return e.spin < x; }
         );
 
-        return it == s.end() || it->other != beta_id ? -1 : it->det;
+        return it == mates.end() || it->spin != beta_spin ? -1 : it->ket;
     }
 
-    [[nodiscard]] i32 find_with_beta(i32 beta_id, i32 alpha_id) const noexcept {
-        const auto s = beta_mates(beta_id);
+    [[nodiscard]] i32 find_with_beta(i32 beta_spin, i32 alpha_spin) const noexcept {
+        const auto mates = beta_mates(beta_spin);
 
         const auto it = std::lower_bound(
-            s.begin(),
-            s.end(),
-            alpha_id,
-            [](const Mate& e, i32 x) { return e.other < x; }
+            mates.begin(),
+            mates.end(),
+            alpha_spin,
+            [](const SpinMate& e, i32 x) { return e.spin < x; }
         );
 
-        return it == s.end() || it->other != alpha_id ? -1 : it->det;
+        return it == mates.end() || it->spin != alpha_spin ? -1 : it->ket;
     }
 
     u32 nword = 0;
 
-    std::vector<u64> det_words;
+    std::vector<u64> ket_words;
 
     SpinSet alpha;
     SpinSet beta;
 
-    std::vector<i32> aid;
-    std::vector<i32> bid;
+    std::vector<i32> alpha_id;
+    std::vector<i32> beta_id;
 
     std::vector<std::size_t> alpha_off;
-    std::vector<Mate> alpha_pair;
+    std::vector<SpinMate> alpha_mate;
 
     std::vector<std::size_t> beta_off;
-    std::vector<Mate> beta_pair;
+    std::vector<SpinMate> beta_mate;
 
     Residues alpha1;
     Residues beta1;
@@ -254,26 +251,26 @@ private:
         alpha_off.assign(alpha.size() + 1u, 0u);
         beta_off.assign(beta.size() + 1u, 0u);
 
-        for (std::size_t idx = 0; idx < aid.size(); ++idx) {
-            ++alpha_off[static_cast<std::size_t>(aid[idx]) + 1u];
-            ++beta_off[static_cast<std::size_t>(bid[idx]) + 1u];
+        for (std::size_t iket = 0; iket < alpha_id.size(); ++iket) {
+            ++alpha_off[static_cast<std::size_t>(alpha_id[iket]) + 1u];
+            ++beta_off[static_cast<std::size_t>(beta_id[iket]) + 1u];
         }
 
         std::partial_sum(alpha_off.begin(), alpha_off.end(), alpha_off.begin());
         std::partial_sum(beta_off.begin(), beta_off.end(), beta_off.begin());
 
-        alpha_pair.resize(aid.size());
-        beta_pair.resize(bid.size());
+        alpha_mate.resize(alpha_id.size());
+        beta_mate.resize(beta_id.size());
 
         std::vector<std::size_t> ap = alpha_off;
         std::vector<std::size_t> bp = beta_off;
 
-        for (std::size_t idx = 0; idx < aid.size(); ++idx) {
-            alpha_pair[ap[static_cast<std::size_t>(aid[idx])]++] =
-                Mate{bid[idx], static_cast<i32>(idx)};
+        for (std::size_t iket = 0; iket < alpha_id.size(); ++iket) {
+            alpha_mate[ap[static_cast<std::size_t>(alpha_id[iket])]++] =
+                SpinMate{beta_id[iket], static_cast<i32>(iket)};
 
-            beta_pair[bp[static_cast<std::size_t>(bid[idx])]++] =
-                Mate{aid[idx], static_cast<i32>(idx)};
+            beta_mate[bp[static_cast<std::size_t>(beta_id[iket])]++] =
+                SpinMate{alpha_id[iket], static_cast<i32>(iket)};
         }
     }
 
@@ -283,9 +280,9 @@ private:
             const auto hi = static_cast<std::ptrdiff_t>(alpha_off[id + 1u]);
 
             std::sort(
-                alpha_pair.begin() + lo,
-                alpha_pair.begin() + hi,
-                [](const Mate& x, const Mate& y) { return x.other < y.other; }
+                alpha_mate.begin() + lo,
+                alpha_mate.begin() + hi,
+                [](const SpinMate& x, const SpinMate& y) { return x.spin < y.spin; }
             );
         }
 
@@ -294,9 +291,9 @@ private:
             const auto hi = static_cast<std::ptrdiff_t>(beta_off[id + 1u]);
 
             std::sort(
-                beta_pair.begin() + lo,
-                beta_pair.begin() + hi,
-                [](const Mate& x, const Mate& y) { return x.other < y.other; }
+                beta_mate.begin() + lo,
+                beta_mate.begin() + hi,
+                [](const SpinMate& x, const SpinMate& y) { return x.spin < y.spin; }
             );
         }
     }
@@ -343,7 +340,7 @@ private:
     }
 };
 
-struct SpaceWork {
+struct BraWork {
     void ensure_seen(std::size_t na, std::size_t nb) {
         if (seen_a.size() < na) {
             seen_a.assign(na, 0u);
@@ -373,8 +370,8 @@ struct SpaceWork {
     void ensure_cross(std::size_t nb) {
         if (cross_b.size() < nb) {
             cross_b.assign(nb, 0u);
-            cross_occ.assign(nb, 0);
-            cross_vir.assign(nb, 0);
+            cross_i.assign(nb, 0);
+            cross_a.assign(nb, 0);
             cross_sign.assign(nb, 1.0);
             cross_stamp = 1u;
         }
@@ -395,30 +392,30 @@ struct SpaceWork {
     u32 stamp_b = 1u;
 
     std::vector<u32> cross_b;
-    std::vector<int> cross_occ;
-    std::vector<int> cross_vir;
+    std::vector<int> cross_i;
+    std::vector<int> cross_a;
     std::vector<double> cross_sign;
     u32 cross_stamp = 1u;
 
-    std::vector<SelSingle> alpha_single;
-    std::vector<SelSingle> beta_single;
-    std::vector<SelDouble> alpha_double;
-    std::vector<SelDouble> beta_double;
+    std::vector<HalfSingle> alpha_single;
+    std::vector<HalfSingle> beta_single;
+    std::vector<HalfDouble> alpha_double;
+    std::vector<HalfDouble> beta_double;
 };
 
 inline void find_single(
     const SpinSet& set,
     const Residues& res,
-    std::span<const u64> src,
+    std::span<const u64> bra_spin,
     std::vector<int>& occ,
     std::vector<u32>& seen,
     u32 stamp,
-    std::vector<SelSingle>& out
+    std::vector<HalfSingle>& out
 ) {
     out.clear();
 
-    bits::set_list(src, occ);
-    const u64 fp = spin_fp(src);
+    bits::set_list(bra_spin, occ);
+    const u64 fp = spin_fp(bra_spin);
 
     for (int i : occ) {
         const u64 key = fp ^ orb_fp(i);
@@ -428,11 +425,11 @@ inline void find_single(
 
             if (seen[pos] == stamp) continue;
 
-            const HalfExcitation ex = diff_half(src, set.get(item.id));
+            const HalfExcitation ex = diff_half(bra_spin, set.get(item.id));
 
             if (ex.deg == 1) {
                 seen[pos] = stamp;
-                out.push_back(SelSingle{
+                out.push_back(HalfSingle{
                     item.id,
                     ex.occ[0],
                     ex.vir[0],
@@ -446,16 +443,16 @@ inline void find_single(
 inline void find_double(
     const SpinSet& set,
     const Residues& res,
-    std::span<const u64> src,
+    std::span<const u64> bra_spin,
     std::vector<int>& occ,
     std::vector<u32>& seen,
     u32 stamp,
-    std::vector<SelDouble>& out
+    std::vector<HalfDouble>& out
 ) {
     out.clear();
 
-    bits::set_list(src, occ);
-    const u64 fp = spin_fp(src);
+    bits::set_list(bra_spin, occ);
+    const u64 fp = spin_fp(bra_spin);
 
     for (std::size_t p = 0; p < occ.size(); ++p) {
         for (std::size_t q = p + 1u; q < occ.size(); ++q) {
@@ -466,11 +463,11 @@ inline void find_double(
 
                 if (seen[pos] == stamp) continue;
 
-                const HalfExcitation ex = diff_half(src, set.get(item.id));
+                const HalfExcitation ex = diff_half(bra_spin, set.get(item.id));
 
                 if (ex.deg == 2) {
                     seen[pos] = stamp;
-                    out.push_back(SelDouble{
+                    out.push_back(HalfDouble{
                         item.id,
                         ex.occ[0],
                         ex.occ[1],
@@ -484,42 +481,42 @@ inline void find_double(
     }
 }
 
-[[nodiscard]] inline i32 find_det(const DetSpace& space, DetRef det) noexcept {
-    const i32 a = space.alpha.find(det.alpha());
-    if (a < 0) return -1;
+[[nodiscard]] inline i32 find_ket(const KetSpace& kets, DetRef det) noexcept {
+    const i32 alpha_id = kets.alpha.find(det.alpha());
+    if (alpha_id < 0) return -1;
 
-    const i32 b = space.beta.find(det.beta());
-    if (b < 0) return -1;
+    const i32 beta_id = kets.beta.find(det.beta());
+    if (beta_id < 0) return -1;
 
-    return space.find_with_alpha(a, b);
+    return kets.find_with_alpha(alpha_id, beta_id);
 }
 
 template <class Emit>
-inline void emit_nonzero(double h, i32 idx, Emit&& emit) {
-    if (h != 0.0) emit(idx, h);
+inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
+    if (h != 0.0) emit(iket, h);
 }
 
 /*
- * Scan all off-diagonal kets inside a finite determinant space connected to bra.
+ * Scan off-diagonal kets in a finite ket space connected to bra.
  *
  * The diagonal is intentionally not emitted. Callers handle it separately
- * because diagonal contributions require coefficient lookup and may be
- * treated differently in matrix and projection kernels.
+ * because diagonal terms require ket-index lookup and may be treated
+ * differently in matrix and projection kernels.
  */
 template <class Emit>
-inline void scan_space(
+inline void scan_kets(
     const RHFIntegrals& ints,
-    const DetSpace& ket_space,
+    const KetSpace& kets,
     DetRef bra,
-    SpaceWork& work,
+    BraWork& work,
     Emit&& emit
 ) {
-    work.ensure_seen(ket_space.alpha.size(), ket_space.beta.size());
+    work.ensure_seen(kets.alpha.size(), kets.beta.size());
 
     work.next_a();
     find_single(
-        ket_space.alpha,
-        ket_space.alpha1,
+        kets.alpha,
+        kets.alpha1,
         bra.alpha(),
         work.tmp_occ,
         work.seen_a,
@@ -529,8 +526,8 @@ inline void scan_space(
 
     work.next_a();
     find_double(
-        ket_space.alpha,
-        ket_space.alpha2,
+        kets.alpha,
+        kets.alpha2,
         bra.alpha(),
         work.tmp_occ,
         work.seen_a,
@@ -540,8 +537,8 @@ inline void scan_space(
 
     work.next_b();
     find_single(
-        ket_space.beta,
-        ket_space.beta1,
+        kets.beta,
+        kets.beta1,
         bra.beta(),
         work.tmp_occ,
         work.seen_b,
@@ -551,8 +548,8 @@ inline void scan_space(
 
     work.next_b();
     find_double(
-        ket_space.beta,
-        ket_space.beta2,
+        kets.beta,
+        kets.beta2,
         bra.beta(),
         work.tmp_occ,
         work.seen_b,
@@ -560,55 +557,55 @@ inline void scan_space(
         work.beta_double
     );
 
-    const i32 bra_alpha = ket_space.alpha.find(bra.alpha());
-    const i32 bra_beta = ket_space.beta.find(bra.beta());
+    const i32 bra_alpha = kets.alpha.find(bra.alpha());
+    const i32 bra_beta = kets.beta.find(bra.beta());
 
     if (bra_beta >= 0) {
         for (const auto& ex : work.alpha_single) {
-            const i32 idx = ket_space.find_with_beta(bra_beta, ex.id);
+            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
 
-            if (idx >= 0) {
+            if (iket >= 0) {
                 const double h =
-                    ex.sign * Slater::single_a(ints, bra, ex.occ, ex.vir);
+                    ex.sign * Slater::single_a(ints, bra, ex.i, ex.a);
 
-                emit_nonzero(h, idx, emit);
+                emit_nonzero(h, iket, emit);
             }
         }
 
         for (const auto& ex : work.alpha_double) {
-            const i32 idx = ket_space.find_with_beta(bra_beta, ex.id);
+            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
 
-            if (idx >= 0) {
+            if (iket >= 0) {
                 const double h =
                     ex.sign
-                    * Slater::double_aa(ints, ex.occ_i, ex.occ_j, ex.vir_a, ex.vir_b);
+                    * Slater::double_aa(ints, ex.i, ex.j, ex.a, ex.b);
 
-                emit_nonzero(h, idx, emit);
+                emit_nonzero(h, iket, emit);
             }
         }
     }
 
     if (bra_alpha >= 0) {
         for (const auto& ex : work.beta_single) {
-            const i32 idx = ket_space.find_with_alpha(bra_alpha, ex.id);
+            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
 
-            if (idx >= 0) {
+            if (iket >= 0) {
                 const double h =
-                    ex.sign * Slater::single_b(ints, bra, ex.occ, ex.vir);
+                    ex.sign * Slater::single_b(ints, bra, ex.i, ex.a);
 
-                emit_nonzero(h, idx, emit);
+                emit_nonzero(h, iket, emit);
             }
         }
 
         for (const auto& ex : work.beta_double) {
-            const i32 idx = ket_space.find_with_alpha(bra_alpha, ex.id);
+            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
 
-            if (idx >= 0) {
+            if (iket >= 0) {
                 const double h =
                     ex.sign
-                    * Slater::double_bb(ints, ex.occ_i, ex.occ_j, ex.vir_a, ex.vir_b);
+                    * Slater::double_bb(ints, ex.i, ex.j, ex.a, ex.b);
 
-                emit_nonzero(h, idx, emit);
+                emit_nonzero(h, iket, emit);
             }
         }
     }
@@ -617,21 +614,21 @@ inline void scan_space(
      * Opposite-spin double excitation is the intersection of one alpha
      * half-excitation and one beta half-excitation.
      */
-    work.ensure_cross(ket_space.beta.size());
+    work.ensure_cross(kets.beta.size());
     work.next_cross();
 
     for (const auto& ex : work.beta_single) {
-        const std::size_t pos = static_cast<std::size_t>(ex.id);
+        const std::size_t beta_id = static_cast<std::size_t>(ex.spin);
 
-        work.cross_b[pos] = work.cross_stamp;
-        work.cross_occ[pos] = ex.occ;
-        work.cross_vir[pos] = ex.vir;
-        work.cross_sign[pos] = ex.sign;
+        work.cross_b[beta_id] = work.cross_stamp;
+        work.cross_i[beta_id] = ex.i;
+        work.cross_a[beta_id] = ex.a;
+        work.cross_sign[beta_id] = ex.sign;
     }
 
     for (const auto& ax : work.alpha_single) {
-        for (const Mate& mate : ket_space.alpha_mates(ax.id)) {
-            const std::size_t beta_id = static_cast<std::size_t>(mate.other);
+        for (const SpinMate& mate : kets.alpha_mates(ax.spin)) {
+            const std::size_t beta_id = static_cast<std::size_t>(mate.spin);
 
             if (work.cross_b[beta_id] != work.cross_stamp) continue;
 
@@ -640,13 +637,13 @@ inline void scan_space(
                 * work.cross_sign[beta_id]
                 * Slater::double_ab(
                     ints,
-                    ax.occ,
-                    work.cross_occ[beta_id],
-                    ax.vir,
-                    work.cross_vir[beta_id]
+                    ax.i,
+                    work.cross_i[beta_id],
+                    ax.a,
+                    work.cross_a[beta_id]
                 );
 
-            emit_nonzero(h, mate.det, emit);
+            emit_nonzero(h, mate.ket, emit);
         }
     }
 }

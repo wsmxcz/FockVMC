@@ -12,8 +12,8 @@ namespace libdet {
 /*
  * Slater-Condon matrix elements for an RHF spatial-orbital Hamiltonian.
  *
- * The sign is supplied by determinant bit-string ordering. The integral
- * factors use the same convention in both exact and heat-bath paths.
+ * Excitation signs are supplied by determinant bit-string ordering. Integral
+ * factors use the same convention in exact and heat-bath paths.
  */
 struct Slater {
     [[nodiscard]] static double sign_single(
@@ -99,6 +99,9 @@ struct Slater {
         return v;
     }
 
+    /*
+     * Beta single excitation i -> a.
+     */
     [[nodiscard]] static double single_b(
         const RHFIntegrals& ints,
         std::span<const int> occ_a,
@@ -138,6 +141,9 @@ struct Slater {
         return v;
     }
 
+    /*
+     * Same-spin double excitation i,j -> a,b.
+     */
     [[nodiscard]] static double double_aa(
         const RHFIntegrals& ints,
         int i,
@@ -158,14 +164,17 @@ struct Slater {
         return ints.chem(i, a, j, b) - ints.chem(i, b, j, a);
     }
 
+    /*
+     * Opposite-spin double excitation ia,ib -> a,b.
+     */
     [[nodiscard]] static double double_ab(
         const RHFIntegrals& ints,
         int ia,
         int ib,
-        int aa,
-        int ab
+        int a,
+        int b
     ) noexcept {
-        return ints.chem(ia, aa, ib, ab);
+        return ints.chem(ia, a, ib, b);
     }
 
     [[nodiscard]] static double diag(

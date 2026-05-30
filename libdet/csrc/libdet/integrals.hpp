@@ -13,9 +13,9 @@ namespace libdet {
  *
  * Chemist notation:
  *
- *   chem(i,j,k,l) = (ij|kl)
+ *   chem(p,q,r,s) = (pq|rs)
  *
- * The Hamiltonian layer uses spatial orbital determinants represented by
+ * The Hamiltonian layer uses spatial-orbital determinants represented by
  * separate alpha and beta occupation strings.
  */
 class RHFIntegrals {
@@ -43,6 +43,7 @@ public:
         }
 
         const std::size_t n = static_cast<std::size_t>(norb_);
+
         if (h1_.size() != n * n) {
             throw std::invalid_argument("RHFIntegrals: h1 size mismatch");
         }
@@ -63,20 +64,20 @@ public:
     [[nodiscard]] int norb() const noexcept { return norb_; }
     [[nodiscard]] double ecore() const noexcept { return ecore_; }
 
-    [[nodiscard]] double h1(int i, int j) const noexcept {
+    [[nodiscard]] double h1(int p, int q) const noexcept {
         return h1_[
-            static_cast<std::size_t>(i) * static_cast<std::size_t>(norb_)
-            + static_cast<std::size_t>(j)
+            static_cast<std::size_t>(p) * static_cast<std::size_t>(norb_)
+            + static_cast<std::size_t>(q)
         ];
     }
 
-    [[nodiscard]] static constexpr std::size_t pair_index(int i, int j) noexcept {
-        const int a = i >= j ? i : j;
-        const int b = i >= j ? j : i;
-        return static_cast<std::size_t>(a * (a + 1) / 2 + b);
+    [[nodiscard]] static constexpr std::size_t pair_index(int p, int q) noexcept {
+        const int hi = p >= q ? p : q;
+        const int lo = p >= q ? q : p;
+        return static_cast<std::size_t>(hi * (hi + 1) / 2 + lo);
     }
 
-    [[nodiscard]] double chem(int i, int j, int k, int l) const noexcept {
+    [[nodiscard]] double chem(int p, int q, int r, int s) const noexcept {
         switch (layout_) {
             case Layout::full: {
                 const std::size_t n = static_cast<std::size_t>(norb_);
@@ -84,31 +85,31 @@ public:
                 return eri_[
                     (
                         (
-                            static_cast<std::size_t>(i) * n
-                            + static_cast<std::size_t>(j)
+                            static_cast<std::size_t>(p) * n
+                            + static_cast<std::size_t>(q)
                         ) * n
-                        + static_cast<std::size_t>(k)
+                        + static_cast<std::size_t>(r)
                     ) * n
-                    + static_cast<std::size_t>(l)
+                    + static_cast<std::size_t>(s)
                 ];
             }
 
             case Layout::pair_square: {
-                const std::size_t p = pair_index(i, j);
-                const std::size_t q = pair_index(k, l);
+                const std::size_t pq = pair_index(p, q);
+                const std::size_t rs = pair_index(r, s);
                 const std::size_t np =
                     static_cast<std::size_t>(norb_)
                     * static_cast<std::size_t>(norb_ + 1)
                     / 2u;
 
-                return eri_[p * np + q];
+                return eri_[pq * np + rs];
             }
 
             case Layout::pair_tri: {
-                const std::size_t p = pair_index(i, j);
-                const std::size_t q = pair_index(k, l);
-                const std::size_t hi = p >= q ? p : q;
-                const std::size_t lo = p >= q ? q : p;
+                const std::size_t pq = pair_index(p, q);
+                const std::size_t rs = pair_index(r, s);
+                const std::size_t hi = pq >= rs ? pq : rs;
+                const std::size_t lo = pq >= rs ? rs : pq;
 
                 return eri_[hi * (hi + 1u) / 2u + lo];
             }

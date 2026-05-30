@@ -23,8 +23,8 @@ from ..utils import precision
 class ExactState:
     """Exact variational state on the full fixed-particle determinant space.
 
-    The determinant basis is enumerated once at initialization. The projected
-    Hamiltonian H[X, X] is stored as a CSR matrix.
+    The determinant basis is enumerated once at initialization. The Hamiltonian
+    H[dets, dets] is stored as a CSR matrix.
 
     Estimator:
         E = <psi|H|psi> / <psi|psi>.
@@ -88,7 +88,7 @@ class ExactState:
             n_alpha=n_alpha,
             n_beta=n_beta,
             dets=dets,
-            hmat=hamiltonian.matrix(dets, dets),
+            hmat=hamiltonian.matrix(dets),
         )
 
     @property
@@ -112,7 +112,6 @@ class ExactState:
     def _run(self, *, grad: bool, geometry: bool):
         """Evaluate exact energy, optional gradient, and optional geometry."""
         timer = utils.Timer()
-        pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
 
         with timer("forward"):
@@ -121,13 +120,13 @@ class ExactState:
             logpsi_h = utils.host(logpsi_jax)
 
         with timer("reduce"):
-            psi = pa(
+            psi = precision.asarray(
                 np.asarray(to_psi(logpsi_h)).reshape(-1),
                 "calc",
                 host=True,
             )
 
-            hpsi = pa(
+            hpsi = precision.asarray(
                 np.asarray(self.hmat.dot(psi)).reshape(-1),
                 "calc",
                 host=True,
@@ -152,12 +151,12 @@ class ExactState:
                     self.model.coord,
                     self.params,
                     self.dets,
-                    utils.device(pa(cot, "model", "real", host=True)),
+                    utils.device(precision.asarray(cot, "model", "real", host=True)),
                 )
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    w = pa(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
+                    w = precision.asarray(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
                     sqrt_w = np.sqrt(w)
 
                     b_log = np.zeros_like(dlogpsi)
@@ -169,7 +168,7 @@ class ExactState:
                         x=self.dets,
                         w=utils.device(w),
                         b=utils.device(
-                            pa(
+                            precision.asarray(
                                 self.model.cotangent(logpsi_h, b_log),
                                 "sr",
                                 "real",

@@ -20,7 +20,7 @@ namespace libdet {
  *
  *   alpha words, then beta words.
  *
- * The class is a non-owning view. It does not manage lifetime.
+ * DetRef is a non-owning view. It does not manage lifetime.
  */
 class DetRef {
 public:
@@ -150,15 +150,15 @@ struct DetLess {
             return lhs.beta()[0] < rhs.beta()[0];
         }
 
-        for (std::size_t i = 0; i < la.size(); ++i) {
-            if (la[i] != ra[i]) return la[i] < ra[i];
+        for (std::size_t w = 0; w < la.size(); ++w) {
+            if (la[w] != ra[w]) return la[w] < ra[w];
         }
 
         const auto lb = lhs.beta();
         const auto rb = rhs.beta();
 
-        for (std::size_t i = 0; i < lb.size(); ++i) {
-            if (lb[i] != rb[i]) return lb[i] < rb[i];
+        for (std::size_t w = 0; w < lb.size(); ++w) {
+            if (lb[w] != rb[w]) return lb[w] < rb[w];
         }
 
         return false;
@@ -174,9 +174,11 @@ struct DetLess {
 
 [[nodiscard]] inline u64 hash_words(u64 seed, std::span<const u64> words) noexcept {
     u64 h = splitmix64(seed ^ (0x9e3779b97f4a7c15ULL + static_cast<u64>(words.size())));
+
     for (u64 x : words) {
         h = splitmix64(h ^ splitmix64(x + 0x517cc1b727220a95ULL));
     }
+
     return h;
 }
 
@@ -191,6 +193,7 @@ struct DetHash {
         }
 
         u64 h = 0x9e3779b97f4a7c15ULL ^ static_cast<u64>(det.nword());
+
         for (u64 x : det.alpha()) h = splitmix64(h ^ x);
         for (u64 x : det.beta()) h = splitmix64(h ^ (x + 0x517cc1b727220a95ULL));
 
@@ -215,37 +218,38 @@ struct DetHash {
 /*
  * Sort packed determinants lexicographically and remove duplicates.
  *
- * This is intentionally simple and deterministic. High-throughput edge
- * construction should avoid feeding this routine one determinant per edge;
- * it is best used on already compact determinant pools.
+ * This is intentionally simple and deterministic. High-throughput connection
+ * construction should avoid feeding this routine one determinant per
+ * connection; it is best used on already compact determinant pools.
  */
 inline void sort_unique_dets(std::vector<u64>& packed, u32 nword) {
     const std::size_t stride = det_size(nword);
     if (stride == 0 || packed.empty()) return;
 
-    const std::size_t ndet = packed.size() / stride;
+    const std::size_t n_dets = packed.size() / stride;
 
-    std::vector<std::size_t> order(ndet);
-    for (std::size_t i = 0; i < ndet; ++i) order[i] = i;
+    std::vector<std::size_t> order(n_dets);
+    for (std::size_t idet = 0; idet < n_dets; ++idet) order[idet] = idet;
 
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        return DetLess{}(det_at(packed, nword, a), det_at(packed, nword, b));
+    std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+        return DetLess{}(det_at(packed, nword, lhs), det_at(packed, nword, rhs));
     });
 
     std::vector<u64> out;
     out.reserve(packed.size());
 
     std::size_t prev = static_cast<std::size_t>(-1);
-    for (std::size_t idx : order) {
+
+    for (std::size_t idet : order) {
         if (
             prev != static_cast<std::size_t>(-1)
-            && det_equal(det_at(packed, nword, idx), det_at(packed, nword, prev))
+            && det_equal(det_at(packed, nword, idet), det_at(packed, nword, prev))
         ) {
             continue;
         }
 
-        append_det(out, det_at(packed, nword, idx));
-        prev = idx;
+        append_det(out, det_at(packed, nword, idet));
+        prev = idet;
     }
 
     packed.swap(out);
@@ -342,10 +346,10 @@ struct HalfExcitation {
 };
 
 /*
- * Row-local determinant cache.
+ * Determinant-local occupation cache.
  *
- * The mutable DetScratch is used by excitation-driven scanners to apply
- * i -> a and ij -> ab replacements without allocating a new determinant.
+ * DetScratch is used by excitation-driven scanners to apply i -> a and
+ * ij -> ab replacements without allocating a new determinant.
  */
 struct DetOcc {
     explicit DetOcc(u32 nword = 0, int norb = 0) : det(nword) {
@@ -506,6 +510,7 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     }
 
     const int dx = bits::popcount_xor(src, dst);
+
     if (dx & 1) {
         ex.deg = 3;
         return ex;

@@ -35,7 +35,7 @@ class MCState(VState):
         x ~ eta_alpha, y ~ B(y|x).
 
     Degree-tilted blurred density:
-        The observed sample carries a source mass s(x).  For Hamiltonian blur,
+        The observed sample carries a source mass s(x). For Hamiltonian blur,
 
             s(x) = d_B(x) if d_B(x) > 0 else 1.
 
@@ -43,18 +43,18 @@ class MCState(VState):
 
             r_tilde(y) = sum_x |psi(x)|^alpha s(x) B(y|x).
 
-        For non-empty Hamiltonian blur rows this becomes
+        For non-empty Hamiltonian blur kets this becomes
 
             r_tilde(y)
               = (1 - beta) d_B(y) |psi(y)|^alpha
                 + beta sum_x |H_yx| |psi(x)|^alpha,
 
-        which only requires the first-order Hamiltonian graph of y.
+        which only requires first-order Hamiltonian connections from y.
 
     Importance weight:
         omega(y) = sample_mass(y) |psi_theta(y)|^2 / r_tilde(y).
 
-    The Hamiltonian graph is built on host by libdet. The neural model is
+    libdet builds Hamiltonian connections on host. The neural model is
     evaluated once on a shared determinant pool and then reused by local
     energy, observed-density, gradient, and geometry reductions.
     """
@@ -135,22 +135,22 @@ class MCState(VState):
         Timing fields:
             sample:
                 Counted-state bookkeeping, resampling, accept/reject, and
-                observation bookkeeping outside graph/model work.
+                observation bookkeeping outside connection/model work.
 
             graph:
-                libdet graph work, including edges and sampled weak edges.
+                libdet connection work, including deterministic and sampled
+                weak connections.
 
             forward:
-                neural-network forward evaluations.
+                Neural-network forward evaluations.
 
             reduce:
-                local energy, log-density, weights, energy, and variance.
+                Local energy, log-density, weights, energy, and variance.
 
             backward:
                 VJP and optional geometry construction.
         """
         timer = utils.Timer()
-        pa = precision.asarray
 
         sampler_state = self.sampler_state
 
@@ -185,18 +185,18 @@ class MCState(VState):
         timer.add("forward", sampler_stats.get("time_forward", 0.0))
 
         with timer("reduce"):
-            row_dets = libdet.to_dets(batch.dets)
+            kets = libdet.to_dets(batch.dets)
 
             count_i64 = np.asarray(batch.count, dtype=np.int64)
-            count = pa(count_i64, "calc", "real", host=True)
-            sample_mass = pa(
+            count = precision.asarray(count_i64, "calc", "real", host=True)
+            sample_mass = precision.asarray(
                 np.asarray(batch.mass),
                 "calc",
                 "real",
                 host=True,
             )
 
-            n_row = int(row_dets.shape[0])
+            n_ket = int(kets.shape[0])
 
             # Weak local-energy sampling advances only the RNG key.
             seed = 0
@@ -206,45 +206,45 @@ class MCState(VState):
                 sampler_state = replace(sampler_state, key=key)
 
         with timer("graph"):
-            graph = self._graph(row_dets, seed=seed)
+            conn_data = self._conns(kets, seed=seed)
 
         with timer("forward"):
             logpsi_pool_jax = utils.apply(
                 self.model.logpsi,
                 self.params,
-                graph["pool_dets"],
+                conn_data["pool_dets"],
             )
             jax.block_until_ready(logpsi_pool_jax)
             logpsi_pool = utils.host(logpsi_pool_jax)
 
         with timer("reduce"):
-            row_logpsi = jax.tree.map(lambda a: a[graph["row_uid"]], logpsi_pool)
+            ket_logpsi = jax.tree.map(lambda a: a[conn_data["ket_uid"]], logpsi_pool)
 
-            row_logabs = pa(
-                np.asarray(to_logabs(row_logpsi)).reshape(-1),
+            ket_logabs = precision.asarray(
+                np.asarray(to_logabs(ket_logpsi)).reshape(-1),
                 "calc",
                 "real",
                 host=True,
             )
 
             lognu = self._lognu(
-                row_logabs=row_logabs,
+                ket_logabs=ket_logabs,
                 logpsi_pool=logpsi_pool,
-                graph=graph,
-                n_row=n_row,
+                conn_data=conn_data,
+                n_ket=n_ket,
                 alpha=alpha_step,
             )
 
-            eloc, n_edge_weak = self._eloc(
+            eloc, n_conn_weak = self._eloc(
                 logpsi_pool=logpsi_pool,
-                graph=graph,
-                n_row=n_row,
+                conn_data=conn_data,
+                n_ket=n_ket,
             )
 
             w, ess = self._weights(
                 count=count,
                 sample_mass=sample_mass,
-                row_logabs=row_logabs,
+                ket_logabs=ket_logabs,
                 lognu=lognu,
             )
 
@@ -261,13 +261,16 @@ class MCState(VState):
 
                 # grad E = 2 Re <(E_loc - E) O>.
                 dlogpsi = rdtype(2.0) * w * residual
-                cot = self.model.cotangent(row_logpsi, pa(dlogpsi, "calc", host=True))
+                cot = self.model.cotangent(
+                    ket_logpsi,
+                    precision.asarray(dlogpsi, "calc", host=True),
+                )
 
                 gradient = utils.vjp(
                     self.model.coord,
                     self.params,
-                    row_dets,
-                    utils.device(pa(cot, "model", "real", host=True)),
+                    kets,
+                    utils.device(precision.asarray(cot, "model", "real", host=True)),
                 )
                 jax.block_until_ready(gradient)
 
@@ -279,11 +282,11 @@ class MCState(VState):
                     geom = Geometry(
                         theta=self.params,
                         coord=self.model.coord,
-                        x=row_dets,
-                        w=utils.device(pa(w, "sr", "real", host=True)),
+                        x=kets,
+                        w=utils.device(precision.asarray(w, "sr", "real", host=True)),
                         b=utils.device(
-                            pa(
-                                self.model.cotangent(row_logpsi, b_log),
+                            precision.asarray(
+                                self.model.cotangent(ket_logpsi, b_log),
                                 "sr",
                                 "real",
                                 host=True,
@@ -293,7 +296,7 @@ class MCState(VState):
 
         sampler_state = self._adaptive(
             sampler_state=sampler_state,
-            row_logabs=row_logabs,
+            ket_logabs=ket_logabs,
             eloc=eloc,
             energy=energy,
             w=w,
@@ -302,16 +305,15 @@ class MCState(VState):
         new_state = replace(self, sampler_state=sampler_state)
 
         n_sample = int(np.sum(count_i64))
-        n_unique = int(n_row)
+        n_unique = int(n_ket)
 
         ess_frac = float(ess / max(1, n_sample))
         unique_frac = float(n_unique / max(1, n_sample))
 
-        # Observation sampling and log-density construction both touch blur
-        # edges, but neither performs second-order degree traversal.
-        n_edge_blur = float(
-            sampler_stats.get("n_edge_blur", 0.0) + graph["n_edge_blur"]
+        n_conn_blur = float(
+            sampler_stats.get("n_conn_blur", 0.0) + conn_data["n_conn_blur"]
         )
+        n_conn_proposal = float(sampler_stats.get("n_conn_proposal", 0.0))
 
         stats = {
             "energy": float(energy),
@@ -322,19 +324,19 @@ class MCState(VState):
             "n_sample": float(n_sample),
             "n_unique": float(n_unique),
             "unique_frac": unique_frac,
-            "n_eval": float(graph["pool_dets"].shape[0]),
-            "n_edge_eloc": float(graph["n_edge_eloc"]),
-            "n_edge_weak": float(n_edge_weak),
-            "n_edge_proposal": float(sampler_stats.get("n_edge_proposal", 0.0)),
-            "n_edge_blur": n_edge_blur,
+            "n_eval": float(conn_data["pool_dets"].shape[0]),
+            "n_conn_eloc": float(conn_data["n_conn_eloc"]),
+            "n_conn_weak": float(n_conn_weak),
+            "n_conn_proposal": n_conn_proposal,
+            "n_conn_blur": n_conn_blur,
             "alpha": alpha_step,
         }
         stats.update(timer.stats())
 
         return new_state, energy, gradient, stats, geom
 
-    def _graph(self, row_dets: np.ndarray, *, seed: int) -> dict[str, Any]:
-        """Build blur/local-energy graphs and one shared model-evaluation pool.
+    def _conns(self, kets: np.ndarray, *, seed: int) -> dict[str, Any]:
+        """Build blur/local-energy connections and one shared model pool.
 
         The blur density uses the degree-tilted form
 
@@ -342,12 +344,11 @@ class MCState(VState):
               = (1 - beta) d_B(y) |psi(y)|^alpha
                 + beta sum_x |H_yx| |psi(x)|^alpha.
 
-        Therefore only the first-order graph of row_dets is needed.  No
-        degrees() call on blur_col_dets is required.
+        Therefore only first-order connections from kets are needed. No
+        degrees() call on generated bras is required.
         """
-        n_row = int(row_dets.shape[0])
+        n_ket = int(kets.shape[0])
         rdtype = precision.dtype("calc", "real", host=True)
-        pa = precision.asarray
 
         blur_eps = float(
             self.sampler.proposal_eps
@@ -357,38 +358,38 @@ class MCState(VState):
         eloc_eps = float(self.eloc_eps1)
         beta = float(np.clip(self.sampler.blur, 0.0, 1.0))
 
-        eloc_graph = self.hamiltonian.edges(row_dets, eloc_eps)
-        eloc_col_dets = np.ascontiguousarray(
-            np.asarray(eloc_graph.col_dets, dtype=np.uint64)
+        eloc_conns = self.hamiltonian.conns(kets, eloc_eps)
+        eloc_bras = np.ascontiguousarray(
+            np.asarray(eloc_conns.bras, dtype=np.uint64)
         )
 
-        parts: list[np.ndarray] = [np.ascontiguousarray(row_dets), eloc_col_dets]
-        labels: list[str] = ["row", "eloc"]
+        parts: list[np.ndarray] = [np.ascontiguousarray(kets), eloc_bras]
+        labels: list[str] = ["ket", "eloc"]
 
-        blur_graph = None
+        blur_conns = None
         blur_uid_label = ""
-        blur_row_weight = np.zeros(n_row, dtype=rdtype)
-        n_edge_blur = 0
+        blur_ket_weight = np.zeros(n_ket, dtype=rdtype)
+        n_conn_blur = 0
 
         if beta > 0.0:
-            same_graph = blur_eps == eloc_eps
+            same_conns = blur_eps == eloc_eps
 
-            if same_graph:
-                blur_graph = eloc_graph
+            if same_conns:
+                blur_conns = eloc_conns
                 blur_uid_label = "eloc"
             else:
-                blur_graph = self.hamiltonian.edges(row_dets, blur_eps)
-                blur_col_dets = np.ascontiguousarray(
-                    np.asarray(blur_graph.col_dets, dtype=np.uint64)
+                blur_conns = self.hamiltonian.conns(kets, blur_eps)
+                blur_bras = np.ascontiguousarray(
+                    np.asarray(blur_conns.bras, dtype=np.uint64)
                 )
-                parts.append(blur_col_dets)
+                parts.append(blur_bras)
                 labels.append("blur")
                 blur_uid_label = "blur"
 
-            n_edge_blur = int(np.asarray(blur_graph.h).size)
+            n_conn_blur = int(np.asarray(blur_conns.h).size)
 
-            blur_row_weight = pa(
-                np.asarray(blur_graph.row_weight),
+            blur_ket_weight = precision.asarray(
+                np.asarray(blur_conns.ket_weight),
                 "calc",
                 "real",
                 host=True,
@@ -397,17 +398,17 @@ class MCState(VState):
         weak = None
 
         if self.eloc_sample > 0:
-            weak = self.hamiltonian.sample_edges(
-                row_dets,
+            weak = self.hamiltonian.sample_conns(
+                kets,
                 int(self.eloc_sample),
                 eps1=float(self.eloc_eps1),
                 eps2=float(self.eloc_eps2),
                 seed=int(seed),
             )
 
-            weak_dets = np.ascontiguousarray(np.asarray(weak.dets, dtype=np.uint64))
-            if weak_dets.shape[0] > 0:
-                parts.append(weak_dets)
+            weak_bras = np.ascontiguousarray(np.asarray(weak.bras, dtype=np.uint64))
+            if weak_bras.shape[0] > 0:
+                parts.append(weak_bras)
                 labels.append("weak")
 
         pool_dets, _, inv = unique_dets(np.concatenate(parts, axis=0))
@@ -426,14 +427,14 @@ class MCState(VState):
 
         return {
             "pool_dets": pool_dets,
-            "row_uid": uid["row"],
-            "blur_graph": blur_graph,
+            "ket_uid": uid["ket"],
+            "blur_conns": blur_conns,
             "blur_uid": uid.get(blur_uid_label, np.empty(0, dtype=np.int64)),
-            "blur_row_weight": blur_row_weight,
-            "n_edge_blur": n_edge_blur,
-            "eloc_graph": eloc_graph,
+            "blur_ket_weight": blur_ket_weight,
+            "n_conn_blur": n_conn_blur,
+            "eloc_conns": eloc_conns,
             "eloc_uid": uid["eloc"],
-            "n_edge_eloc": int(np.asarray(eloc_graph.h).size),
+            "n_conn_eloc": int(np.asarray(eloc_conns.h).size),
             "weak": weak,
             "weak_uid": uid.get("weak", np.empty(0, dtype=np.int64)),
         }
@@ -441,10 +442,10 @@ class MCState(VState):
     def _lognu(
         self,
         *,
-        row_logabs: np.ndarray,
+        ket_logabs: np.ndarray,
         logpsi_pool: Any,
-        graph: dict[str, Any],
-        n_row: int,
+        conn_data: dict[str, Any],
+        n_ket: int,
         alpha: float,
     ) -> np.ndarray:
         """Compute the unnormalized observed density.
@@ -459,7 +460,7 @@ class MCState(VState):
               = s(y) B(y|y) |psi(y)|^alpha
                 + beta sum_x |H_yx| |psi(x)|^alpha,
 
-        where s(y)=d_B(y) for non-empty blur rows and s(y)=1 for empty rows.
+        where s(y)=d_B(y) for non-empty blur kets and s(y)=1 for empty kets.
         Thus
 
             stay scale = (1 - beta) d_B(y), if d_B(y) > 0,
@@ -467,44 +468,48 @@ class MCState(VState):
 
         The off-diagonal term has no source degree denominator.
         """
-        pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
         alpha = rdtype(alpha)
         beta = rdtype(np.clip(self.sampler.blur, 0.0, 1.0))
 
-        logrho_row = pa(alpha * row_logabs, "calc", "real", host=True)
+        logrho_ket = precision.asarray(alpha * ket_logabs, "calc", "real", host=True)
 
-        blur_graph = graph["blur_graph"]
-        if beta <= 0.0 or blur_graph is None:
-            return logrho_row
+        blur_conns = conn_data["blur_conns"]
+        if beta <= 0.0 or blur_conns is None:
+            return logrho_ket
 
-        row_weight = pa(graph["blur_row_weight"], "calc", "real", host=True)
+        ket_weight = precision.asarray(
+            conn_data["blur_ket_weight"],
+            "calc",
+            "real",
+            host=True,
+        )
 
         stay_scale = np.where(
-            row_weight > 0.0,
-            (rdtype(1.0) - beta) * row_weight,
+            ket_weight > 0.0,
+            (rdtype(1.0) - beta) * ket_weight,
             rdtype(1.0),
         )
 
-        log_stay = np.full(n_row, -np.inf, dtype=rdtype)
+        log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
         stay_mask = stay_scale > 0.0
         log_stay[stay_mask] = (
             np.log(np.maximum(stay_scale[stay_mask], tiny))
-            + logrho_row[stay_mask]
+            + logrho_ket[stay_mask]
         )
 
-        row_ptr = np.asarray(blur_graph.row_ptr, dtype=np.int64)
-        col = np.asarray(blur_graph.col, dtype=np.int64)
-        h = pa(np.asarray(blur_graph.h), "calc", "real", host=True)
+        ket_ptr = np.asarray(blur_conns.ket_ptr, dtype=np.int64)
+        bra = np.asarray(blur_conns.bra, dtype=np.int64)
+        h = precision.asarray(np.asarray(blur_conns.h), "calc", "real", host=True)
 
         if h.size == 0:
-            return pa(log_stay, "calc", "real", host=True)
+            return precision.asarray(log_stay, "calc", "real", host=True)
 
-        blur_uid = graph["blur_uid"]
+        blur_uid = conn_data["blur_uid"]
 
-        source_logabs = pa(
+        bra_logabs = precision.asarray(
             np.asarray(
                 to_logabs(jax.tree.map(lambda a: a[blur_uid], logpsi_pool))
             ).reshape(-1),
@@ -518,51 +523,57 @@ class MCState(VState):
 
         terms = np.full(h.size, -np.inf, dtype=rdtype)
         terms[valid] = (
-            alpha * source_logabs[col[valid]]
+            alpha * bra_logabs[bra[valid]]
             + np.log(np.maximum(abs_h[valid], tiny))
         )
 
-        log_blur = np.log(beta) + utils.segment_logsumexp(row_ptr, terms, n_row)
-        lognu = np.logaddexp(log_stay, pa(log_blur, "calc", "real", host=True))
+        log_blur = np.log(beta) + utils.segment_logsumexp(ket_ptr, terms, n_ket)
+        lognu = np.logaddexp(
+            log_stay,
+            precision.asarray(log_blur, "calc", "real", host=True),
+        )
 
-        return pa(lognu, "calc", "real", host=True)
+        return precision.asarray(lognu, "calc", "real", host=True)
 
     def _eloc(
         self,
         *,
         logpsi_pool: Any,
-        graph: dict[str, Any],
-        n_row: int,
+        conn_data: dict[str, Any],
+        n_ket: int,
     ) -> tuple[np.ndarray, int]:
-        """Compute local energy on observed determinants.
+        """Compute local energy on observed kets.
 
         Deterministic screened part:
 
-            E_loc(x) = H_xx + sum_y H_xy psi(y) / psi(x).
+            E_loc(ket) = H_kk + sum_bra H_bra,ket psi(bra) / psi(ket).
 
         The optional weak part is an unbiased sampled correction.
         """
-        pa = precision.asarray
+        eloc_conns = conn_data["eloc_conns"]
+        ket_uid = conn_data["ket_uid"]
+        eloc_uid = conn_data["eloc_uid"]
 
-        eloc_graph = graph["eloc_graph"]
-        row_uid = graph["row_uid"]
-        eloc_uid = graph["eloc_uid"]
+        diag = precision.asarray(
+            np.asarray(eloc_conns.diags).reshape(-1),
+            "calc",
+            "real",
+            host=True,
+        )
+        eloc = precision.asarray(diag.copy(), "calc", host=True)
 
-        diag = pa(np.asarray(eloc_graph.diags).reshape(-1), "calc", "real", host=True)
-        eloc = pa(diag.copy(), "calc", host=True)
-
-        row_ptr = np.asarray(eloc_graph.row_ptr, dtype=np.int64)
-        col = np.asarray(eloc_graph.col, dtype=np.int64)
-        h = pa(np.asarray(eloc_graph.h), "calc", "real", host=True)
+        ket_ptr = np.asarray(eloc_conns.ket_ptr, dtype=np.int64)
+        bra = np.asarray(eloc_conns.bra, dtype=np.int64)
+        h = precision.asarray(np.asarray(eloc_conns.h), "calc", "real", host=True)
 
         if h.size > 0:
-            rows = np.repeat(np.arange(n_row, dtype=np.int64), np.diff(row_ptr))
+            ket = np.repeat(np.arange(n_ket, dtype=np.int64), np.diff(ket_ptr))
 
-            ratio = pa(
+            ratio = precision.asarray(
                 np.asarray(
                     to_ratio(
-                        jax.tree.map(lambda a: a[eloc_uid[col]], logpsi_pool),
-                        jax.tree.map(lambda a: a[row_uid[rows]], logpsi_pool),
+                        jax.tree.map(lambda a: a[eloc_uid[bra]], logpsi_pool),
+                        jax.tree.map(lambda a: a[ket_uid[ket]], logpsi_pool),
                     )
                 ),
                 "calc",
@@ -570,47 +581,64 @@ class MCState(VState):
             )
 
             eloc = eloc.astype(np.result_type(eloc, ratio), copy=False)
-            np.add.at(eloc, rows, h * ratio)
+            np.add.at(eloc, ket, h * ratio)
 
-        weak = graph["weak"]
-        weak_uid = graph["weak_uid"]
-        n_edge_weak = 0
+        weak = conn_data["weak"]
+        weak_uid = conn_data["weak_uid"]
+        n_conn_weak = 0
 
-        if weak is not None and weak_uid.size > 0:
-            weak_rows = np.asarray(weak.rows, dtype=np.int64)
-            weak_h = pa(np.asarray(weak.h), "calc", "real", host=True)
-            weak_pgen = pa(np.asarray(weak.pgen), "calc", "real", host=True)
-            weak_count = pa(np.asarray(weak.counts), "calc", "real", host=True)
-            n_edge_weak = int(weak_h.size)
+        if weak is not None:
+            n_conn_weak = int(np.asarray(weak.ket_nconn, dtype=np.int64).sum())
 
-            ratio = pa(
-                np.asarray(
-                    to_ratio(
-                        jax.tree.map(lambda a: a[weak_uid], logpsi_pool),
-                        jax.tree.map(lambda a: a[row_uid[weak_rows]], logpsi_pool),
-                    )
-                ),
-                "calc",
-                host=True,
-            )
+            if weak_uid.size > 0:
+                weak_ket = np.asarray(weak.ket, dtype=np.int64)
+                weak_h = precision.asarray(
+                    np.asarray(weak.h),
+                    "calc",
+                    "real",
+                    host=True,
+                )
+                weak_pgen = precision.asarray(
+                    np.asarray(weak.pgen),
+                    "calc",
+                    "real",
+                    host=True,
+                )
+                weak_count = precision.asarray(
+                    np.asarray(weak.counts),
+                    "calc",
+                    "real",
+                    host=True,
+                )
 
-            denom = np.maximum(
-                weak_pgen
-                * precision.dtype("calc", "real", host=True)(self.eloc_sample),
-                precision.tiny("calc"),
-            )
+                ratio = precision.asarray(
+                    np.asarray(
+                        to_ratio(
+                            jax.tree.map(lambda a: a[weak_uid], logpsi_pool),
+                            jax.tree.map(lambda a: a[ket_uid[weak_ket]], logpsi_pool),
+                        )
+                    ),
+                    "calc",
+                    host=True,
+                )
 
-            eloc = eloc.astype(np.result_type(eloc, ratio), copy=False)
-            np.add.at(eloc, weak_rows, (weak_count * weak_h / denom) * ratio)
+                denom = np.maximum(
+                    weak_pgen
+                    * precision.dtype("calc", "real", host=True)(self.eloc_sample),
+                    precision.tiny("calc"),
+                )
 
-        return pa(eloc, "calc", host=True), n_edge_weak
+                eloc = eloc.astype(np.result_type(eloc, ratio), copy=False)
+                np.add.at(eloc, weak_ket, (weak_count * weak_h / denom) * ratio)
+
+        return precision.asarray(eloc, "calc", host=True), n_conn_weak
 
     def _weights(
         self,
         *,
         count: np.ndarray,
         sample_mass: np.ndarray,
-        row_logabs: np.ndarray,
+        ket_logabs: np.ndarray,
         lognu: np.ndarray,
     ) -> tuple[np.ndarray, float]:
         """Normalize importance weights.
@@ -624,18 +652,17 @@ class MCState(VState):
         With identity observation, sample_mass_i == count_i and this reduces
         to the usual alpha-reference reweighting.
 
-        The ESS reported here is a grouped-mass diagnostic.  It is exact when
+        The ESS reported here is a grouped-mass diagnostic. It is exact when
         all observations merged into the same determinant have the same source
         mass, and otherwise remains a stable concentration diagnostic.
         """
-        pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
-        count = pa(count, "calc", "real", host=True)
-        sample_mass = pa(sample_mass, "calc", "real", host=True)
+        count = precision.asarray(count, "calc", "real", host=True)
+        sample_mass = precision.asarray(sample_mass, "calc", "real", host=True)
 
-        logu = rdtype(2.0) * row_logabs - lognu
+        logu = rdtype(2.0) * ket_logabs - lognu
         finite = np.isfinite(logu)
 
         if not finite.any():
@@ -650,7 +677,7 @@ class MCState(VState):
         if not np.isfinite(z) or z <= 0.0:
             raise FloatingPointError("importance weights have zero total mass")
 
-        w = pa(mass / max(z, float(tiny)), "calc", "real", host=True)
+        w = precision.asarray(mass / max(z, float(tiny)), "calc", "real", host=True)
 
         # Approximate the per-observation denominator from grouped total mass.
         # This reduces to the old exact formula when sample_mass == count.
@@ -664,24 +691,33 @@ class MCState(VState):
         self,
         *,
         sampler_state: WalkerState,
-        row_logabs: np.ndarray,
+        ket_logabs: np.ndarray,
         eloc: np.ndarray,
         energy: float,
         w: np.ndarray,
     ) -> WalkerState:
-        """Update adaptive alpha by residual-tilted moment matching."""
+        """Update adaptive alpha by robust scalar moment matching."""
         if self.sampler.alpha != "adaptive":
             return sampler_state
 
-        pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
         alpha = float(np.clip(float(sampler_state.alpha), 0.0, 2.0))
 
-        ell = pa(np.asarray(row_logabs).reshape(-1), "calc", "real", host=True)
-        weight = pa(np.asarray(w).reshape(-1), "calc", "real", host=True)
-        residual = pa(
+        ell = precision.asarray(
+            np.asarray(ket_logabs).reshape(-1),
+            "calc",
+            "real",
+            host=True,
+        )
+        weight = precision.asarray(
+            np.asarray(w).reshape(-1),
+            "calc",
+            "real",
+            host=True,
+        )
+        residual = precision.asarray(
             np.asarray(np.abs(eloc - energy)).reshape(-1),
             "calc",
             "real",
@@ -694,6 +730,15 @@ class MCState(VState):
         if not valid.any():
             return replace(sampler_state, alpha=alpha)
 
+        ell_v = ell[valid]
+
+        # Use a centered robust scale. This is invariant to arbitrary
+        # log|psi| offsets and keeps the ridge numerically meaningful.
+        med = rdtype(np.median(ell_v))
+        mad = rdtype(np.median(np.abs(ell_v - med)))
+        ell_scale = max(rdtype(1.0), rdtype(1.4826) * mad)
+        ell_scale2 = ell_scale * ell_scale
+
         # Residual-tilted Born law: q*(x) proportional to pi(x)|E_loc(x)-E|.
         target_mass = np.where(valid, weight * residual, rdtype(0.0))
         z_target = float(np.sum(target_mass))
@@ -703,7 +748,7 @@ class MCState(VState):
 
         m_target = float(np.sum(target_mass * ell) / z_target)
 
-        # Estimate E_{q_alpha}[ell] from Born-weighted rows.
+        # Estimate E_{q_alpha}[ell] from Born-weighted kets.
         log_ratio = (rdtype(alpha) - rdtype(2.0)) * ell
         log_ratio = np.where(valid, log_ratio, -np.inf)
         shift = float(np.max(log_ratio[valid]))
@@ -719,19 +764,20 @@ class MCState(VState):
         centered = ell - rdtype(m_q)
         var_q = float(np.sum(q_mass * centered * centered) / z_q)
 
-        # Fisher/Newton denominator with a small scale-aware ridge.
-        ridge = float(rdtype(1.0e-8) * (rdtype(1.0) + abs(rdtype(m_q))) ** 2)
-
+        # If log|psi| has no usable spread, alpha is locally unidentifiable.
+        ridge = float(rdtype(1.0e-6) * ell_scale2)
         if not np.isfinite(var_q) or var_q <= ridge:
             return replace(sampler_state, alpha=alpha)
 
-        step = (m_target - m_q) / (var_q + ridge)
+        raw_step = (m_target - m_q) / (var_q + ridge)
 
-        if not np.isfinite(step):
+        if not np.isfinite(raw_step):
             return replace(sampler_state, alpha=alpha)
 
-        # Conservative trust region; the bounds are semantic, not tunable knobs.
-        step = float(np.clip(step, -0.01, 0.01))
+        # Smooth trust step. Same semantic bound as clipping, but continuous.
+        max_step = 0.005
+        step = max_step * float(np.tanh(raw_step / max_step))
+
         alpha_next = float(np.clip(alpha + step, 0.0, 2.0))
 
         return replace(sampler_state, alpha=alpha_next)

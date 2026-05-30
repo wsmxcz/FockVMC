@@ -6,22 +6,22 @@ from typing import Any
 import numpy as np
 from scipy.sparse import csr_matrix
 
+from ._libdet_cpp import Conns
+from ._libdet_cpp import ConnSamples
 from ._libdet_cpp import Degrees
-from ._libdet_cpp import EdgeSamples
-from ._libdet_cpp import Edges
 from ._libdet_cpp import Hamiltonian as _RawHamiltonian
 from ._libdet_cpp import Matrix
 from ._libdet_cpp import Projection
-from ._libdet_cpp import ShellSamples
+from ._libdet_cpp import ProjectSamples
 
 __all__ = [
+    "Conns",
+    "ConnSamples",
     "Degrees",
-    "EdgeSamples",
-    "Edges",
     "Hamiltonian",
     "Matrix",
     "Projection",
-    "ShellSamples",
+    "ProjectSamples",
     "to_dets",
 ]
 
@@ -38,14 +38,14 @@ def to_dets(dets: Any) -> np.ndarray:
 
 @dataclass(frozen=True, slots=True)
 class Hamiltonian:
-    """Python wrapper for determinant-driven Hamiltonian primitives."""
+    """Python wrapper for row-local determinant Hamiltonian primitives."""
 
     _raw: _RawHamiltonian
     _ecore: float = 0.0
 
     @classmethod
-    def rhf(cls, h1: Any, eri: Any, *, ecore: float = 0.0) -> "Hamiltonian":
-        """Build a Hamiltonian from RHF one- and two-body integrals."""
+    def rhf(cls, h1: Any, eri: Any, *, ecore: float = 0.0) -> Hamiltonian:
+        """Build an RHF spatial-orbital Hamiltonian."""
         h1_arr = np.ascontiguousarray(np.asarray(h1, dtype=np.float64))
         eri_arr = np.ascontiguousarray(np.asarray(eri, dtype=np.float64).reshape(-1))
 
@@ -55,18 +55,21 @@ class Hamiltonian:
 
     @property
     def norb(self) -> int:
+        """Number of spatial orbitals."""
         return int(self._raw.norb)
 
     @property
     def nword(self) -> int:
+        """Number of 64-bit words per spin string."""
         return int(self._raw.nword)
 
     @property
     def ecore(self) -> float:
+        """Scalar core energy."""
         return self._ecore
 
     def hij(self, bra: Any, ket: Any) -> float:
-        """Return <bra|H|ket>. Each input must contain exactly one determinant."""
+        """Return H[bra, ket]. Each input must contain exactly one determinant."""
         bra_arr = to_dets(bra)
         ket_arr = to_dets(ket)
 
@@ -76,7 +79,7 @@ class Hamiltonian:
         return float(self._raw.hij(bra_arr, ket_arr))
 
     def diags(self, dets: Any) -> np.ndarray:
-        """Return diagonal elements H_ii for a determinant batch."""
+        """Return diagonal elements H[det, det] for a determinant batch."""
         return np.asarray(self._raw.diags(to_dets(dets)), dtype=np.float64)
 
     def expand(
@@ -87,7 +90,7 @@ class Hamiltonian:
         coeffs: Any = None,
         exclude: Any = None,
     ) -> np.ndarray:
-        """Return unique screened bra determinants connected from source kets.
+        """Return unique screened bras connected from kets.
 
         With coeffs, screening uses |H_ai c_i| >= eps.
         Without coeffs, screening uses |H_ai| >= eps.
@@ -117,19 +120,21 @@ class Hamiltonian:
 
     def project(
         self,
-        bras: Any,
+        bras: Any | None,
         kets: Any,
         coeffs: Any,
         *,
         eps: float = 0.0,
+        exclude: Any = None,
     ) -> Projection:
-        """Return screened H[bras, kets] @ coeffs.
+        """Return projected amplitudes on known or generated bras.
 
-        bras define the output axis.
-        kets and coeffs are aligned.
-        Contributions with absolute value below eps are skipped.
+        If bras is given, compute H[bras, kets] @ coeffs.
+        If bras is None, generate connected external bras from kets and
+        accumulate screened H_ai c_i contributions.
+
+        kets and coeffs are always aligned.
         """
-        bras_arr = to_dets(bras)
         kets_arr = to_dets(kets)
         coeff_arr = np.ascontiguousarray(
             np.asarray(coeffs, dtype=np.float64).reshape(-1)
@@ -138,24 +143,39 @@ class Hamiltonian:
         if coeff_arr.shape[0] != kets_arr.shape[0]:
             raise ValueError("coeffs length must match number of kets")
 
+        exclude_arr = None if exclude is None else to_dets(exclude)
+
+        if bras is None:
+            return self._raw.project(
+                None,
+                kets_arr,
+                coeff_arr,
+                float(eps),
+                exclude_arr,
+            )
+
+        if exclude is not None:
+            raise ValueError("exclude is only valid when bras is None")
+
         return self._raw.project(
-            bras_arr,
+            to_dets(bras),
             kets_arr,
             coeff_arr,
             float(eps),
+            None,
         )
 
-    def edges(self, dets: Any, eps: float) -> Edges:
-        """Return screened row connectivity for each determinant in dets."""
-        return self._raw.edges(to_dets(dets), float(eps))
+    def conns(self, kets: Any, eps: float) -> Conns:
+        """Return screened Hamiltonian connections generated from kets."""
+        return self._raw.conns(to_dets(kets), float(eps))
 
-    def degrees(self, dets: Any, eps: float) -> Degrees:
-        """Return screened row degrees and absolute Hamiltonian row weights.
+    def degrees(self, kets: Any, eps: float) -> Degrees:
+        """Return per-ket connection counts and absolute Hamiltonian weights.
 
-        This is the lightweight counterpart of edges(). It computes row_nnz
-        and row_weight without materializing connected determinants.
+        This is the lightweight counterpart of conns(). It computes ket_nconn
+        and ket_weight without materializing connected bras.
         """
-        return self._raw.degrees(to_dets(dets), float(eps))
+        return self._raw.degrees(to_dets(kets), float(eps))
 
     def matrix(
         self,
@@ -166,8 +186,8 @@ class Hamiltonian:
     ) -> Matrix | csr_matrix:
         """Return exact sparse H[bras, kets].
 
-        When raw=True, the internal Matrix object is returned.
-        Otherwise a scipy csr_matrix is returned.
+        When raw=True, return the internal Matrix object.
+        Otherwise return a scipy.sparse.csr_matrix.
         """
         bras_arr = to_dets(bras)
         kets_arr = bras_arr if kets is None else to_dets(kets)
@@ -177,11 +197,11 @@ class Hamiltonian:
         if raw:
             return out
 
-        row_ptr = np.array(out.row_ptr, dtype=np.int32, copy=True)
-        col = np.array(out.col, dtype=np.int32, copy=True)
-        data = np.array(out.h, dtype=np.float64, copy=True)
+        indptr = np.array(out.indptr, dtype=np.int32, copy=True)
+        indices = np.array(out.indices, dtype=np.int32, copy=True)
+        data = np.array(out.data, dtype=np.float64, copy=True)
 
-        return csr_matrix((data, col, row_ptr), shape=tuple(out.shape))
+        return csr_matrix((data, indices, indptr), shape=tuple(out.shape))
 
     def matvec(
         self,
@@ -192,8 +212,7 @@ class Hamiltonian:
     ) -> np.ndarray:
         """Return exact H[bras, kets] @ x.
 
-        kets defaults to bras.
-        A 2D x is forwarded to the C++ matmat kernel.
+        kets defaults to bras. A 2D x is forwarded to the C++ matmat kernel.
         """
         bras_arr = to_dets(bras)
         kets_arr = bras_arr if kets is None else to_dets(kets)
@@ -223,46 +242,46 @@ class Hamiltonian:
 
         raise ValueError("x must be a 1D vector or a 2D matrix")
 
-    def sample_edges(
+    def sample_conns(
         self,
-        dets: Any,
+        kets: Any,
         counts: Any | None = None,
         *,
         eps1: float = 1.0e-6,
         eps2: float = 0.0,
         seed: int = 0,
-    ) -> EdgeSamples:
-        """Return window row statistics and optional sampled edges.
+    ) -> ConnSamples:
+        """Return window connection statistics and optional sampled connections.
 
         The sampled window is eps2 <= |H_ai| < eps1.
 
-        If counts is omitted, only row_nnz and row_weight are returned.
-        If counts is provided, edges are sampled with probability
-        |H_ai| / row_weight within the window.
+        If counts is omitted, only ket_nconn and ket_weight are returned.
+        If counts is provided, connected bras are sampled with probability
+        |H_ai| / ket_weight within each ket.
         """
-        det_arr = to_dets(dets)
+        ket_arr = to_dets(kets)
 
         counts_arr = None
         if counts is not None:
             if np.isscalar(counts):
-                counts_arr = np.full(det_arr.shape[0], int(counts), dtype=np.int64)
+                counts_arr = np.full(ket_arr.shape[0], int(counts), dtype=np.int64)
             else:
                 counts_arr = np.ascontiguousarray(
                     np.asarray(counts, dtype=np.int64).reshape(-1)
                 )
 
-                if counts_arr.shape[0] != det_arr.shape[0]:
-                    raise ValueError("counts length must match number of determinants")
+                if counts_arr.shape[0] != ket_arr.shape[0]:
+                    raise ValueError("counts length must match number of kets")
 
-        return self._raw.sample_edges(
-            det_arr,
+        return self._raw.sample_conns(
+            ket_arr,
             counts_arr,
             float(eps1),
             float(eps2),
             int(seed),
         )
 
-    def sample_shell(
+    def sample_project(
         self,
         kets: Any,
         coeffs: Any,
@@ -273,11 +292,11 @@ class Hamiltonian:
         exclude: Any = None,
         n_rep: int = 1,
         seed: int = 0,
-    ) -> ShellSamples:
-        """Return aggregated weak-shell PT2 samples by replica.
+    ) -> ProjectSamples:
+        """Return sampled projected amplitudes by replica.
 
-        kets and coeffs define the source wave function.
-        A scalar counts broadcasts to all kets.
+        kets and coeffs define the source wavefunction. The weak window is
+        eps2 <= |H_ai c_i| < eps1. A scalar counts broadcasts to all kets.
         """
         ket_arr = to_dets(kets)
         coeff_arr = np.ascontiguousarray(
@@ -299,7 +318,7 @@ class Hamiltonian:
 
         exclude_arr = None if exclude is None else to_dets(exclude)
 
-        return self._raw.sample_shell(
+        return self._raw.sample_project(
             ket_arr,
             coeff_arr,
             float(eps1),

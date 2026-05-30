@@ -9,10 +9,10 @@
 namespace libdet {
 
 /*
- * Small deterministic RNG for row-local stochastic estimators.
+ * Small deterministic RNG for ket-local stochastic estimators.
  *
- * The seed is mixed with a determinant fingerprint so that row sampling is
- * reproducible and independent of thread scheduling.
+ * The seed is mixed with a ket fingerprint so sampling is reproducible and
+ * independent of thread scheduling.
  */
 class SmallRng {
 public:
@@ -33,12 +33,12 @@ private:
 
 [[nodiscard]] inline u64 sample_seed(
     u64 seed,
-    DetRef det,
+    DetRef ket,
     i64 rep = 0,
     int pair = 0
 ) noexcept {
     u64 x = splitmix64(seed ^ 0x243f6a8885a308d3ULL);
-    x = splitmix64(x ^ det_fingerprint(det));
+    x = splitmix64(x ^ det_fingerprint(ket));
     x = splitmix64(x ^ static_cast<u64>(rep + 1));
     x = splitmix64(x ^ (pair == 0 ? 0x13198a2e03707344ULL : 0xa4093822299f31d0ULL));
     return x;
@@ -49,11 +49,12 @@ private:
  *
  * For exact two-pass streaming sampling:
  *
- *   pass 1: compute norm = sum_y |H_xy|
- *   pass 2: scan edges in the same deterministic order and hit sorted targets
+ *   pass 1: compute norm = sum_a |H_ai|
+ *   pass 2: scan connected bras in the same deterministic order and hit
+ *           sorted targets
  *
- * This samples with probability p(y|x) = |H_xy| / norm without storing
- * the full row CDF.
+ * This samples connected bras with probability p(a|i) = |H_ai| / norm
+ * without storing the full ket-local CDF.
  */
 inline void make_targets(
     SmallRng& rng,

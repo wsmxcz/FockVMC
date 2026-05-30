@@ -26,13 +26,13 @@ class SampleBatch:
         Number of observed walkers at each determinant.
 
     mass:
-        Statistical mass entering the reweighted estimator.  For identity
-        observation, mass == count.  For degree-tilted blurred observation,
+        Statistical mass entering the reweighted estimator. For identity
+        observation, mass == count. For degree-tilted blurred observation,
 
             mass(y) = sum_{i: Y_i = y} s(X_i),
 
-        where s(x) = d_B(x) for non-empty blur rows and s(x) = 1 for empty
-        blur rows.
+        where s(x) = d_B(x) for non-empty blur kets and s(x) = 1 for empty
+        blur kets.
     """
 
     dets: np.ndarray
@@ -51,7 +51,7 @@ class WalkerState:
         {(x_u, m_u, log|psi(x_u)|)}, with sum_u m_u = n_chains.
 
     alpha:
-        Numeric exponent used by the reference law in this state.  When the
+        Numeric exponent used by the reference law in this state. When the
         sampler is configured with alpha="adaptive", MCState updates this
         scalar after each estimator pass.
     """
@@ -73,7 +73,7 @@ class MCSampler:
 
     Observation kernel:
         B_beta(y|x) = (1 - beta_x) delta_xy + beta_x K(y|x),
-        K(y|x)      = |H_xy| / d_B(x).
+        K(y|x)      = |H_yx| / d_B(x).
 
     If d_B(x) = 0, beta_x is set to zero and the walker stays at x.
 
@@ -84,7 +84,7 @@ class MCSampler:
         consecutive observations.
 
     alpha:
-        A numeric value gives a fixed reference exponent.  The string
+        A numeric value gives a fixed reference exponent. The string
         "adaptive" initializes the exponent at 1.0 and lets MCState update the
         numeric value stored in WalkerState.alpha.
     """
@@ -157,11 +157,11 @@ class MCSampler:
 
                 dets = np.zeros((n_chains, 2, nword), dtype=np.uint64)
 
-                for i in range(n_chains):
+                for ichain in range(n_chains):
                     for spin, n_elec in enumerate((int(n_alpha), int(n_beta))):
                         for p in rng.choice(norb, size=n_elec, replace=False):
                             p = int(p)
-                            dets[i, spin, p >> 6] |= (
+                            dets[ichain, spin, p >> 6] |= (
                                 np.uint64(1) << np.uint64(p & 63)
                             )
 
@@ -250,11 +250,11 @@ class MCSampler:
 
         accepted = 0
         proposed = 0
-        n_edge_proposal = 0
-        n_edge_blur = 0
+        n_conn_proposal = 0
+        n_conn_blur = 0
 
         for _ in range(max(0, int(self.discard_steps))):
-            state, acc, prop, n_edge = self._move(
+            state, acc, prop, n_conn = self._move(
                 theta,
                 hamiltonian,
                 model,
@@ -263,7 +263,7 @@ class MCSampler:
             )
             accepted += acc
             proposed += prop
-            n_edge_proposal += n_edge
+            n_conn_proposal += n_conn
 
         det_parts: list[np.ndarray] = []
         count_parts: list[np.ndarray] = []
@@ -297,7 +297,7 @@ class MCSampler:
                     base_count = sample_count[keep]
                     state = replace(state, key=key)
 
-            state, obs_dets, obs_count, obs_mass, n_edge = self._observe(
+            state, obs_dets, obs_count, obs_mass, n_conn = self._observe(
                 hamiltonian,
                 state,
                 base_dets,
@@ -309,11 +309,11 @@ class MCSampler:
                 det_parts.append(obs_dets)
                 count_parts.append(obs_count)
                 mass_parts.append(obs_mass)
-                n_edge_blur += n_edge
+                n_conn_blur += n_conn
 
             # Observations are separated by sweep_steps raw Metropolis moves.
             for _ in range(sweep_steps):
-                state, acc, prop, n_edge = self._move(
+                state, acc, prop, n_conn = self._move(
                     theta,
                     hamiltonian,
                     model,
@@ -322,7 +322,7 @@ class MCSampler:
                 )
                 accepted += acc
                 proposed += prop
-                n_edge_proposal += n_edge
+                n_conn_proposal += n_conn
 
             remaining -= take
 
@@ -349,8 +349,8 @@ class MCSampler:
 
         stats = {
             "accept": float(accept),
-            "n_edge_proposal": float(n_edge_proposal),
-            "n_edge_blur": float(n_edge_blur),
+            "n_conn_proposal": float(n_conn_proposal),
+            "n_conn_blur": float(n_conn_blur),
         }
         stats.update(timer.stats())
 
@@ -373,13 +373,12 @@ class MCSampler:
 
         Acceptance probability:
 
-            a(x -> y) = min(1, exp[
-                alpha (log|psi(y)| - log|psi(x)|)
-                + log q(x|y) - log q(y|x)
+            a(ket -> bra) = min(1, exp[
+                alpha (log|psi(bra)| - log|psi(ket)|)
+                + log q(ket|bra) - log q(bra|ket)
             ]).
         """
         timer = utils.Timer() if timer is None else timer
-        pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
 
         with timer("sample"):
@@ -390,8 +389,8 @@ class MCSampler:
             alpha = rdtype(state.alpha)
             dets = state.dets
             count = state.count.astype(np.int64, copy=False)
-            logabs = pa(state.logabs, "calc", "real", host=True)
-            n_row = int(dets.shape[0])
+            logabs = precision.asarray(state.logabs, "calc", "real", host=True)
+            n_ket = int(dets.shape[0])
 
         with timer("graph"):
             batch = propose(
@@ -407,30 +406,30 @@ class MCSampler:
             proposed = int(np.sum(batch.count))
 
             if proposed == 0 or batch.dets.shape[0] == 0:
-                return replace(state, key=key), 0, proposed, int(batch.n_edge)
+                return replace(state, key=key), 0, proposed, int(batch.n_conn)
 
-            prop_logabs = np.empty(batch.dets.shape[0], dtype=rdtype)
+            bra_logabs = np.empty(batch.dets.shape[0], dtype=rdtype)
 
             # Avoid duplicate model evaluations for proposals already present
             # in the current counted support.
             _, first, inv_lookup = unique_dets(
                 np.concatenate([dets, batch.dets], axis=0)
             )
-            prop_first = first[inv_lookup[n_row:]]
-            known = prop_first < n_row
+            bra_first = first[inv_lookup[n_ket:]]
+            known = bra_first < n_ket
 
             if known.any():
-                prop_logabs[known] = logabs[prop_first[known]]
+                bra_logabs[known] = logabs[bra_first[known]]
 
         if (~known).any():
-            prop_unk = np.ascontiguousarray(batch.dets[~known])
+            unknown_bras = np.ascontiguousarray(batch.dets[~known])
 
             with timer("forward"):
-                prop_logabs_jax = utils.apply(model.logabs, theta, prop_unk)
-                jax.block_until_ready(prop_logabs_jax)
+                bra_logabs_jax = utils.apply(model.logabs, theta, unknown_bras)
+                jax.block_until_ready(bra_logabs_jax)
 
-                prop_logabs[~known] = pa(
-                    np.asarray(utils.host(prop_logabs_jax)).reshape(-1),
+                bra_logabs[~known] = precision.asarray(
+                    np.asarray(utils.host(bra_logabs_jax)).reshape(-1),
                     "calc",
                     "real",
                     host=True,
@@ -438,8 +437,8 @@ class MCSampler:
 
         with timer("sample"):
             log_ratio = (
-                alpha * (prop_logabs[batch.dst] - logabs[batch.src])
-                + pa(batch.log_qratio, "calc", "real", host=True)
+                alpha * (bra_logabs[batch.bra] - logabs[batch.ket])
+                + precision.asarray(batch.log_qratio, "calc", "real", host=True)
             )
 
             accept_prob = np.clip(
@@ -452,14 +451,14 @@ class MCSampler:
             accepted = int(accepted_g.sum())
 
             next_count = count.copy()
-            np.add.at(next_count, batch.src, -accepted_g)
+            np.add.at(next_count, batch.ket, -accepted_g)
 
-            prop_count = np.zeros(batch.dets.shape[0], dtype=np.int64)
-            np.add.at(prop_count, batch.dst, accepted_g)
+            bra_count = np.zeros(batch.dets.shape[0], dtype=np.int64)
+            np.add.at(bra_count, batch.bra, accepted_g)
 
             all_dets = np.concatenate([dets, batch.dets], axis=0)
-            all_count = np.concatenate([next_count, prop_count])
-            all_logabs = np.concatenate([logabs, prop_logabs])
+            all_count = np.concatenate([next_count, bra_count])
+            all_logabs = np.concatenate([logabs, bra_logabs])
 
             next_dets, first, inv = unique_dets(all_dets)
 
@@ -472,12 +471,17 @@ class MCSampler:
                 key=key,
                 dets=np.ascontiguousarray(next_dets[keep]),
                 count=merged_count[keep],
-                logabs=pa(all_logabs[first][keep], "calc", "real", host=True),
+                logabs=precision.asarray(
+                    all_logabs[first][keep],
+                    "calc",
+                    "real",
+                    host=True,
+                ),
                 accept=accepted / proposed if proposed else 0.0,
                 alpha=float(state.alpha),
             )
 
-        return next_state, accepted, proposed, int(batch.n_edge)
+        return next_state, accepted, proposed, int(batch.n_conn)
 
     def _observe(
         self,
@@ -492,17 +496,17 @@ class MCSampler:
 
         With blur disabled, this returns identity observations with mass=count.
 
-        With Hamiltonian blur enabled, observations are still drawn from
+        With Hamiltonian blur enabled, observations are drawn from
 
             B(y|x) = (1 - beta_x) delta_xy
                    + beta_x |H_yx| / d_B(x),
 
-        but each realized observation carries source mass
+        and each realized observation carries source mass
 
             s(x) = d_B(x) if d_B(x) > 0 else 1.
 
-        This degree-tilted mass is what removes the need for second-order
-        degree lookups when the observed density is evaluated in MCState.
+        This degree-tilted mass removes the need for second-order degree
+        lookups when the observed density is evaluated in MCState.
         """
         timer = utils.Timer() if timer is None else timer
         rdtype = precision.dtype("calc", "real", host=True)
@@ -531,13 +535,13 @@ class MCSampler:
                 self.proposal_eps if self.blur_eps is None else self.blur_eps
             )
 
-            # Draw attempted blur moves first. Rows with d_B=0 are corrected
-            # after row weights have been computed by sample_edges.
+            # Draw attempted blur moves first. Kets with d_B=0 are corrected
+            # after ket weights have been computed by sample_conns.
             move = rng.binomial(base_count, beta).astype(np.int64)
             stay = base_count - move
 
         with timer("graph"):
-            sample = hamiltonian.sample_edges(
+            sample = hamiltonian.sample_conns(
                 base_dets,
                 move,
                 eps1=np.inf,
@@ -546,53 +550,52 @@ class MCSampler:
             )
 
         with timer("sample"):
-            row_weight = precision.asarray(
-                np.asarray(sample.row_weight),
+            ket_weight = precision.asarray(
+                np.asarray(sample.ket_weight),
                 "calc",
                 "real",
                 host=True,
             )
 
-            # Empty blur rows use beta_x=0 and source mass s(x)=1.
-            dead = row_weight <= 0.0
+            # Empty blur kets use beta_x=0 and source mass s(x)=1.
+            dead = ket_weight <= 0.0
             if dead.any():
                 stay[dead] += move[dead]
                 move[dead] = 0
 
-            source_mass = np.where(row_weight > 0.0, row_weight, rdtype(1.0))
+            source_mass = np.where(ket_weight > 0.0, ket_weight, rdtype(1.0))
             stay_mass = stay.astype(rdtype, copy=False) * source_mass
 
             parts = [base_dets]
             counts = [stay]
             masses = [stay_mass]
 
-            n_edge_blur = int(np.asarray(sample.h).size)
+            n_conn_blur = int(np.asarray(sample.ket_nconn, dtype=np.int64).sum())
 
-            if n_edge_blur > 0:
-                sampled_dets = np.ascontiguousarray(
-                    np.asarray(sample.dets, dtype=np.uint64)
+            sampled_bras = np.ascontiguousarray(
+                np.asarray(sample.bras, dtype=np.uint64)
+            )
+
+            if sampled_bras.shape[0] > 0:
+                sampled_count = np.asarray(sample.counts, dtype=np.int64)
+                sampled_ket = np.asarray(sample.ket, dtype=np.int64)
+
+                sampled_mass_raw = (
+                    sampled_count.astype(rdtype, copy=False)
+                    * source_mass[sampled_ket]
                 )
 
-                if sampled_dets.shape[0] > 0:
-                    sampled_count = np.asarray(sample.counts, dtype=np.int64)
-                    sampled_rows = np.asarray(sample.rows, dtype=np.int64)
+                obs_dets, _, obs_inv = unique_dets(sampled_bras)
 
-                    sampled_mass_raw = (
-                        sampled_count.astype(rdtype, copy=False)
-                        * source_mass[sampled_rows]
-                    )
+                obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
+                obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
 
-                    obs_dets, _, obs_inv = unique_dets(sampled_dets)
+                np.add.at(obs_count, obs_inv, sampled_count)
+                np.add.at(obs_mass, obs_inv, sampled_mass_raw)
 
-                    obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
-                    obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
-
-                    np.add.at(obs_count, obs_inv, sampled_count)
-                    np.add.at(obs_mass, obs_inv, sampled_mass_raw)
-
-                    parts.append(obs_dets)
-                    counts.append(obs_count)
-                    masses.append(obs_mass)
+                parts.append(obs_dets)
+                counts.append(obs_count)
+                masses.append(obs_mass)
 
             obs_dets, _, inv = unique_dets(np.concatenate(parts, axis=0))
             raw_count = np.concatenate(counts).astype(np.int64, copy=False)
@@ -611,5 +614,5 @@ class MCSampler:
             np.ascontiguousarray(obs_dets[keep]),
             obs_count[keep],
             obs_mass[keep],
-            n_edge_blur,
+            n_conn_blur,
         )

@@ -24,16 +24,16 @@ def unique_dets(dets: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         Input-to-unique index map.
     """
     dets = libdet.to_dets(dets)
-    n = int(dets.shape[0])
+    n_dets = int(dets.shape[0])
 
-    if n == 0:
+    if n_dets == 0:
         return (
             np.ascontiguousarray(dets),
             np.empty(0, dtype=np.int64),
             np.empty(0, dtype=np.int64),
         )
 
-    flat = np.ascontiguousarray(dets.reshape(n, 2 * int(dets.shape[2])))
+    flat = np.ascontiguousarray(dets.reshape(n_dets, 2 * int(dets.shape[2])))
     key = flat.view(np.dtype((np.void, flat.dtype.itemsize * flat.shape[1]))).ravel()
 
     _, first, inv = np.unique(key, return_index=True, return_inverse=True)
@@ -53,32 +53,32 @@ def unique_dets(dets: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 class ProposalBatch:
     """Grouped proposals for one raw Metropolis step.
 
-    The counted walker state is {(x_u, m_u)}. This batch groups all walkers
-    proposing the same source/destination pair, so the accept/reject step can
-    use one binomial draw per grouped move.
+    The counted walker state is {(ket_u, count_u)}. This batch groups all
+    walkers proposing the same ket/bra move, so the accept/reject step can use
+    one binomial draw per grouped move.
 
     Attributes
     ----------
-    src:
-        Source row indices into the counted walker support.
+    ket:
+        Source determinant indices into the counted walker support.
     count:
         Number of walkers proposing each grouped move.
     dets:
-        Unique proposed determinants.
-    dst:
-        Destination row indices into dets.
+        Unique proposed bra determinants.
+    bra:
+        Proposed bra indices into dets.
     log_qratio:
-        log q(x|y) - log q(y|x) for each grouped move.
-    n_edge:
-        Number of Hamiltonian proposal edges touched while generating moves.
+        log q(ket|bra) - log q(bra|ket) for each grouped move.
+    n_conn:
+        Number of Hamiltonian connections scanned while generating moves.
     """
 
-    src: np.ndarray
+    ket: np.ndarray
     count: np.ndarray
     dets: np.ndarray
-    dst: np.ndarray
+    bra: np.ndarray
     log_qratio: np.ndarray
-    n_edge: int = 0
+    n_conn: int = 0
 
 
 def propose(
@@ -92,17 +92,17 @@ def propose(
 ) -> ProposalBatch:
     """Generate grouped proposal moves from a counted walker state.
 
-    The proposal layer owns only q(y|x) and the correction
+    The proposal layer owns only q(bra|ket) and the correction
 
-        log q(x|y) - log q(y|x).
+        log q(ket|bra) - log q(bra|ket).
 
-    It never evaluates the wave function and never accepts or rejects moves.
+    It never evaluates the wavefunction and never accepts or rejects moves.
     """
     dets = libdet.to_dets(dets)
     count = np.asarray(count, dtype=np.int64)
     name = str(name)
 
-    n_row = int(dets.shape[0])
+    n_ket = int(dets.shape[0])
     nword = int(dets.shape[2])
     rdtype = precision.dtype("calc", "real", host=True)
 
@@ -128,7 +128,7 @@ def propose(
             count,
             seed=int(seed),
             eps=float(eps),
-            n_row=n_row,
+            n_ket=n_ket,
             empty_dets=empty_dets,
             empty_i64=empty_i64,
             empty_real=empty_real,
@@ -149,11 +149,17 @@ def _single_proposal(
 ) -> ProposalBatch:
     """Uniform single excitation within a fixed (N_alpha, N_beta) sector."""
     rng = np.random.default_rng(seed)
-    n_row = int(dets.shape[0])
+    n_ket = int(dets.shape[0])
 
-    src = np.repeat(np.arange(n_row, dtype=np.int64), count)
-    if src.size == 0:
-        return ProposalBatch(empty_i64, empty_i64, empty_dets, empty_i64, empty_real)
+    ket = np.repeat(np.arange(n_ket, dtype=np.int64), count)
+    if ket.size == 0:
+        return ProposalBatch(
+            ket=empty_i64,
+            count=empty_i64,
+            dets=empty_dets,
+            bra=empty_i64,
+            log_qratio=empty_real,
+        )
 
     norb = int(hamiltonian.norb)
     orbitals = np.arange(norb, dtype=np.int64)
@@ -174,9 +180,15 @@ def _single_proposal(
     n_move = n_move_a + n_move_b
 
     if n_move <= 0:
-        return ProposalBatch(empty_i64, empty_i64, empty_dets, empty_i64, empty_real)
+        return ProposalBatch(
+            ket=empty_i64,
+            count=empty_i64,
+            dets=empty_dets,
+            bra=empty_i64,
+            log_qratio=empty_real,
+        )
 
-    move = rng.integers(n_move, size=src.size, dtype=np.int64)
+    move = rng.integers(n_move, size=ket.size, dtype=np.int64)
 
     spin = np.where(move < n_move_a, 0, 1).astype(np.int64)
     move_spin = np.where(spin == 0, move, move - n_move_a)
@@ -185,34 +197,34 @@ def _single_proposal(
     occ_rank = move_spin // n_vir
     vir_rank = move_spin % n_vir
 
-    src_occ = occ[src, spin, :]
-    src_vir = ~src_occ
+    ket_occ = occ[ket, spin, :]
+    ket_vir = ~ket_occ
 
-    occ_pos = np.cumsum(src_occ, axis=1) - 1
-    vir_pos = np.cumsum(src_vir, axis=1) - 1
+    occ_pos = np.cumsum(ket_occ, axis=1) - 1
+    vir_pos = np.cumsum(ket_vir, axis=1) - 1
 
-    occ_orb = np.argmax(src_occ & (occ_pos == occ_rank[:, None]), axis=1).astype(
+    occ_orb = np.argmax(ket_occ & (occ_pos == occ_rank[:, None]), axis=1).astype(
         np.int64
     )
-    vir_orb = np.argmax(src_vir & (vir_pos == vir_rank[:, None]), axis=1).astype(
+    vir_orb = np.argmax(ket_vir & (vir_pos == vir_rank[:, None]), axis=1).astype(
         np.int64
     )
 
-    prop_dets = np.ascontiguousarray(dets[src].copy())
-    rows = np.arange(src.size, dtype=np.int64)
+    bra_dets = np.ascontiguousarray(dets[ket].copy())
+    rows = np.arange(ket.size, dtype=np.int64)
 
     occ_word = occ_orb >> 6
     occ_bit = (occ_orb & 63).astype(np.uint64)
     vir_word = vir_orb >> 6
     vir_bit = (vir_orb & 63).astype(np.uint64)
 
-    prop_dets[rows, spin, occ_word] &= ~(np.uint64(1) << occ_bit)
-    prop_dets[rows, spin, vir_word] |= np.uint64(1) << vir_bit
+    bra_dets[rows, spin, occ_word] &= ~(np.uint64(1) << occ_bit)
+    bra_dets[rows, spin, vir_word] |= np.uint64(1) << vir_bit
 
-    prop, _, dst = unique_dets(prop_dets)
+    bras, _, bra = unique_dets(bra_dets)
 
-    pair = np.column_stack((src, dst))
-    _, first, inv0 = np.unique(pair, axis=0, return_index=True, return_inverse=True)
+    move_key = np.column_stack((ket, bra))
+    _, first, inv0 = np.unique(move_key, axis=0, return_index=True, return_inverse=True)
 
     order = np.argsort(first, kind="stable")
     first = first[order]
@@ -222,16 +234,16 @@ def _single_proposal(
     inv = remap[inv0]
 
     grouped_count = np.bincount(inv, minlength=order.size).astype(np.int64)
-    grouped_src = src[first].astype(np.int64, copy=False)
-    grouped_dst = dst[first].astype(np.int64, copy=False)
+    grouped_ket = ket[first].astype(np.int64, copy=False)
+    grouped_bra = bra[first].astype(np.int64, copy=False)
 
     return ProposalBatch(
-        src=grouped_src,
+        ket=grouped_ket,
         count=grouped_count,
-        dets=prop,
-        dst=grouped_dst,
+        dets=bras,
+        bra=grouped_bra,
         log_qratio=np.zeros(grouped_count.shape[0], dtype=empty_real.dtype),
-        n_edge=0,
+        n_conn=0,
     )
 
 
@@ -242,24 +254,23 @@ def _ham_proposal(
     *,
     seed: int,
     eps: float,
-    n_row: int,
+    n_ket: int,
     empty_dets: np.ndarray,
     empty_i64: np.ndarray,
     empty_real: np.ndarray,
 ) -> ProposalBatch:
     """Hamiltonian heat-bath proposal.
 
-    q(y|x) = |H_xy| / d_A(x),
-    d_A(x) = sum_z |H_xz| 1(|H_xz| >= eps).
+    q(bra|ket) = |H_bra,ket| / d_A(ket),
+    d_A(ket)   = sum_bra |H_bra,ket| 1(|H_bra,ket| >= eps).
 
-    For a symmetric Hamiltonian graph, |H_xy| cancels in the
-    Metropolis-Hastings ratio, leaving log d_A(x) - log d_A(y).
+    For a symmetric Hamiltonian connection set, |H_bra,ket| cancels in the
+    Metropolis-Hastings ratio, leaving log d_A(ket) - log d_A(bra).
     """
-    pa = precision.asarray
     rdtype = precision.dtype("calc", "real", host=True)
     tiny = rdtype(precision.tiny("calc"))
 
-    sample = hamiltonian.sample_edges(
+    sample = hamiltonian.sample_conns(
         dets,
         count,
         eps1=np.inf,
@@ -267,59 +278,59 @@ def _ham_proposal(
         seed=int(seed),
     )
 
-    degree_x = pa(np.asarray(sample.row_weight), "calc", "real", host=True)
-    n_edge = int(np.asarray(sample.h).size)
+    ket_weight = precision.asarray(
+        np.asarray(sample.ket_weight),
+        "calc",
+        "real",
+        host=True,
+    )
+    n_conn = int(np.asarray(sample.ket_nconn, dtype=np.int64).sum())
 
-    if n_edge == 0:
+    sampled_ket = np.asarray(sample.ket, dtype=np.int64)
+    sampled_count = np.asarray(sample.counts, dtype=np.int64)
+    sampled_bras = np.ascontiguousarray(np.asarray(sample.bras, dtype=np.uint64))
+
+    if sampled_ket.size == 0 or sampled_bras.shape[0] == 0:
         return ProposalBatch(
-            src=empty_i64,
+            ket=empty_i64,
             count=empty_i64,
             dets=empty_dets,
-            dst=empty_i64,
+            bra=empty_i64,
             log_qratio=empty_real,
-            n_edge=n_edge,
+            n_conn=n_conn,
         )
 
-    src = np.asarray(sample.rows, dtype=np.int64)
-    grouped_count = np.asarray(sample.counts, dtype=np.int64)
-    pair_dets = np.ascontiguousarray(np.asarray(sample.dets, dtype=np.uint64))
+    bras, _, bra = unique_dets(sampled_bras)
+    bra_weight = np.empty(bras.shape[0], dtype=rdtype)
 
-    if src.size == 0 or pair_dets.shape[0] == 0:
-        return ProposalBatch(
-            src=empty_i64,
-            count=empty_i64,
-            dets=empty_dets,
-            dst=empty_i64,
-            log_qratio=empty_real,
-            n_edge=n_edge,
-        )
-
-    prop, _, dst = unique_dets(pair_dets)
-    prop_degree = np.empty(prop.shape[0], dtype=rdtype)
-
-    # Reuse degrees for proposed determinants already in the walker support.
-    _, first, inv_lookup = unique_dets(np.concatenate([dets, prop], axis=0))
-    prop_first = first[inv_lookup[n_row:]]
-    known = prop_first < n_row
+    # Reuse degrees for proposed bras already in the walker support.
+    _, first, inv_lookup = unique_dets(np.concatenate([dets, bras], axis=0))
+    bra_first = first[inv_lookup[n_ket:]]
+    known = bra_first < n_ket
 
     if known.any():
-        prop_degree[known] = degree_x[prop_first[known]]
+        bra_weight[known] = ket_weight[bra_first[known]]
 
     if (~known).any():
-        prop_unk = np.ascontiguousarray(prop[~known])
-        deg = hamiltonian.degrees(prop_unk, float(eps))
-        prop_degree[~known] = pa(np.asarray(deg.row_weight), "calc", "real", host=True)
+        unknown_bras = np.ascontiguousarray(bras[~known])
+        deg = hamiltonian.degrees(unknown_bras, float(eps))
+        bra_weight[~known] = precision.asarray(
+            np.asarray(deg.ket_weight),
+            "calc",
+            "real",
+            host=True,
+        )
 
     log_qratio = (
-        np.log(np.maximum(degree_x[src], tiny))
-        - np.log(np.maximum(prop_degree[dst], tiny))
+        np.log(np.maximum(ket_weight[sampled_ket], tiny))
+        - np.log(np.maximum(bra_weight[bra], tiny))
     )
 
     return ProposalBatch(
-        src=src,
-        count=grouped_count,
-        dets=prop,
-        dst=dst.astype(np.int64, copy=False),
-        log_qratio=pa(log_qratio, "calc", "real", host=True),
-        n_edge=n_edge,
+        ket=sampled_ket,
+        count=sampled_count,
+        dets=bras,
+        bra=bra.astype(np.int64, copy=False),
+        log_qratio=precision.asarray(log_qratio, "calc", "real", host=True),
+        n_conn=n_conn,
     )

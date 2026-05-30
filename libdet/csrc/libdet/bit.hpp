@@ -7,8 +7,8 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
-#include <vector>
 #include <utility>
+#include <vector>
 
 namespace libdet {
 
@@ -133,15 +133,17 @@ inline void clear(std::span<u64> x, int p) noexcept {
  *
  *   prefix[max(i,a)] - prefix[min(i,a)+1].
  *
- * Row-local prefix arrays make excitation signs O(1).
+ * Local prefix arrays make excitation signs O(1).
  */
 inline void fill_prefix(std::span<const u64> occ, int norb, std::vector<int>& prefix) {
     prefix.assign(static_cast<std::size_t>(norb + 1), 0);
     int acc = 0;
+
     for (int p = 0; p < norb; ++p) {
         prefix[static_cast<std::size_t>(p)] = acc;
         if (test(occ, p)) ++acc;
     }
+
     prefix[static_cast<std::size_t>(norb)] = acc;
 }
 
@@ -177,6 +179,7 @@ inline void each_set(std::span<const u64> x, F&& f) {
 
     for (std::size_t w = 0; w < x.size(); ++w) {
         u64 word = x[w];
+
         while (word != 0u) {
             const unsigned b = std::countr_zero(word);
             f(static_cast<int>((w << 6) + b));
@@ -193,11 +196,13 @@ inline void each_clear(std::span<const u64> occ, int norb, F&& f) {
             : ((u64{1} << static_cast<unsigned>(norb)) - 1u);
 
         u64 word = (~occ[0]) & valid;
+
         while (word != 0u) {
             const unsigned b = std::countr_zero(word);
             f(static_cast<int>(b));
             word &= (word - 1u);
         }
+
         return;
     }
 
@@ -211,6 +216,7 @@ inline void each_clear(std::span<const u64> occ, int norb, F&& f) {
             : ((u64{1} << static_cast<unsigned>(rem)) - 1u);
 
         u64 word = (~occ[w]) & valid;
+
         while (word != 0u) {
             const unsigned b = std::countr_zero(word);
             f(base + static_cast<int>(b));

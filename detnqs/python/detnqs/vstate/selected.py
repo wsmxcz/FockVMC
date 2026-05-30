@@ -25,7 +25,7 @@ class SelectedState:
     """Variational state on a selected determinant space V.
 
     The Hamiltonian is projected to H[V, V]. The selected space can be evolved
-    by expanding connected determinants and then applying a user-provided
+    by expanding connected external bras and then applying a user-provided
     selector.
 
     Estimator:
@@ -68,7 +68,7 @@ class SelectedState:
             params=variables["params"],
             hamiltonian=hamiltonian,
             v_dets=v_dets,
-            h_vv=hamiltonian.matrix(v_dets, v_dets),
+            h_vv=hamiltonian.matrix(v_dets),
         )
 
     @property
@@ -85,8 +85,8 @@ class SelectedState:
         """Update the selected space and rebuild H[V, V].
 
         If eps is provided, the current selected space is first expanded by
-        screened Hamiltonian-connected determinants. The selector then receives
-        log|psi| and the candidate determinant table, and returns the next V.
+        screened connected bras. The selector then receives log|psi| and the
+        candidate determinant table, and returns the next V.
         """
         dets = self.v_dets
 
@@ -101,16 +101,18 @@ class SelectedState:
             if norm > 0.0:
                 coeffs = coeffs / norm
 
-            ext = self.hamiltonian.expand(
+            cand_bras = self.hamiltonian.expand(
                 self.v_dets,
                 float(eps),
                 coeffs=coeffs,
                 exclude=self.v_dets,
             )
 
-            ext = libdet.to_dets(ext)
-            if ext.shape[0] > 0:
-                dets = np.ascontiguousarray(np.concatenate([self.v_dets, ext], axis=0))
+            cand_bras = libdet.to_dets(cand_bras)
+            if cand_bras.shape[0] > 0:
+                dets = np.ascontiguousarray(
+                    np.concatenate([self.v_dets, cand_bras], axis=0)
+                )
 
         logabs_jax = utils.apply(self.model.logabs, self.params, dets)
         jax.block_until_ready(logabs_jax)
@@ -130,7 +132,7 @@ class SelectedState:
         return replace(
             self,
             v_dets=v_dets,
-            h_vv=self.hamiltonian.matrix(v_dets, v_dets),
+            h_vv=self.hamiltonian.matrix(v_dets),
         )
 
     def expect(self) -> tuple[Self, dict[str, float]]:
@@ -149,7 +151,6 @@ class SelectedState:
     def _run(self, *, grad: bool, geometry: bool):
         """Evaluate projected energy, optional gradient, and optional geometry."""
         timer = utils.Timer()
-        pa = precision.asarray
         rdtype = precision.dtype("calc", "real", host=True)
 
         with timer("forward"):
@@ -158,13 +159,13 @@ class SelectedState:
             logpsi_h = utils.host(logpsi_jax)
 
         with timer("reduce"):
-            psi = pa(
+            psi = precision.asarray(
                 np.asarray(to_psi(logpsi_h)).reshape(-1),
                 "calc",
                 host=True,
             )
 
-            hpsi = pa(
+            hpsi = precision.asarray(
                 np.asarray(self.h_vv.dot(psi)).reshape(-1),
                 "calc",
                 host=True,
@@ -189,12 +190,12 @@ class SelectedState:
                     self.model.coord,
                     self.params,
                     self.v_dets,
-                    utils.device(pa(cot, "model", "real", host=True)),
+                    utils.device(precision.asarray(cot, "model", "real", host=True)),
                 )
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    w = pa(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
+                    w = precision.asarray(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
                     sqrt_w = np.sqrt(w)
 
                     b_log = np.zeros_like(dlogpsi)
@@ -206,7 +207,7 @@ class SelectedState:
                         x=self.v_dets,
                         w=utils.device(w),
                         b=utils.device(
-                            pa(
+                            precision.asarray(
                                 self.model.cotangent(logpsi_h, b_log),
                                 "sr",
                                 "real",

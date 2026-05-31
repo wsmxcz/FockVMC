@@ -24,29 +24,20 @@ class MinSRState(NamedTuple):
 
     step: jax.Array
     shift: jax.Array
+    stats: dict[str, jax.Array]
 
 
 def minsr(
     *,
     shift: Shift = 1.0e-3,
-    fallback: bool = False,
 ) -> optax.GradientTransformationExtraArgs:
     """Dense sample-space minimum-step SR.
-
-    Given
-
-        O = sqrt(w) * (J - <J>_w),
-        K = O O^dagger,
 
     minSR solves
 
         (K + shift I) a = b,
 
-    and returns
-
-        delta = O^dagger a.
-
-    The incoming Optax update is ignored. The right hand side is geometry.b.
+    with K = O O^dagger, then returns delta = O^dagger a.
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
@@ -56,10 +47,22 @@ def minsr(
 
         step = jnp.zeros((), dtype=jnp.int32)
         value = shift(step) if callable(shift) else shift
+        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
 
         return MinSRState(
             step=step,
-            shift=jnp.asarray(value, dtype=precision.dtype("sr", "real")),
+            shift=shift_t,
+            stats={
+                "sr_shift": shift_t,
+                "sr_residual": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_step_norm": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_eig_min": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_eig_max": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_trace": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_rank_eff": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_dof": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_cond": jnp.asarray(0.0, dtype=shift_t.dtype),
+            },
         )
 
     def update_fn(
@@ -78,7 +81,7 @@ def minsr(
         value = shift(state.step) if callable(shift) else shift
         shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
 
-        delta = batch.bucket(
+        delta_raw, info = batch.bucket(
             _step,
             geometry.coord,
             geometry.theta,
@@ -86,17 +89,39 @@ def minsr(
             precision.asarray(normalize(geometry.w), "model", "real"),
             precision.asarray(geometry.b, "model", "real"),
             shift_t,
-            bool(fallback),
-            in_axes=(None, None, 0, 0, 0, None, None),
+            in_axes=(None, None, 0, 0, 0, None),
             out_axes=None,
-            static_argnums=(0, 6),
+            static_argnums=0,
         )
 
-        delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta, geometry.theta)
+        delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta_raw, geometry.theta)
+
+        real_dtype = precision.dtype("sr", "real")
+        step_norm2 = sum(
+            (
+                jnp.sum(jnp.real(jnp.asarray(leaf) * jnp.conj(jnp.asarray(leaf))))
+                for leaf in jax.tree.leaves(delta)
+            ),
+            jnp.asarray(0.0, dtype=real_dtype),
+        )
+        step_norm = jnp.sqrt(step_norm2)
+
+        stats = {
+            "sr_shift": info["shift"],
+            "sr_residual": info["residual"],
+            "sr_step_norm": step_norm,
+            "sr_eig_min": info["eig_min"],
+            "sr_eig_max": info["eig_max"],
+            "sr_trace": info["trace"],
+            "sr_rank_eff": info["rank_eff"],
+            "sr_dof": info["dof"],
+            "sr_cond": info["cond"],
+        }
 
         return delta, MinSRState(
             step=state.step + 1,
-            shift=shift_t,
+            shift=info["shift"],
+            stats=stats,
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
@@ -109,8 +134,7 @@ def _step(
     w: jax.Array,
     b: jax.Array,
     shift: jax.Array,
-    fallback: bool,
-) -> Tree:
+) -> tuple[Tree, dict[str, jax.Array]]:
     """One minSR solve on one fixed-shape bucket."""
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
@@ -122,6 +146,7 @@ def _step(
 
     dtype = jnp.result_type(b_flat, *[p.dtype for p in theta_leaves])
     K = jnp.zeros((nrow, nrow), dtype=dtype)
+
     blocks = []
 
     for J, p in zip(jac_leaves, theta_leaves, strict=True):
@@ -135,11 +160,12 @@ def _step(
     K = precision.asarray(K, "sr")
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
 
-    a = linalg.solve_dense(K, rhs, shift, fallback=fallback).astype(dtype)
+    a, info = linalg.solve_dense(K, rhs, shift)
+    a = a.astype(dtype)
 
     leaves = [
         (O.conj().T @ a).reshape(p.shape)
         for O, p in zip(blocks, theta_leaves, strict=True)
     ]
 
-    return tree_util.tree_unflatten(treedef, leaves)
+    return tree_util.tree_unflatten(treedef, leaves), info

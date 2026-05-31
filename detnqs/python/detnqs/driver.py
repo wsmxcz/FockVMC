@@ -6,6 +6,7 @@ from typing import Any
 
 import jax
 import optax
+import detnqs
 
 from .utils import Timer
 
@@ -80,6 +81,7 @@ class VMC:
         out["loss"] = float(loss)
         out["step"] = float(self.step_count)
         out.update(timer.stats())
+        out.update(detnqs.optimizer.stats(self.opt_state))
 
         self.step_count += 1
         return out

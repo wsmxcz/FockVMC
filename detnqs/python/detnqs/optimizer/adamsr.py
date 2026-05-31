@@ -26,6 +26,7 @@ class AdamSRState(NamedTuple):
     p: Tree
     v: Tree
     shift: jax.Array
+    stats: dict[str, jax.Array]
 
 
 def adamsr(
@@ -33,7 +34,6 @@ def adamsr(
     shift: Shift = 1.0e-3,
     beta1: float = 0.9,
     beta2: float = 0.999,
-    fallback: bool = False,
 ) -> optax.GradientTransformationExtraArgs:
     """Adam-style sample-space SR.
 
@@ -66,12 +66,24 @@ def adamsr(
     def init_fn(params: Tree) -> AdamSRState:
         step = jnp.zeros((), dtype=jnp.int32)
         value = shift(step) if callable(shift) else shift
+        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
 
         return AdamSRState(
             step=step,
             p=jax.tree.map(jnp.zeros_like, params),
             v=jax.tree.map(lambda x: jnp.zeros_like(jnp.real(jnp.asarray(x))), params),
-            shift=jnp.asarray(value, dtype=precision.dtype("sr", "real")),
+            shift=shift_t,
+            stats={
+                "sr_shift": shift_t,
+                "sr_residual": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_step_norm": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_eig_min": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_eig_max": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_trace": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_rank_eff": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_dof": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_cond": jnp.asarray(0.0, dtype=shift_t.dtype),
+            },
         )
 
     def update_fn(
@@ -90,7 +102,7 @@ def adamsr(
         value = shift(state.step) if callable(shift) else shift
         shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
 
-        delta_raw, q_raw = batch.bucket(
+        delta_raw, q_raw, info = batch.bucket(
             _step,
             geometry.coord,
             geometry.theta,
@@ -102,10 +114,9 @@ def adamsr(
             shift_t,
             jnp.asarray(beta2, dtype=precision.dtype("sr", "real")),
             state.step,
-            bool(fallback),
-            in_axes=(None, None, None, None, 0, 0, 0, None, None, None, None),
+            in_axes=(None, None, None, None, 0, 0, 0, None, None, None),
             out_axes=None,
-            static_argnums=(0, 10),
+            static_argnums=0,
         )
 
         v_next = jax.tree.map(
@@ -125,11 +136,34 @@ def adamsr(
 
         delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta_raw, geometry.theta)
 
+        real_dtype = precision.dtype("sr", "real")
+        step_norm2 = sum(
+            (
+                jnp.sum(jnp.real(jnp.asarray(leaf) * jnp.conj(jnp.asarray(leaf))))
+                for leaf in jax.tree.leaves(delta)
+            ),
+            jnp.asarray(0.0, dtype=real_dtype),
+        )
+        step_norm = jnp.sqrt(step_norm2)
+
+        stats = {
+            "sr_shift": info["shift"],
+            "sr_residual": info["residual"],
+            "sr_step_norm": step_norm,
+            "sr_eig_min": info["eig_min"],
+            "sr_eig_max": info["eig_max"],
+            "sr_trace": info["trace"],
+            "sr_rank_eff": info["rank_eff"],
+            "sr_dof": info["dof"],
+            "sr_cond": info["cond"],
+        }
+
         return delta, AdamSRState(
             step=state.step + 1,
             p=p_next,
             v=v_next,
-            shift=shift_t,
+            shift=info["shift"],
+            stats=stats,
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
@@ -146,8 +180,7 @@ def _step(
     shift: jax.Array,
     beta2: jax.Array,
     step: jax.Array,
-    fallback: bool,
-) -> tuple[Tree, Tree]:
+) -> tuple[Tree, Tree, dict[str, jax.Array]]:
     """One AdamSR solve on one fixed-shape bucket."""
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
@@ -216,7 +249,8 @@ def _step(
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
     rhs = rhs - precision.asarray(Op, "sr").astype(K.dtype)
 
-    a = linalg.solve_dense(K, rhs, shift, fallback=fallback).astype(dtype)
+    a, info = linalg.solve_dense(K, rhs, shift)
+    a = a.astype(dtype)
 
     q_leaves = []
     delta_leaves = []
@@ -232,4 +266,5 @@ def _step(
     return (
         tree_util.tree_unflatten(treedef, delta_leaves),
         tree_util.tree_unflatten(treedef, q_leaves),
+        info,
     )

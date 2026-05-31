@@ -25,6 +25,8 @@ class SRState(NamedTuple):
 
     step: jax.Array
     shift: jax.Array
+    x0: jax.Array
+    stats: dict[str, jax.Array]
 
 
 def sr(
@@ -32,21 +34,14 @@ def sr(
     shift: Shift = 1.0e-3,
     mode: Mode = "matvec",
     maxiter: int = 64,
-    fallback: bool = False,
 ) -> optax.GradientTransformationExtraArgs:
     """Parameter-space stochastic reconfiguration.
 
-    Given
+    SR solves
 
-        O = sqrt(w) * (J - <J>_w),
-        S = O^dagger O,
+        (S + shift I) delta = g,
 
-    SR maps the incoming Optax update g to delta by solving
-
-        (S + shift I) delta = g.
-
-    This transform does not choose the optimization sign or learning rate.
-    Use optax.scale, optax.scale_by_schedule, clipping, or momentum outside it.
+    with S = O^dagger O and O = sqrt(w) * (J - <J>_w).
     """
     if mode not in {"dense", "matvec"}:
         raise ValueError("sr mode must be 'dense' or 'matvec'")
@@ -55,14 +50,35 @@ def sr(
         raise ValueError("shift must be non-negative")
 
     def init_fn(params: Tree) -> SRState:
-        del params
+        flat, _ = ravel_pytree(params)
 
         step = jnp.zeros((), dtype=jnp.int32)
         value = shift(step) if callable(shift) else shift
+        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
+
+        stats = {
+            "sr_shift": shift_t,
+            "sr_residual": jnp.asarray(0.0, dtype=shift_t.dtype),
+            "sr_step_norm": jnp.asarray(0.0, dtype=shift_t.dtype),
+        }
+
+        if mode == "dense":
+            stats.update(
+                {
+                    "sr_eig_min": jnp.asarray(0.0, dtype=shift_t.dtype),
+                    "sr_eig_max": jnp.asarray(0.0, dtype=shift_t.dtype),
+                    "sr_trace": jnp.asarray(0.0, dtype=shift_t.dtype),
+                    "sr_rank_eff": jnp.asarray(0.0, dtype=shift_t.dtype),
+                    "sr_dof": jnp.asarray(0.0, dtype=shift_t.dtype),
+                    "sr_cond": jnp.asarray(0.0, dtype=shift_t.dtype),
+                }
+            )
 
         return SRState(
             step=step,
-            shift=jnp.asarray(value, dtype=precision.dtype("sr", "real")),
+            shift=shift_t,
+            x0=jnp.zeros_like(flat),
+            stats=stats,
         )
 
     def update_fn(
@@ -86,37 +102,68 @@ def sr(
         updates = jax.tree.map(lambda g, p: jnp.asarray(g).astype(p.dtype), updates, theta)
 
         if mode == "dense":
-            delta = _dense_step(
+            delta, info = _dense_step(
                 geometry.coord,
                 theta,
                 geometry.x,
                 w,
                 updates,
                 shift_t,
-                bool(fallback),
             )
+            x0_next = state.x0
         else:
-            delta = _matvec_step(
+            delta, x0_next, info = _matvec_step(
                 geometry.coord,
                 theta,
                 geometry.x,
                 w,
                 updates,
                 shift_t,
+                state.x0,
                 int(maxiter),
             )
 
         delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta, theta)
 
+        real_dtype = precision.dtype("sr", "real")
+        step_norm2 = sum(
+            (
+                jnp.sum(jnp.real(jnp.asarray(leaf) * jnp.conj(jnp.asarray(leaf))))
+                for leaf in jax.tree.leaves(delta)
+            ),
+            jnp.asarray(0.0, dtype=real_dtype),
+        )
+        step_norm = jnp.sqrt(step_norm2)
+
+        stats = {
+            "sr_shift": info["shift"],
+            "sr_residual": info["residual"],
+            "sr_step_norm": step_norm,
+        }
+
+        if mode == "dense":
+            stats.update(
+                {
+                    "sr_eig_min": info["eig_min"],
+                    "sr_eig_max": info["eig_max"],
+                    "sr_trace": info["trace"],
+                    "sr_rank_eff": info["rank_eff"],
+                    "sr_dof": info["dof"],
+                    "sr_cond": info["cond"],
+                }
+            )
+
         return delta, SRState(
             step=state.step + 1,
-            shift=shift_t,
+            shift=info["shift"],
+            x0=x0_next,
+            stats=stats,
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
-@partial(jax.jit, static_argnums=(0, 6))
+@partial(jax.jit, static_argnums=0)
 def _dense_step(
     coord,
     theta: Tree,
@@ -124,8 +171,7 @@ def _dense_step(
     w: jax.Array,
     updates: Tree,
     shift: jax.Array,
-    fallback: bool,
-) -> Tree:
+) -> tuple[Tree, dict[str, jax.Array]]:
     updates_flat, unravel = ravel_pytree(updates)
     blocks = _blocks(coord, theta, x, w)
 
@@ -133,11 +179,11 @@ def _dense_step(
     S = precision.asarray(O.conj().T @ O, "sr")
     rhs = precision.asarray(updates_flat, "sr").astype(S.dtype)
 
-    delta_flat = linalg.solve_dense(S, rhs, shift, fallback=fallback)
-    return unravel(delta_flat.astype(updates_flat.dtype))
+    delta_flat, info = linalg.solve_dense(S, rhs, shift)
+    return unravel(delta_flat.astype(updates_flat.dtype)), info
 
 
-@partial(jax.jit, static_argnums=(0, 6))
+@partial(jax.jit, static_argnums=(0, 7))
 def _matvec_step(
     coord,
     theta: Tree,
@@ -145,8 +191,9 @@ def _matvec_step(
     w: jax.Array,
     updates: Tree,
     shift: jax.Array,
+    x0: jax.Array,
     maxiter: int,
-) -> Tree:
+) -> tuple[Tree, jax.Array, dict[str, jax.Array]]:
     updates_flat, unravel = ravel_pytree(updates)
     blocks = _blocks(coord, theta, x, w)
     sizes = tuple(block.shape[1] for block in blocks)
@@ -160,10 +207,29 @@ def _matvec_step(
             lo += size
 
         parts = [block.conj().T @ y for block in blocks]
-        return jnp.concatenate(parts, axis=0) + shift.astype(v_flat.dtype) * v_flat
+        return jnp.concatenate(parts, axis=0)
 
-    delta_flat = linalg.solve_matvec(matvec, updates_flat, maxiter=maxiter)
-    return unravel(delta_flat.astype(updates_flat.dtype))
+    diag = jnp.concatenate(
+        [jnp.sum(jnp.real(block.conj() * block), axis=0) for block in blocks],
+        axis=0,
+    )
+
+    rhs = precision.asarray(updates_flat, "sr")
+
+    delta_flat, info = linalg.solve_matvec(
+        matvec,
+        rhs,
+        shift,
+        x0=precision.asarray(x0, "sr").astype(rhs.dtype),
+        diag=diag,
+        maxiter=maxiter,
+    )
+
+    return (
+        unravel(delta_flat.astype(updates_flat.dtype)),
+        delta_flat.astype(x0.dtype),
+        info,
+    )
 
 
 def _blocks(coord, theta: Tree, x: Any, w: jax.Array) -> list[jax.Array]:

@@ -23,7 +23,6 @@ class MinSRState(NamedTuple):
     """Optimizer state for sample-space minSR."""
 
     step: jax.Array
-    shift: jax.Array
     stats: dict[str, jax.Array]
 
 
@@ -36,8 +35,10 @@ def minsr(
     minSR solves
 
         (K + shift I) a = b,
+        K = O O^dagger,
+        delta = O^dagger a.
 
-    with K = O O^dagger, then returns delta = O^dagger a.
+    This is the sample-space form of damped SR.
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
@@ -45,23 +46,16 @@ def minsr(
     def init_fn(params: Tree) -> MinSRState:
         del params
 
-        step = jnp.zeros((), dtype=jnp.int32)
-        value = shift(step) if callable(shift) else shift
-        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
+        dtype = precision.dtype("sr", "real")
+        zero = jnp.asarray(0.0, dtype=dtype)
 
         return MinSRState(
-            step=step,
-            shift=shift_t,
+            step=jnp.zeros((), dtype=jnp.int32),
             stats={
-                "sr_shift": shift_t,
-                "sr_residual": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_step_norm": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_eig_min": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_eig_max": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_trace": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_rank_eff": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_dof": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_cond": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_shift": zero,
+                "sr_residual": zero,
+                "sr_step_norm": zero,
+                "sr_cond": zero,
             },
         )
 
@@ -94,33 +88,30 @@ def minsr(
             static_argnums=0,
         )
 
-        delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta_raw, geometry.theta)
+        delta = jax.tree.map(
+            lambda d, p: d.astype(p.dtype),
+            delta_raw,
+            geometry.theta,
+        )
 
-        real_dtype = precision.dtype("sr", "real")
+        dtype = precision.dtype("sr", "real")
         step_norm2 = sum(
             (
-                jnp.sum(jnp.real(jnp.asarray(leaf) * jnp.conj(jnp.asarray(leaf))))
-                for leaf in jax.tree.leaves(delta)
+                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
+                for x in jax.tree.leaves(delta)
             ),
-            jnp.asarray(0.0, dtype=real_dtype),
+            jnp.asarray(0.0, dtype=dtype),
         )
-        step_norm = jnp.sqrt(step_norm2)
 
         stats = {
             "sr_shift": info["shift"],
             "sr_residual": info["residual"],
-            "sr_step_norm": step_norm,
-            "sr_eig_min": info["eig_min"],
-            "sr_eig_max": info["eig_max"],
-            "sr_trace": info["trace"],
-            "sr_rank_eff": info["rank_eff"],
-            "sr_dof": info["dof"],
+            "sr_step_norm": jnp.sqrt(step_norm2),
             "sr_cond": info["cond"],
         }
 
         return delta, MinSRState(
             step=state.step + 1,
-            shift=info["shift"],
             stats=stats,
         )
 
@@ -135,7 +126,7 @@ def _step(
     b: jax.Array,
     shift: jax.Array,
 ) -> tuple[Tree, dict[str, jax.Array]]:
-    """One minSR solve on one fixed-shape bucket."""
+    """One dense minSR solve on one fixed-shape bucket."""
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
 
@@ -144,15 +135,21 @@ def _step(
     theta_leaves, treedef = tree_util.tree_flatten(theta)
     jac_leaves = tree_util.tree_leaves(jac)
 
-    dtype = jnp.result_type(b_flat, *[p.dtype for p in theta_leaves])
-    K = jnp.zeros((nrow, nrow), dtype=dtype)
+    dtype = jnp.result_type(
+        b_flat,
+        *[leaf.dtype for leaf in theta_leaves],
+        *[leaf.dtype for leaf in jac_leaves],
+    )
 
+    K = jnp.zeros((nrow, nrow), dtype=dtype)
     blocks = []
 
     for J, p in zip(jac_leaves, theta_leaves, strict=True):
         wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
         mean = jnp.sum(wb * J, axis=0, keepdims=True)
-        O = (jnp.sqrt(wb) * (J - mean)).reshape(-1, p.size).astype(dtype)
+
+        O = jnp.sqrt(wb) * (J - mean)
+        O = O.reshape(-1, p.size).astype(dtype)
 
         blocks.append(O)
         K = K + O @ O.conj().T

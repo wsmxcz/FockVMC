@@ -25,7 +25,6 @@ class AdamSRState(NamedTuple):
     step: jax.Array
     p: Tree
     v: Tree
-    shift: jax.Array
     stats: dict[str, jax.Array]
 
 
@@ -35,26 +34,17 @@ def adamsr(
     beta1: float = 0.9,
     beta2: float = 0.999,
 ) -> optax.GradientTransformationExtraArgs:
-    """Adam-style sample-space SR.
+    """Adam-style dense sample-space SR.
 
-    The carried predictor p is projected to sample space:
+    AdamSR carries a predictor p and a second moment v.
 
-        r = b - O p.
-
-    The adaptive diagonal scale is
-
-        D_i = sqrt(v_mean / (v_hat_i + v_mean)).
-
-    AdamSR solves
-
-        (O D^2 O^dagger + shift I) a = r,
-
-    then returns
-
-        q     = D^2 O^dagger a,
+        r = b - O p,
+        K = O D^2 O^dagger,
+        (K + shift I) a = r,
+        q = D^2 O^dagger a,
         delta = p + q.
 
-    The second moment tracks q, not p.
+    The SR damping is applied to the scaled sample kernel K.
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
@@ -64,25 +54,21 @@ def adamsr(
         raise ValueError("beta2 must satisfy 0 <= beta2 < 1")
 
     def init_fn(params: Tree) -> AdamSRState:
-        step = jnp.zeros((), dtype=jnp.int32)
-        value = shift(step) if callable(shift) else shift
-        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
+        dtype = precision.dtype("sr", "real")
+        zero = jnp.asarray(0.0, dtype=dtype)
 
         return AdamSRState(
-            step=step,
+            step=jnp.zeros((), dtype=jnp.int32),
             p=jax.tree.map(jnp.zeros_like, params),
-            v=jax.tree.map(lambda x: jnp.zeros_like(jnp.real(jnp.asarray(x))), params),
-            shift=shift_t,
+            v=jax.tree.map(
+                lambda x: jnp.zeros_like(jnp.real(jnp.asarray(x))),
+                params,
+            ),
             stats={
-                "sr_shift": shift_t,
-                "sr_residual": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_step_norm": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_eig_min": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_eig_max": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_trace": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_rank_eff": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_dof": jnp.asarray(0.0, dtype=shift_t.dtype),
-                "sr_cond": jnp.asarray(0.0, dtype=shift_t.dtype),
+                "sr_shift": zero,
+                "sr_residual": zero,
+                "sr_step_norm": zero,
+                "sr_cond": zero,
             },
         )
 
@@ -134,27 +120,25 @@ def adamsr(
             delta_raw,
         )
 
-        delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta_raw, geometry.theta)
+        delta = jax.tree.map(
+            lambda d, p: d.astype(p.dtype),
+            delta_raw,
+            geometry.theta,
+        )
 
-        real_dtype = precision.dtype("sr", "real")
+        dtype = precision.dtype("sr", "real")
         step_norm2 = sum(
             (
-                jnp.sum(jnp.real(jnp.asarray(leaf) * jnp.conj(jnp.asarray(leaf))))
-                for leaf in jax.tree.leaves(delta)
+                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
+                for x in jax.tree.leaves(delta)
             ),
-            jnp.asarray(0.0, dtype=real_dtype),
+            jnp.asarray(0.0, dtype=dtype),
         )
-        step_norm = jnp.sqrt(step_norm2)
 
         stats = {
             "sr_shift": info["shift"],
             "sr_residual": info["residual"],
-            "sr_step_norm": step_norm,
-            "sr_eig_min": info["eig_min"],
-            "sr_eig_max": info["eig_max"],
-            "sr_trace": info["trace"],
-            "sr_rank_eff": info["rank_eff"],
-            "sr_dof": info["dof"],
+            "sr_step_norm": jnp.sqrt(step_norm2),
             "sr_cond": info["cond"],
         }
 
@@ -162,7 +146,6 @@ def adamsr(
             step=state.step + 1,
             p=p_next,
             v=v_next,
-            shift=info["shift"],
             stats=stats,
         )
 
@@ -181,7 +164,7 @@ def _step(
     beta2: jax.Array,
     step: jax.Array,
 ) -> tuple[Tree, Tree, dict[str, jax.Array]]:
-    """One AdamSR solve on one fixed-shape bucket."""
+    """One dense AdamSR solve on one fixed-shape bucket."""
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
 
@@ -202,16 +185,17 @@ def _step(
     bias = jnp.where(step == 0, 1.0, bias)
 
     v_hat_leaves = []
-    v_hat_sum = 0.0
+    v_sum = 0.0
     size = 0
 
     for v_leaf in v_leaves:
         v_hat = jnp.maximum(jnp.asarray(v_leaf) / bias, 0.0)
+
         v_hat_leaves.append(v_hat)
-        v_hat_sum = v_hat_sum + jnp.sum(v_hat)
+        v_sum = v_sum + jnp.sum(v_hat)
         size += v_hat.size
 
-    v_mean = v_hat_sum / float(size)
+    v_mean = v_sum / float(size)
     cold_start = (step == 0) | (v_mean == 0.0)
 
     K = jnp.zeros((nrow, nrow), dtype=dtype)
@@ -220,18 +204,24 @@ def _step(
     blocks = []
     scales = []
 
-    for J, theta_leaf, p_leaf, v_hat in zip(
+    for J, p_leaf, v_hat in zip(
         jac_leaves,
-        theta_leaves,
         p_leaves,
         v_hat_leaves,
         strict=True,
     ):
         wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
         mean = jnp.sum(wb * J, axis=0, keepdims=True)
-        O = (jnp.sqrt(wb) * (J - mean)).reshape(-1, theta_leaf.size).astype(dtype)
 
-        denom = jnp.where(cold_start, 1.0, v_hat + jnp.asarray(v_mean, dtype=v_hat.dtype))
+        O = jnp.sqrt(wb) * (J - mean)
+        O = O.reshape(-1, p_leaf.size).astype(dtype)
+
+        denom = jnp.where(
+            cold_start,
+            1.0,
+            v_hat + jnp.asarray(v_mean, dtype=v_hat.dtype),
+        )
+
         d = jnp.sqrt(jnp.asarray(v_mean, dtype=v_hat.dtype) / denom)
         d = jnp.where(cold_start, jnp.ones_like(d), d)
         d = d.reshape(-1).astype(dtype)
@@ -246,6 +236,7 @@ def _step(
         Op = Op + O @ p_flat
 
     K = precision.asarray(K, "sr")
+
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
     rhs = rhs - precision.asarray(Op, "sr").astype(K.dtype)
 
@@ -256,12 +247,13 @@ def _step(
     delta_leaves = []
 
     for O, d, p_leaf in zip(blocks, scales, p_leaves, strict=True):
-        q_flat = (d**2) * (O.conj().T @ a)
-        q_leaf = q_flat.reshape(p_leaf.shape)
+        q_flat = (d * d) * (O.conj().T @ a)
+        q = q_flat.reshape(p_leaf.shape)
 
-        p_cast = jnp.asarray(p_leaf).astype(q_leaf.dtype)
-        q_leaves.append(q_leaf)
-        delta_leaves.append(p_cast + q_leaf)
+        p_cast = jnp.asarray(p_leaf).astype(q.dtype)
+
+        q_leaves.append(q)
+        delta_leaves.append(p_cast + q)
 
     return (
         tree_util.tree_unflatten(treedef, delta_leaves),

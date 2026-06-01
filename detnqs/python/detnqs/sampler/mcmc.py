@@ -62,6 +62,7 @@ class WalkerState:
     logabs: np.ndarray
     accept: float = 0.0
     alpha: float = 1.0
+    alpha_step: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,7 @@ class MCSampler:
         n_beta: int,
         init_method: str | Any = "hf",
         alpha: float | None = None,
+        alpha_step: int = 0,
     ) -> WalkerState:
         """Initialize counted walkers and run thermalization.
 
@@ -123,6 +125,10 @@ class MCSampler:
             "hf"     - lowest n_alpha/n_beta orbitals.
             "random" - random fixed-(n_alpha, n_beta) determinants.
             array    - user-provided determinant batch, tiled if needed.
+
+        alpha_step:
+            Adaptive clock for alpha. It is preserved across chain resets so that
+            the reference law changes with diminishing adaptation.
         """
         n_chains = int(self.n_chains)
         if n_chains <= 0:
@@ -131,7 +137,7 @@ class MCSampler:
         if isinstance(self.alpha, str):
             if self.alpha != "adaptive":
                 raise ValueError("alpha must be a float or 'adaptive'")
-            alpha_value = 1.0 if alpha is None else float(alpha)
+            alpha_value = 0.5 if alpha is None else float(alpha)
         else:
             alpha_value = float(self.alpha)
 
@@ -199,6 +205,7 @@ class MCSampler:
             count=count,
             logabs=logabs,
             alpha=alpha_value,
+            alpha_step=max(0, int(alpha_step)),
         )
 
         accepted = 0
@@ -479,6 +486,7 @@ class MCSampler:
                 ),
                 accept=accepted / proposed if proposed else 0.0,
                 alpha=float(state.alpha),
+                alpha_step=int(state.alpha_step),
             )
 
         return next_state, accepted, proposed, int(batch.n_conn)

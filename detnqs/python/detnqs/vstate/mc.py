@@ -169,6 +169,11 @@ class MCState(VState):
                         if self.sampler.alpha == "adaptive"
                         else None
                     ),
+                    alpha_step=(
+                        int(sampler_state.alpha_step)
+                        if self.sampler.alpha == "adaptive"
+                        else 0
+                    ),
                 )
 
         sampler_state, batch, sampler_stats = self.sampler.draw(
@@ -696,7 +701,23 @@ class MCState(VState):
         energy: float,
         w: np.ndarray,
     ) -> WalkerState:
-        """Update adaptive alpha by robust scalar moment matching."""
+        """Update adaptive alpha by KL moment projection.
+
+        The sampler uses
+
+            eta_alpha(x) proportional to |psi(x)|^alpha.
+
+        The residual-tilted Born law
+
+            q*(x) proportional to pi(x) |E_loc(x) - E|
+
+        is projected onto this one-parameter exponential family by matching
+
+            E_eta_alpha[log|psi|] = E_q*[log|psi|].
+
+        The update is averaged with rate 1 / (alpha_step + 1), so the Markov
+        kernel changes with diminishing adaptation.
+        """
         if self.sampler.alpha != "adaptive":
             return sampler_state
 
@@ -704,6 +725,7 @@ class MCState(VState):
         tiny = rdtype(precision.tiny("calc"))
 
         alpha = float(np.clip(float(sampler_state.alpha), 0.0, 2.0))
+        alpha_step = int(sampler_state.alpha_step) + 1
 
         ell = precision.asarray(
             np.asarray(ket_logabs).reshape(-1),
@@ -717,67 +739,81 @@ class MCState(VState):
             "real",
             host=True,
         )
-        residual = precision.asarray(
+        resid = precision.asarray(
             np.asarray(np.abs(eloc - energy)).reshape(-1),
             "calc",
             "real",
             host=True,
         )
 
-        valid = np.isfinite(ell) & np.isfinite(weight) & np.isfinite(residual)
+        valid = np.isfinite(ell) & np.isfinite(weight) & np.isfinite(resid)
         valid &= weight > 0.0
 
         if not valid.any():
-            return replace(sampler_state, alpha=alpha)
+            return replace(
+                sampler_state,
+                alpha=alpha,
+                alpha_step=alpha_step,
+            )
 
-        ell_v = ell[valid]
+        ell = ell[valid]
+        weight = weight[valid]
+        resid = resid[valid]
 
-        # Use a centered robust scale. This is invariant to arbitrary
-        # log|psi| offsets and keeps the ridge numerically meaningful.
-        med = rdtype(np.median(ell_v))
-        mad = rdtype(np.median(np.abs(ell_v - med)))
-        ell_scale = max(rdtype(1.0), rdtype(1.4826) * mad)
-        ell_scale2 = ell_scale * ell_scale
-
-        # Residual-tilted Born law: q*(x) proportional to pi(x)|E_loc(x)-E|.
-        target_mass = np.where(valid, weight * residual, rdtype(0.0))
-        z_target = float(np.sum(target_mass))
+        # Target law: q*(x) proportional to pi(x) |E_loc(x) - E|.
+        target = weight * resid
+        z_target = float(np.sum(target))
 
         if not np.isfinite(z_target) or z_target <= float(tiny):
-            return replace(sampler_state, alpha=alpha)
+            return replace(
+                sampler_state,
+                alpha=alpha,
+                alpha_step=alpha_step,
+            )
 
-        m_target = float(np.sum(target_mass * ell) / z_target)
+        p_target = target / rdtype(z_target)
+        m_target = float(np.sum(p_target * ell))
 
-        # Estimate E_{q_alpha}[ell] from Born-weighted kets.
+        # Current eta_alpha estimated from Born-weighted samples:
+        # eta_alpha / pi is proportional to exp((alpha - 2) log|psi|).
         log_ratio = (rdtype(alpha) - rdtype(2.0)) * ell
-        log_ratio = np.where(valid, log_ratio, -np.inf)
-        shift = float(np.max(log_ratio[valid]))
+        offset = rdtype(np.max(log_ratio))
 
-        q_mass = np.zeros_like(weight, dtype=rdtype)
-        q_mass[valid] = weight[valid] * np.exp(log_ratio[valid] - rdtype(shift))
+        q = weight * np.exp(log_ratio - offset)
+        z_q = float(np.sum(q))
 
-        z_q = float(np.sum(q_mass))
         if not np.isfinite(z_q) or z_q <= float(tiny):
-            return replace(sampler_state, alpha=alpha)
+            return replace(
+                sampler_state,
+                alpha=alpha,
+                alpha_step=alpha_step,
+            )
 
-        m_q = float(np.sum(q_mass * ell) / z_q)
-        centered = ell - rdtype(m_q)
-        var_q = float(np.sum(q_mass * centered * centered) / z_q)
+        p_alpha = q / rdtype(z_q)
+        m_alpha = float(np.sum(p_alpha * ell))
 
-        # If log|psi| has no usable spread, alpha is locally unidentifiable.
-        ridge = float(rdtype(1.0e-6) * ell_scale2)
-        if not np.isfinite(var_q) or var_q <= ridge:
-            return replace(sampler_state, alpha=alpha)
+        centered = ell - rdtype(m_alpha)
+        var_alpha = float(np.sum(p_alpha * centered * centered))
 
-        raw_step = (m_target - m_q) / (var_q + ridge)
+        if not np.isfinite(var_alpha) or var_alpha <= float(tiny):
+            return replace(
+                sampler_state,
+                alpha=alpha,
+                alpha_step=alpha_step,
+            )
 
-        if not np.isfinite(raw_step):
-            return replace(sampler_state, alpha=alpha)
+        # Newton step for moment matching:
+        #     d E_eta_alpha[ell] / d alpha = Var_eta_alpha[ell].
+        alpha_hat = alpha + (m_target - m_alpha) / var_alpha
+        alpha_hat = float(np.clip(alpha_hat, 0.0, 2.0))
 
-        # Smooth trust step. Same semantic bound as clipping, but continuous.
-        max_step = 0.005
-        step = max_step * float(np.tanh(raw_step / max_step))
+        # Robbins--Monro averaging gives diminishing adaptation.
+        rate = 1.0 / float(alpha_step + 1)
+        alpha_next = (1.0 - rate) * alpha + rate * alpha_hat
+        alpha_next = float(np.clip(alpha_next, 0.0, 2.0))
 
-        alpha_next = float(np.clip(alpha + step, 0.0, 2.0))
-
-        return replace(sampler_state, alpha=alpha_next)
+        return replace(
+            sampler_state,
+            alpha=alpha_next,
+            alpha_step=alpha_step,
+        )

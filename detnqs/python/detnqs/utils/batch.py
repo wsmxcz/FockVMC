@@ -32,11 +32,11 @@ Tree = Any
 
 _CONFIG = {
     "chunk": 1024,
-    "bucket_min": 512,
+    "bucket_min": 256,
 }
 
 
-def configure(*, chunk: int | None = 1024, bucket_min: int = 512) -> None:
+def configure(*, chunk: int | None = 1024, bucket_min: int = 256) -> None:
     """Set global shape policy for streaming and bucketed kernels."""
     if chunk is not None:
         chunk = int(chunk)

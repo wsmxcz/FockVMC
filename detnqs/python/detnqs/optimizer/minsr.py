@@ -145,11 +145,11 @@ def _step(
     blocks = []
 
     for J, p in zip(jac_leaves, theta_leaves, strict=True):
-        wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
-        mean = jnp.sum(wb * J, axis=0, keepdims=True)
+        J = J.reshape((w.shape[0], -1, p.size))
 
-        O = jnp.sqrt(wb) * (J - mean)
-        O = O.reshape(-1, p.size).astype(dtype)
+        mean = jnp.einsum("n,ncp->cp", w, J)
+        O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
+        O = O.reshape(nrow, p.size).astype(dtype)
 
         blocks.append(O)
         K = K + O @ O.conj().T

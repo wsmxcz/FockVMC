@@ -232,7 +232,15 @@ def _blocks(
     x: Any,
     w: jax.Array,
 ) -> list[jax.Array]:
-    """Build blocks of O = sqrt(w) * (J - <J>_w)."""
+    """Build 2D blocks of O = sqrt(w) * (J - <J>_w).
+
+    For each parameter leaf,
+
+        J: [N, ..., *p.shape] -> [N, C, P],
+
+    where C is the flattened coordinate channel and P is the leaf size.
+    The returned block has shape [N * C, P].
+    """
     jac = jax.jacrev(lambda p: coord(p, x))(theta)
 
     blocks = []
@@ -241,10 +249,11 @@ def _blocks(
         tree_util.tree_leaves(theta),
         strict=True,
     ):
-        wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
-        mean = jnp.sum(wb * J, axis=0, keepdims=True)
+        J = J.reshape((w.shape[0], -1, p.size))
 
-        O = jnp.sqrt(wb) * (J - mean)
+        mean = jnp.einsum("n,ncp->cp", w, J)
+        O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
+
         blocks.append(O.reshape(-1, p.size))
 
     return blocks

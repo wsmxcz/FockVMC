@@ -210,12 +210,13 @@ def _step(
         v_hat_leaves,
         strict=True,
     ):
-        wb = w.reshape((w.shape[0],) + (1,) * (J.ndim - 1))
-        mean = jnp.sum(wb * J, axis=0, keepdims=True)
+        J = J.reshape((w.shape[0], -1, p_leaf.size))
 
-        O = jnp.sqrt(wb) * (J - mean)
-        O = O.reshape(-1, p_leaf.size).astype(dtype)
+        mean = jnp.einsum("n,ncp->cp", w, J)
+        O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
+        O = O.reshape(nrow, p_leaf.size).astype(dtype)
 
+        v_hat = v_hat.reshape(-1)
         denom = jnp.where(
             cold_start,
             1.0,
@@ -224,10 +225,10 @@ def _step(
 
         d = jnp.sqrt(jnp.asarray(v_mean, dtype=v_hat.dtype) / denom)
         d = jnp.where(cold_start, jnp.ones_like(d), d)
-        d = d.reshape(-1).astype(dtype)
+        d = d.astype(dtype)
 
         p_flat = jnp.asarray(p_leaf).reshape(-1).astype(dtype)
-        OD = O * d.reshape((1, -1))
+        OD = O * d[None, :]
 
         blocks.append(O)
         scales.append(d)

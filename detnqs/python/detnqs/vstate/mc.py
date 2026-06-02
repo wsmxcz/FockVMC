@@ -28,35 +28,28 @@ class MCState(VState):
     Physical target:
         pi_theta(x) proportional to |psi_theta(x)|^2.
 
-    Markov reference sampled by MCSampler:
+    Markov reference:
         eta_alpha(x) proportional to |psi_theta(x)|^alpha.
 
     Observation law:
         x ~ eta_alpha, y ~ B(y|x).
 
-    Degree-tilted blurred density:
-        The observed sample carries a source mass s(x). For Hamiltonian blur,
+    Hamiltonian blur:
+        The observed sample carries source mass s(x). For non-empty blur rows,
 
-            s(x) = d_B(x) if d_B(x) > 0 else 1.
+            s(x) = d_B(x).
 
-        The unnormalized density used for reweighting is
-
-            r_tilde(y) = sum_x |psi(x)|^alpha s(x) B(y|x).
-
-        For non-empty Hamiltonian blur kets this becomes
+        The observed unnormalized density is
 
             r_tilde(y)
               = (1 - beta) d_B(y) |psi(y)|^alpha
-                + beta sum_x |H_yx| |psi(x)|^alpha,
-
-        which only requires first-order Hamiltonian connections from y.
+                + beta sum_x |H_yx| |psi(x)|^alpha.
 
     Importance weight:
         omega(y) = sample_mass(y) |psi_theta(y)|^2 / r_tilde(y).
 
-    libdet builds Hamiltonian connections on host. The neural model is
-    evaluated once on a shared determinant pool and then reused by local
-    energy, observed-density, gradient, and geometry reductions.
+    The physical estimators remain Born-measure expectations; alpha and blur
+    only define the auxiliary observed law.
     """
 
     model: Model
@@ -71,7 +64,7 @@ class MCState(VState):
 
     eloc_eps1: float = 1.0e-3
     eloc_eps2: float = 1.0e-6
-    eloc_sample: int = 64
+    eloc_sample: int = 256
 
     @classmethod
     def init(
@@ -86,7 +79,7 @@ class MCState(VState):
         init_method: str | Any = "hf",
         eloc_eps1: float = 1.0e-3,
         eloc_eps2: float = 1.0e-6,
-        eloc_sample: int = 64,
+        eloc_sample: int = 256,
     ) -> MCState:
         key, init_key, sample_key = jax.random.split(key, 3)
 
@@ -145,13 +138,12 @@ class MCState(VState):
                 Neural-network forward evaluations.
 
             reduce:
-                Local energy, log-density, weights, energy, and variance.
+                Local energy, observed density, weights, energy, and variance.
 
             backward:
-                VJP and optional geometry construction.
+                VJP and optional SR geometry construction.
         """
         timer = utils.Timer()
-
         sampler_state = self.sampler_state
 
         if self.sampler.reset_chains:
@@ -166,12 +158,12 @@ class MCState(VState):
                     init_method=self.init_method,
                     alpha=(
                         float(sampler_state.alpha)
-                        if self.sampler.alpha == "adaptive"
+                        if self.sampler.alpha is None
                         else None
                     ),
                     alpha_step=(
                         int(sampler_state.alpha_step)
-                        if self.sampler.alpha == "adaptive"
+                        if self.sampler.alpha is None
                         else 0
                     ),
                 )
@@ -183,7 +175,7 @@ class MCState(VState):
             sampler_state,
         )
 
-        alpha_step = float(sampler_state.alpha)
+        alpha = float(sampler_state.alpha)
 
         timer.add("sample", sampler_stats.get("time_sample", 0.0))
         timer.add("graph", sampler_stats.get("time_graph", 0.0))
@@ -203,7 +195,6 @@ class MCState(VState):
 
             n_ket = int(kets.shape[0])
 
-            # Weak local-energy sampling advances only the RNG key.
             seed = 0
             if self.eloc_sample > 0:
                 key, subkey = jax.random.split(sampler_state.key)
@@ -237,7 +228,7 @@ class MCState(VState):
                 logpsi_pool=logpsi_pool,
                 conn_data=conn_data,
                 n_ket=n_ket,
-                alpha=alpha_step,
+                alpha=alpha,
             )
 
             eloc, n_conn_weak = self._eloc(
@@ -264,7 +255,7 @@ class MCState(VState):
             with timer("backward"):
                 rdtype = precision.dtype("calc", "real", host=True)
 
-                # grad E = 2 Re <(E_loc - E) O>.
+                # grad E = 2 Re <(E_loc - E) O>_pi.
                 dlogpsi = rdtype(2.0) * w * residual
                 cot = self.model.cotangent(
                     ket_logpsi,
@@ -299,7 +290,7 @@ class MCState(VState):
                         ),
                     )
 
-        sampler_state = self._adaptive(
+        sampler_state = self._auto_alpha(
             sampler_state=sampler_state,
             ket_logabs=ket_logabs,
             eloc=eloc,
@@ -312,45 +303,38 @@ class MCState(VState):
         n_sample = int(np.sum(count_i64))
         n_unique = int(n_ket)
 
-        ess_frac = float(ess / max(1, n_sample))
-        unique_frac = float(n_unique / max(1, n_sample))
-
-        n_conn_blur = float(
-            sampler_stats.get("n_conn_blur", 0.0) + conn_data["n_conn_blur"]
-        )
-        n_conn_proposal = float(sampler_stats.get("n_conn_proposal", 0.0))
-
         stats = {
             "energy": float(energy),
             "variance": float(variance),
             "accept": float(sampler_stats.get("accept", sampler_state.accept)),
             "ess": float(ess),
-            "ess_frac": ess_frac,
+            "ess_frac": float(ess / max(1, n_sample)),
             "n_sample": float(n_sample),
             "n_unique": float(n_unique),
-            "unique_frac": unique_frac,
+            "unique_frac": float(n_unique / max(1, n_sample)),
             "n_eval": float(conn_data["pool_dets"].shape[0]),
             "n_conn_eloc": float(conn_data["n_conn_eloc"]),
             "n_conn_weak": float(n_conn_weak),
-            "n_conn_proposal": n_conn_proposal,
-            "n_conn_blur": n_conn_blur,
-            "alpha": alpha_step,
+            "n_conn_proposal": float(sampler_stats.get("n_conn_proposal", 0.0)),
+            "n_conn_blur": float(
+                sampler_stats.get("n_conn_blur", 0.0) + conn_data["n_conn_blur"]
+            ),
+            "alpha": alpha,
         }
         stats.update(timer.stats())
 
         return new_state, energy, gradient, stats, geom
 
     def _conns(self, kets: np.ndarray, *, seed: int) -> dict[str, Any]:
-        """Build blur/local-energy connections and one shared model pool.
+        """Build local-energy/blur connections and one shared model pool.
 
-        The blur density uses the degree-tilted form
+        For Hamiltonian blur,
 
             r_tilde(y)
               = (1 - beta) d_B(y) |psi(y)|^alpha
                 + beta sum_x |H_yx| |psi(x)|^alpha.
 
-        Therefore only first-order connections from kets are needed. No
-        degrees() call on generated bras is required.
+        Only first-order connections from observed kets are needed.
         """
         n_ket = int(kets.shape[0])
         rdtype = precision.dtype("calc", "real", host=True)
@@ -377,9 +361,7 @@ class MCState(VState):
         n_conn_blur = 0
 
         if beta > 0.0:
-            same_conns = blur_eps == eloc_eps
-
-            if same_conns:
+            if blur_eps == eloc_eps:
                 blur_conns = eloc_conns
                 blur_uid_label = "eloc"
             else:
@@ -392,7 +374,6 @@ class MCState(VState):
                 blur_uid_label = "blur"
 
             n_conn_blur = int(np.asarray(blur_conns.h).size)
-
             blur_ket_weight = precision.asarray(
                 np.asarray(blur_conns.ket_weight),
                 "calc",
@@ -453,26 +434,7 @@ class MCState(VState):
         n_ket: int,
         alpha: float,
     ) -> np.ndarray:
-        """Compute the unnormalized observed density.
-
-        Without blur:
-
-            r(y) = |psi(y)|^alpha.
-
-        With degree-tilted Hamiltonian blur:
-
-            r_tilde(y)
-              = s(y) B(y|y) |psi(y)|^alpha
-                + beta sum_x |H_yx| |psi(x)|^alpha,
-
-        where s(y)=d_B(y) for non-empty blur kets and s(y)=1 for empty kets.
-        Thus
-
-            stay scale = (1 - beta) d_B(y), if d_B(y) > 0,
-                         1,                 if d_B(y) = 0.
-
-        The off-diagonal term has no source degree denominator.
-        """
+        """Compute the unnormalized observed density r_tilde(y)."""
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
@@ -499,11 +461,8 @@ class MCState(VState):
         )
 
         log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
-        stay_mask = stay_scale > 0.0
-        log_stay[stay_mask] = (
-            np.log(np.maximum(stay_scale[stay_mask], tiny))
-            + logrho_ket[stay_mask]
-        )
+        keep = stay_scale > 0.0
+        log_stay[keep] = np.log(np.maximum(stay_scale[keep], tiny)) + logrho_ket[keep]
 
         ket_ptr = np.asarray(blur_conns.ket_ptr, dtype=np.int64)
         bra = np.asarray(blur_conns.bra, dtype=np.int64)
@@ -513,7 +472,6 @@ class MCState(VState):
             return precision.asarray(log_stay, "calc", "real", host=True)
 
         blur_uid = conn_data["blur_uid"]
-
         bra_logabs = precision.asarray(
             np.asarray(
                 to_logabs(jax.tree.map(lambda a: a[blur_uid], logpsi_pool))
@@ -549,9 +507,7 @@ class MCState(VState):
     ) -> tuple[np.ndarray, int]:
         """Compute local energy on observed kets.
 
-        Deterministic screened part:
-
-            E_loc(ket) = H_kk + sum_bra H_bra,ket psi(bra) / psi(ket).
+        E_loc(x) = H_xx + sum_y H_xy psi(y) / psi(x).
 
         The optional weak part is an unbiased sampled correction.
         """
@@ -648,18 +604,13 @@ class MCState(VState):
     ) -> tuple[np.ndarray, float]:
         """Normalize importance weights.
 
-        For each unique observed determinant y_i:
+        For each observed determinant y_i,
 
             u_i    = |psi(y_i)|^2 / r_tilde(y_i),
             mass_i = sample_mass_i u_i,
             w_i    = mass_i / sum_j mass_j.
 
-        With identity observation, sample_mass_i == count_i and this reduces
-        to the usual alpha-reference reweighting.
-
-        The ESS reported here is a grouped-mass diagnostic. It is exact when
-        all observations merged into the same determinant have the same source
-        mass, and otherwise remains a stable concentration diagnostic.
+        The returned ESS is a grouped-mass concentration diagnostic.
         """
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
@@ -677,22 +628,20 @@ class MCState(VState):
         u[finite] = np.exp(logu[finite] - rdtype(np.max(logu[finite])))
 
         mass = sample_mass * u
-        z = float(mass.sum())
+        z = float(np.sum(mass))
 
         if not np.isfinite(z) or z <= 0.0:
             raise FloatingPointError("importance weights have zero total mass")
 
         w = precision.asarray(mass / max(z, float(tiny)), "calc", "real", host=True)
 
-        # Approximate the per-observation denominator from grouped total mass.
-        # This reduces to the old exact formula when sample_mass == count.
         safe_count = np.maximum(count, rdtype(1.0))
         ess_denom = float(np.sum((sample_mass * sample_mass / safe_count) * u * u))
         ess = float(z * z / max(ess_denom, float(tiny)))
 
         return w, ess
 
-    def _adaptive(
+    def _auto_alpha(
         self,
         *,
         sampler_state: WalkerState,
@@ -701,24 +650,26 @@ class MCState(VState):
         energy: float,
         w: np.ndarray,
     ) -> WalkerState:
-        """Update adaptive alpha by KL moment projection.
+        """Update alpha by KL moment projection.
 
-        The sampler uses
+        Auto-alpha is active only when sampler.alpha is None.
+
+        Reference family:
 
             eta_alpha(x) proportional to |psi(x)|^alpha.
 
-        The residual-tilted Born law
+        Residual-tilted Born law:
 
-            q*(x) proportional to pi(x) |E_loc(x) - E|
+            q*(x) proportional to pi(x) |E_loc(x) - E|.
 
-        is projected onto this one-parameter exponential family by matching
+        KL projection onto eta_alpha gives moment matching:
 
             E_eta_alpha[log|psi|] = E_q*[log|psi|].
 
-        The update is averaged with rate 1 / (alpha_step + 1), so the Markov
-        kernel changes with diminishing adaptation.
+        Robbins--Monro averaging with rate 1 / (step + 1) gives diminishing
+        adaptation of the Markov kernel.
         """
-        if self.sampler.alpha != "adaptive":
+        if self.sampler.alpha is not None:
             return sampler_state
 
         rdtype = precision.dtype("calc", "real", host=True)
@@ -750,64 +701,38 @@ class MCState(VState):
         valid &= weight > 0.0
 
         if not valid.any():
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
-            )
+            return replace(sampler_state, alpha=alpha, alpha_step=alpha_step)
 
         ell = ell[valid]
         weight = weight[valid]
         resid = resid[valid]
 
-        # Target law: q*(x) proportional to pi(x) |E_loc(x) - E|.
         target = weight * resid
         z_target = float(np.sum(target))
 
         if not np.isfinite(z_target) or z_target <= float(tiny):
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
-            )
+            return replace(sampler_state, alpha=alpha, alpha_step=alpha_step)
 
-        p_target = target / rdtype(z_target)
-        m_target = float(np.sum(p_target * ell))
+        m_target = float(np.dot(target, ell) / z_target)
 
-        # Current eta_alpha estimated from Born-weighted samples:
         # eta_alpha / pi is proportional to exp((alpha - 2) log|psi|).
         log_ratio = (rdtype(alpha) - rdtype(2.0)) * ell
-        offset = rdtype(np.max(log_ratio))
-
-        q = weight * np.exp(log_ratio - offset)
+        q = weight * np.exp(log_ratio - rdtype(np.max(log_ratio)))
         z_q = float(np.sum(q))
 
         if not np.isfinite(z_q) or z_q <= float(tiny):
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
-            )
+            return replace(sampler_state, alpha=alpha, alpha_step=alpha_step)
 
-        p_alpha = q / rdtype(z_q)
-        m_alpha = float(np.sum(p_alpha * ell))
-
-        centered = ell - rdtype(m_alpha)
-        var_alpha = float(np.sum(p_alpha * centered * centered))
+        m_alpha = float(np.dot(q, ell) / z_q)
+        var_alpha = float(np.dot(q, (ell - rdtype(m_alpha)) ** 2) / z_q)
 
         if not np.isfinite(var_alpha) or var_alpha <= float(tiny):
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
-            )
+            return replace(sampler_state, alpha=alpha, alpha_step=alpha_step)
 
-        # Newton step for moment matching:
-        #     d E_eta_alpha[ell] / d alpha = Var_eta_alpha[ell].
+        # Newton step: d E_eta_alpha[ell] / d alpha = Var_eta_alpha[ell].
         alpha_hat = alpha + (m_target - m_alpha) / var_alpha
         alpha_hat = float(np.clip(alpha_hat, 0.0, 2.0))
 
-        # Robbins--Monro averaging gives diminishing adaptation.
         rate = 1.0 / float(alpha_step + 1)
         alpha_next = (1.0 - rate) * alpha + rate * alpha_hat
         alpha_next = float(np.clip(alpha_next, 0.0, 2.0))

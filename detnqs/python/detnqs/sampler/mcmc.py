@@ -19,20 +19,19 @@ from .proposal import unique_dets
 class SampleBatch:
     """Counted observed determinants.
 
-    The Markov chain state is x. The observed determinant is y after the
-    optional observation kernel B(y|x).
+    The chain state is x. The estimator observes y after an optional
+    Hamiltonian blur kernel B(y|x).
 
     count:
         Number of observed walkers at each determinant.
 
     mass:
         Statistical mass entering the reweighted estimator. For identity
-        observation, mass == count. For degree-tilted blurred observation,
+        observation, mass == count. For degree-tilted Hamiltonian blur,
 
             mass(y) = sum_{i: Y_i = y} s(X_i),
 
-        where s(x) = d_B(x) for non-empty blur kets and s(x) = 1 for empty
-        blur kets.
+        where s(x) = d_B(x) for non-empty blur rows and s(x) = 1 otherwise.
     """
 
     dets: np.ndarray
@@ -51,9 +50,15 @@ class WalkerState:
         {(x_u, m_u, log|psi(x_u)|)}, with sum_u m_u = n_chains.
 
     alpha:
-        Numeric exponent used by the reference law in this state. When the
-        sampler is configured with alpha="adaptive", MCState updates this
-        scalar after each estimator pass.
+        Current exponent of the reference law
+
+            eta_alpha(x) proportional to |psi(x)|^alpha.
+
+        If MCSampler.alpha is None, MCState updates this value by auto-alpha.
+
+    alpha_step:
+        Adaptive clock for alpha. It must survive chain resets so the kernel
+        changes with diminishing adaptation.
     """
 
     key: jax.Array
@@ -69,25 +74,23 @@ class WalkerState:
 class MCSampler:
     """Counted determinant-space Metropolis sampler.
 
-    Reference law:
-        eta_alpha(x) proportional to |psi_theta(x)|^alpha.
+    Physical Born Measure:
+        pi(x) proportional to |psi(x)|^2.
 
-    Observation kernel:
-        B_beta(y|x) = (1 - beta_x) delta_xy + beta_x K(y|x),
-        K(y|x)      = |H_yx| / d_B(x).
+    Markov reference:
+        eta_alpha(x) proportional to |psi(x)|^alpha.
 
-    If d_B(x) = 0, beta_x is set to zero and the walker stays at x.
+    Observation:
+        With blur = 0, y = x.
+        With blur > 0, y is drawn from Hamiltonian connections,
 
-    Step convention:
-        A raw Metropolis step means one proposal attempt for each counted
-        walker. thermal_steps are run after initialization/reset,
-        discard_steps before each production draw, and sweep_steps separate
-        consecutive observations.
+            B(y|x) = (1 - beta_x) delta_xy + beta_x |H_yx| / d_B(x).
+
+        If d_B(x) = 0, beta_x is set to zero.
 
     alpha:
-        A numeric value gives a fixed reference exponent. The string
-        "adaptive" initializes the exponent at 1.0 and lets MCState update the
-        numeric value stored in WalkerState.alpha.
+        A float gives a fixed reference exponent.
+        None enables auto-alpha with the value stored in WalkerState.alpha.
     """
 
     n_samples: int = 1024
@@ -98,12 +101,11 @@ class MCSampler:
     sweep_steps: int = 1
     reset_chains: bool = False
 
-    alpha: float | str = 1.0
+    alpha: float | None = None
     proposal: str = "ham"
     proposal_eps: float = 1.0e-3
 
     blur: float = 0.5
-    blur_kernel: str = "ham"
     blur_eps: float | None = 1.0e-3
 
     def init(
@@ -125,21 +127,16 @@ class MCSampler:
             "hf"     - lowest n_alpha/n_beta orbitals.
             "random" - random fixed-(n_alpha, n_beta) determinants.
             array    - user-provided determinant batch, tiled if needed.
-
-        alpha_step:
-            Adaptive clock for alpha. It is preserved across chain resets so that
-            the reference law changes with diminishing adaptation.
         """
         n_chains = int(self.n_chains)
         if n_chains <= 0:
             raise ValueError("n_chains must be positive")
 
-        if isinstance(self.alpha, str):
-            if self.alpha != "adaptive":
-                raise ValueError("alpha must be a float or 'adaptive'")
-            alpha_value = 0.5 if alpha is None else float(alpha)
-        else:
-            alpha_value = float(self.alpha)
+        alpha_value = (
+            1.0 if alpha is None else float(alpha)
+            if self.alpha is None
+            else float(self.alpha)
+        )
 
         nword = int(hamiltonian.nword)
         norb = int(hamiltonian.norb)
@@ -162,14 +159,30 @@ class MCSampler:
                 rng = np.random.default_rng(seed)
 
                 dets = np.zeros((n_chains, 2, nword), dtype=np.uint64)
+                rows = np.arange(n_chains, dtype=np.int64)[:, None]
 
-                for ichain in range(n_chains):
-                    for spin, n_elec in enumerate((int(n_alpha), int(n_beta))):
-                        for p in rng.choice(norb, size=n_elec, replace=False):
-                            p = int(p)
-                            dets[ichain, spin, p >> 6] |= (
-                                np.uint64(1) << np.uint64(p & 63)
-                            )
+                for spin, n_elec in enumerate((int(n_alpha), int(n_beta))):
+                    if n_elec < 0 or n_elec > norb:
+                        raise ValueError("electron number must satisfy 0 <= n <= norb")
+                    if n_elec == 0:
+                        continue
+
+                    if n_elec == norb:
+                        occ = np.broadcast_to(
+                            np.arange(norb, dtype=np.int64),
+                            (n_chains, norb),
+                        )
+                    else:
+                        score = rng.random((n_chains, norb))
+                        occ = np.argpartition(score, n_elec - 1, axis=1)[:, :n_elec]
+
+                    word = occ >> 6
+                    bit = (occ & 63).astype(np.uint64)
+                    np.bitwise_or.at(
+                        dets[:, spin, :],
+                        (rows, word),
+                        np.uint64(1) << bit,
+                    )
 
             case str():
                 raise ValueError(
@@ -229,17 +242,12 @@ class MCSampler:
         if int(self.n_samples) <= 0:
             raise ValueError("n_samples must be positive")
 
-        if isinstance(self.alpha, str):
-            if self.alpha != "adaptive":
-                raise ValueError("alpha must be a float or 'adaptive'")
-            alpha_value = float(state.alpha)
-        else:
-            alpha_value = float(self.alpha)
+        alpha_value = float(state.alpha) if self.alpha is None else float(self.alpha)
 
         timer = utils.Timer()
 
-        # Parameters change during optimization. Refresh cached log|psi| before
-        # any Metropolis ratio is formed.
+        # Parameters change during optimization. Refresh log|psi| before any
+        # Metropolis ratio is formed.
         with timer("forward"):
             logabs_jax = utils.apply(model.logabs, theta, state.dets)
             jax.block_until_ready(logabs_jax)
@@ -288,8 +296,6 @@ class MCSampler:
                     base_dets = state.dets
                     base_count = state.count.astype(np.int64, copy=False)
                 else:
-                    # Partial observation samples counted walkers without
-                    # replacement from the empirical walker measure.
                     key, subkey = jax.random.split(state.key)
                     seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
                     rng = np.random.default_rng(seed)
@@ -318,7 +324,6 @@ class MCSampler:
                 mass_parts.append(obs_mass)
                 n_conn_blur += n_conn
 
-            # Observations are separated by sweep_steps raw Metropolis moves.
             for _ in range(sweep_steps):
                 state, acc, prop, n_conn = self._move(
                     theta,
@@ -380,9 +385,9 @@ class MCSampler:
 
         Acceptance probability:
 
-            a(ket -> bra) = min(1, exp[
-                alpha (log|psi(bra)| - log|psi(ket)|)
-                + log q(ket|bra) - log q(bra|ket)
+            a(x -> y) = min(1, exp[
+                alpha (log|psi(y)| - log|psi(x)|)
+                + log q(x|y) - log q(y|x)
             ]).
         """
         timer = utils.Timer() if timer is None else timer
@@ -429,10 +434,12 @@ class MCSampler:
                 bra_logabs[known] = logabs[bra_first[known]]
 
         if (~known).any():
-            unknown_bras = np.ascontiguousarray(batch.dets[~known])
-
             with timer("forward"):
-                bra_logabs_jax = utils.apply(model.logabs, theta, unknown_bras)
+                bra_logabs_jax = utils.apply(
+                    model.logabs,
+                    theta,
+                    np.ascontiguousarray(batch.dets[~known]),
+                )
                 jax.block_until_ready(bra_logabs_jax)
 
                 bra_logabs[~known] = precision.asarray(
@@ -500,21 +507,18 @@ class MCSampler:
         *,
         timer: utils.Timer | None = None,
     ) -> tuple[WalkerState, np.ndarray, np.ndarray, np.ndarray, int]:
-        """Apply the observation kernel B_beta(y|x) to counted base walkers.
+        """Apply identity or Hamiltonian blur observation.
 
-        With blur disabled, this returns identity observations with mass=count.
+        With blur disabled, y = x and mass = count.
 
-        With Hamiltonian blur enabled, observations are drawn from
+        With blur enabled,
 
             B(y|x) = (1 - beta_x) delta_xy
                    + beta_x |H_yx| / d_B(x),
 
-        and each realized observation carries source mass
+        and each observed sample carries source mass
 
             s(x) = d_B(x) if d_B(x) > 0 else 1.
-
-        This degree-tilted mass removes the need for second-order degree
-        lookups when the observed density is evaluated in MCState.
         """
         timer = utils.Timer() if timer is None else timer
         rdtype = precision.dtype("calc", "real", host=True)
@@ -532,9 +536,6 @@ class MCSampler:
                     0,
                 )
 
-            if self.blur_kernel != "ham":
-                raise ValueError("blur_kernel must be 'ham'")
-
             key, subkey = jax.random.split(state.key)
             seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
             rng = np.random.default_rng(seed)
@@ -543,8 +544,6 @@ class MCSampler:
                 self.proposal_eps if self.blur_eps is None else self.blur_eps
             )
 
-            # Draw attempted blur moves first. Kets with d_B=0 are corrected
-            # after ket weights have been computed by sample_conns.
             move = rng.binomial(base_count, beta).astype(np.int64)
             stay = base_count - move
 
@@ -565,7 +564,7 @@ class MCSampler:
                 host=True,
             )
 
-            # Empty blur kets use beta_x=0 and source mass s(x)=1.
+            # Empty Hamiltonian rows revert to identity observation.
             dead = ket_weight <= 0.0
             if dead.any():
                 stay[dead] += move[dead]
@@ -579,7 +578,6 @@ class MCSampler:
             masses = [stay_mass]
 
             n_conn_blur = int(np.asarray(sample.ket_nconn, dtype=np.int64).sum())
-
             sampled_bras = np.ascontiguousarray(
                 np.asarray(sample.bras, dtype=np.uint64)
             )
@@ -588,7 +586,7 @@ class MCSampler:
                 sampled_count = np.asarray(sample.counts, dtype=np.int64)
                 sampled_ket = np.asarray(sample.ket, dtype=np.int64)
 
-                sampled_mass_raw = (
+                sampled_mass = (
                     sampled_count.astype(rdtype, copy=False)
                     * source_mass[sampled_ket]
                 )
@@ -599,7 +597,7 @@ class MCSampler:
                 obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
 
                 np.add.at(obs_count, obs_inv, sampled_count)
-                np.add.at(obs_mass, obs_inv, sampled_mass_raw)
+                np.add.at(obs_mass, obs_inv, sampled_mass)
 
                 parts.append(obs_dets)
                 counts.append(obs_count)

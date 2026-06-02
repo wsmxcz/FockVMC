@@ -54,11 +54,9 @@ class ProposalBatch:
     """Grouped proposals for one raw Metropolis step.
 
     The counted walker state is {(ket_u, count_u)}. This batch groups all
-    walkers proposing the same ket/bra move, so the accept/reject step can use
-    one binomial draw per grouped move.
+    walkers proposing the same ket/bra move, so accept/reject needs only one
+    binomial draw per grouped move.
 
-    Attributes
-    ----------
     ket:
         Source determinant indices into the counted walker support.
     count:
@@ -92,7 +90,7 @@ def propose(
 ) -> ProposalBatch:
     """Generate grouped proposal moves from a counted walker state.
 
-    The proposal layer owns only q(bra|ket) and the correction
+    The proposal layer owns q(bra|ket) and the Metropolis-Hastings correction
 
         log q(ket|bra) - log q(bra|ket).
 
@@ -100,7 +98,6 @@ def propose(
     """
     dets = libdet.to_dets(dets)
     count = np.asarray(count, dtype=np.int64)
-    name = str(name)
 
     n_ket = int(dets.shape[0])
     nword = int(dets.shape[2])
@@ -110,31 +107,33 @@ def propose(
     empty_i64 = np.empty(0, dtype=np.int64)
     empty_real = np.empty(0, dtype=rdtype)
 
-    if name == "single":
-        return _single_proposal(
-            hamiltonian,
-            dets,
-            count,
-            seed=int(seed),
-            empty_dets=empty_dets,
-            empty_i64=empty_i64,
-            empty_real=empty_real,
-        )
+    match str(name):
+        case "single":
+            return _single_proposal(
+                hamiltonian,
+                dets,
+                count,
+                seed=int(seed),
+                empty_dets=empty_dets,
+                empty_i64=empty_i64,
+                empty_real=empty_real,
+            )
 
-    if name == "ham":
-        return _ham_proposal(
-            hamiltonian,
-            dets,
-            count,
-            seed=int(seed),
-            eps=float(eps),
-            n_ket=n_ket,
-            empty_dets=empty_dets,
-            empty_i64=empty_i64,
-            empty_real=empty_real,
-        )
+        case "ham":
+            return _ham_proposal(
+                hamiltonian,
+                dets,
+                count,
+                seed=int(seed),
+                eps=float(eps),
+                n_ket=n_ket,
+                empty_dets=empty_dets,
+                empty_i64=empty_i64,
+                empty_real=empty_real,
+            )
 
-    raise ValueError("proposal must be 'ham' or 'single'")
+        case _:
+            raise ValueError("proposal must be 'ham' or 'single'")
 
 
 def _single_proposal(
@@ -197,7 +196,7 @@ def _single_proposal(
     occ_rank = move_spin // n_vir
     vir_rank = move_spin % n_vir
 
-    ket_occ = occ[ket, spin, :]
+    ket_occ = occ[ket, spin]
     ket_vir = ~ket_occ
 
     occ_pos = np.cumsum(ket_occ, axis=1) - 1
@@ -264,7 +263,7 @@ def _ham_proposal(
     q(bra|ket) = |H_bra,ket| / d_A(ket),
     d_A(ket)   = sum_bra |H_bra,ket| 1(|H_bra,ket| >= eps).
 
-    For a symmetric Hamiltonian connection set, |H_bra,ket| cancels in the
+    For symmetric Hamiltonian connections, |H_bra,ket| cancels in the
     Metropolis-Hastings ratio, leaving log d_A(ket) - log d_A(bra).
     """
     rdtype = precision.dtype("calc", "real", host=True)
@@ -312,8 +311,7 @@ def _ham_proposal(
         bra_weight[known] = ket_weight[bra_first[known]]
 
     if (~known).any():
-        unknown_bras = np.ascontiguousarray(bras[~known])
-        deg = hamiltonian.degrees(unknown_bras, float(eps))
+        deg = hamiltonian.degrees(np.ascontiguousarray(bras[~known]), float(eps))
         bra_weight[~known] = precision.asarray(
             np.asarray(deg.ket_weight),
             "calc",

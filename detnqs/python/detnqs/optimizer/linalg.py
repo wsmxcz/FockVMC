@@ -18,8 +18,8 @@ def solve_dense(
 
         (A + shift I) x = rhs.
 
-    For shift > 0 this is standard damped SR. For shift = 0,
-    zero modes are removed by the spectral cutoff.
+    For shift > 0 this is damped SR. For shift = 0, zero modes are removed
+    by a spectral cutoff.
     """
     matrix = jnp.asarray(matrix)
     rhs = jnp.asarray(rhs)

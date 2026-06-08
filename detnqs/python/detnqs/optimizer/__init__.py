@@ -5,9 +5,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from .adamsr import adamsr
 from .base import Geometry
 from .minsr import minsr
+from .psr import psr
 from .sr import sr
 
 
@@ -24,7 +24,7 @@ def stats(opt_state: Any) -> dict[str, float]:
         if isinstance(node, dict):
             for value in node.values():
                 visit(value)
-        elif isinstance(node, tuple | list):
+        elif isinstance(node, (tuple, list)):
             for value in node:
                 visit(value)
 
@@ -34,8 +34,8 @@ def stats(opt_state: Any) -> dict[str, float]:
 
 __all__ = [
     "Geometry",
-    "adamsr",
     "minsr",
+    "psr",
     "sr",
     "stats",
 ]

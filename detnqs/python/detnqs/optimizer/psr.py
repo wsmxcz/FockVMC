@@ -19,8 +19,8 @@ Tree = Any
 Shift = float | Callable[[jax.Array], Any]
 
 
-class AdamSRState(NamedTuple):
-    """Optimizer state for Adam-style sample-space SR."""
+class PSRState(NamedTuple):
+    """Optimizer state for Predictive SR."""
 
     step: jax.Array
     p: Tree
@@ -28,36 +28,43 @@ class AdamSRState(NamedTuple):
     stats: dict[str, jax.Array]
 
 
-def adamsr(
+def psr(
     *,
     shift: Shift = 1.0e-3,
-    beta1: float = 0.9,
-    beta2: float = 0.999,
+    predictor: float = 0.9,
+    beta: float = 0.999,
 ) -> optax.GradientTransformationExtraArgs:
-    """Adam-style dense sample-space SR.
+    """Predictive SR: sample-space SR with a natural-step predictor.
 
-    AdamSR carries a predictor p and a second moment v.
+    PSR solves SR around a historical predictor p.
 
         r = b - O p,
-        K = O D^2 O^dagger,
+        K = O C O^dagger,
         (K + shift I) a = r,
-        q = D^2 O^dagger a,
+        q = C O^dagger a,
         delta = p + q.
 
-    The SR damping is applied to the scaled sample kernel K.
+    The predictor and correction variance are updated as
+
+        p <- predictor * delta,
+        v <- beta * v + (1 - beta) * |q|^2.
+
+    The diagonal covariance C is conservative:
+
+        C_i = mean(v) / (v_i + mean(v)).
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
-    if not 0.0 <= beta1 < 1.0:
-        raise ValueError("beta1 must satisfy 0 <= beta1 < 1")
-    if not 0.0 <= beta2 < 1.0:
-        raise ValueError("beta2 must satisfy 0 <= beta2 < 1")
+    if not 0.0 <= predictor < 1.0:
+        raise ValueError("predictor must satisfy 0 <= predictor < 1")
+    if not 0.0 <= beta < 1.0:
+        raise ValueError("beta must satisfy 0 <= beta < 1")
 
-    def init_fn(params: Tree) -> AdamSRState:
+    def init_fn(params: Tree) -> PSRState:
         dtype = precision.dtype("sr", "real")
         zero = jnp.asarray(0.0, dtype=dtype)
 
-        return AdamSRState(
+        return PSRState(
             step=jnp.zeros((), dtype=jnp.int32),
             p=jax.tree.map(jnp.zeros_like, params),
             v=jax.tree.map(
@@ -74,19 +81,19 @@ def adamsr(
 
     def update_fn(
         updates: Tree,
-        state: AdamSRState,
+        state: PSRState,
         params: Tree | None = None,
         *,
         geometry: Geometry | None = None,
         **extra_args: Any,
-    ) -> tuple[Tree, AdamSRState]:
+    ) -> tuple[Tree, PSRState]:
         del updates, params, extra_args
 
         if geometry is None:
-            raise ValueError("optimizer.adamsr requires geometry")
+            raise ValueError("optimizer.psr requires geometry")
 
-        value = shift(state.step) if callable(shift) else shift
-        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
+        shift_value = shift(state.step) if callable(shift) else shift
+        shift_t = jnp.asarray(shift_value, dtype=precision.dtype("sr", "real"))
 
         delta_raw, q_raw, info = batch.bucket(
             _step,
@@ -98,32 +105,32 @@ def adamsr(
             precision.asarray(normalize(geometry.w), "model", "real"),
             precision.asarray(geometry.b, "model", "real"),
             shift_t,
-            jnp.asarray(beta2, dtype=precision.dtype("sr", "real")),
-            state.step,
-            in_axes=(None, None, None, None, 0, 0, 0, None, None, None),
+            in_axes=(None, None, None, None, 0, 0, 0, None),
             out_axes=None,
             static_argnums=0,
         )
 
+        delta = jax.tree.map(
+            lambda d, theta: d.astype(theta.dtype),
+            delta_raw,
+            geometry.theta,
+        )
+
+        # Constant-velocity prediction of the next natural step.
+        p_next = jax.tree.map(
+            lambda d: jnp.asarray(predictor, dtype=d.dtype) * d,
+            delta,
+        )
+
+        # Track the residual correction, not the raw gradient.
         v_next = jax.tree.map(
             lambda v_old, q: (
-                jnp.asarray(beta2, dtype=v_old.dtype) * v_old
-                + (1.0 - jnp.asarray(beta2, dtype=v_old.dtype))
+                jnp.asarray(beta, dtype=v_old.dtype) * v_old
+                + (1.0 - jnp.asarray(beta, dtype=v_old.dtype))
                 * jnp.real(q * q.conj()).astype(v_old.dtype)
             ),
             state.v,
             q_raw,
-        )
-
-        p_next = jax.tree.map(
-            lambda d: jnp.asarray(beta1, dtype=d.dtype) * d,
-            delta_raw,
-        )
-
-        delta = jax.tree.map(
-            lambda d, p: d.astype(p.dtype),
-            delta_raw,
-            geometry.theta,
         )
 
         dtype = precision.dtype("sr", "real")
@@ -142,7 +149,7 @@ def adamsr(
             "sr_cond": info["cond"],
         }
 
-        return delta, AdamSRState(
+        return delta, PSRState(
             step=state.step + 1,
             p=p_next,
             v=v_next,
@@ -161,10 +168,8 @@ def _step(
     w: jax.Array,
     b: jax.Array,
     shift: jax.Array,
-    beta2: jax.Array,
-    step: jax.Array,
 ) -> tuple[Tree, Tree, dict[str, jax.Array]]:
-    """One dense AdamSR solve on one fixed-shape bucket."""
+    """One dense sample-space PSR solve on one fixed-shape bucket."""
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
 
@@ -179,65 +184,69 @@ def _step(
         b_flat,
         *[leaf.dtype for leaf in theta_leaves],
         *[leaf.dtype for leaf in jac_leaves],
+        *[leaf.dtype for leaf in p_leaves],
     )
 
-    bias = 1.0 - beta2**step
-    bias = jnp.where(step == 0, 1.0, bias)
-
-    v_hat_leaves = []
-    v_sum = 0.0
+    # Mean correction variance sets the global covariance scale.
+    v_sum = jnp.asarray(0.0, dtype=precision.dtype("sr", "real"))
     size = 0
 
     for v_leaf in v_leaves:
-        v_hat = jnp.maximum(jnp.asarray(v_leaf) / bias, 0.0)
-
-        v_hat_leaves.append(v_hat)
-        v_sum = v_sum + jnp.sum(v_hat)
-        size += v_hat.size
+        v_leaf = jnp.maximum(jnp.asarray(v_leaf), 0.0)
+        v_sum = v_sum + jnp.sum(v_leaf)
+        size += v_leaf.size
 
     v_mean = v_sum / float(size)
-    cold_start = (step == 0) | (v_mean == 0.0)
+    cold_start = v_mean == 0.0
 
     K = jnp.zeros((nrow, nrow), dtype=dtype)
     Op = jnp.zeros((nrow,), dtype=dtype)
 
     blocks = []
-    scales = []
+    covariances = []
 
-    for J, p_leaf, v_hat in zip(
+    for J, p_leaf, v_leaf in zip(
         jac_leaves,
         p_leaves,
-        v_hat_leaves,
+        v_leaves,
         strict=True,
     ):
         J = J.reshape((w.shape[0], -1, p_leaf.size))
 
+        # Centered weighted log-derivatives define the SR geometry.
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
         O = O.reshape(nrow, p_leaf.size).astype(dtype)
 
-        v_hat = v_hat.reshape(-1)
-        denom = jnp.where(
-            cold_start,
-            1.0,
-            v_hat + jnp.asarray(v_mean, dtype=v_hat.dtype),
-        )
+        # Conservative covariance:
+        #
+        #   C_i = mean(v) / (v_i + mean(v)).
+        #
+        # It shrinks historically unstable correction directions.
+        v_flat = jnp.maximum(jnp.asarray(v_leaf).reshape(-1), 0.0)
+        numer = jnp.asarray(v_mean, dtype=v_flat.dtype)
+        denom = v_flat + numer
 
-        d = jnp.sqrt(jnp.asarray(v_mean, dtype=v_hat.dtype) / denom)
-        d = jnp.where(cold_start, jnp.ones_like(d), d)
-        d = d.astype(dtype)
+        numer = jnp.where(cold_start, jnp.ones_like(v_flat), numer)
+        denom = jnp.where(cold_start, jnp.ones_like(v_flat), denom)
+
+        c = (numer / denom).astype(dtype)
+        d = jnp.sqrt(c)
 
         p_flat = jnp.asarray(p_leaf).reshape(-1).astype(dtype)
-        OD = O * d[None, :]
+
+        # K = O C O^dagger = (O sqrt(C)) (O sqrt(C))^dagger.
+        OC_sqrt = O * d[None, :]
 
         blocks.append(O)
-        scales.append(d)
+        covariances.append(c)
 
-        K = K + OD @ OD.conj().T
+        K = K + OC_sqrt @ OC_sqrt.conj().T
         Op = Op + O @ p_flat
 
     K = precision.asarray(K, "sr")
 
+    # Residual SR equation around the predictor p.
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
     rhs = rhs - precision.asarray(Op, "sr").astype(K.dtype)
 
@@ -247,8 +256,9 @@ def _step(
     q_leaves = []
     delta_leaves = []
 
-    for O, d, p_leaf in zip(blocks, scales, p_leaves, strict=True):
-        q_flat = (d * d) * (O.conj().T @ a)
+    for O, c, p_leaf in zip(blocks, covariances, p_leaves, strict=True):
+        # q = C O^dagger a.
+        q_flat = c * (O.conj().T @ a)
         q = q_flat.reshape(p_leaf.shape)
 
         p_cast = jnp.asarray(p_leaf).astype(q.dtype)

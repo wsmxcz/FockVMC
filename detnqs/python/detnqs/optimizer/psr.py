@@ -30,13 +30,14 @@ class PSRState(NamedTuple):
 
 def psr(
     *,
-    shift: Shift = 1.0e-3,
-    predictor: float = 0.9,
+    shift: Shift = 1.0e-2,
+    mu: float = 0.9,
     beta: float = 0.999,
 ) -> optax.GradientTransformationExtraArgs:
-    """Predictive SR: sample-space SR with a natural-step predictor.
+    """Predictive stochastic reconfiguration.
 
-    PSR solves SR around a historical predictor p.
+    PSR solves a damped sample-space SR equation around a predicted
+    natural step p.
 
         r = b - O p,
         K = O C O^dagger,
@@ -44,19 +45,26 @@ def psr(
         q = C O^dagger a,
         delta = p + q.
 
-    The predictor and correction variance are updated as
+    Here O is the centered weighted log-derivative matrix, b is the
+    sample-space SR force, p is the predicted step, q is the residual
+    correction, and C is a conservative diagonal covariance.
 
-        p <- predictor * delta,
+    The state variables are updated as
+
+        p <- mu * delta,
         v <- beta * v + (1 - beta) * |q|^2.
 
-    The diagonal covariance C is conservative:
+    The covariance is defined by
 
-        C_i = mean(v) / (v_i + mean(v)).
+        C_i = mean(v) / (v_i + mean(v)),
+
+    with C = I at initialization. Thus directions with large historical
+    residual corrections are shrunk.
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
-    if not 0.0 <= predictor < 1.0:
-        raise ValueError("predictor must satisfy 0 <= predictor < 1")
+    if not 0.0 <= mu < 1.0:
+        raise ValueError("mu must satisfy 0 <= mu < 1")
     if not 0.0 <= beta < 1.0:
         raise ValueError("beta must satisfy 0 <= beta < 1")
 
@@ -116,9 +124,9 @@ def psr(
             geometry.theta,
         )
 
-        # Constant-velocity prediction of the next natural step.
+        # Damped constant-step prediction of the next natural update.
         p_next = jax.tree.map(
-            lambda d: jnp.asarray(predictor, dtype=d.dtype) * d,
+            lambda d: jnp.asarray(mu, dtype=d.dtype) * d,
             delta,
         )
 
@@ -136,7 +144,11 @@ def psr(
         dtype = precision.dtype("sr", "real")
         step_norm2 = sum(
             (
-                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
+                jnp.sum(
+                    jnp.real(
+                        jnp.asarray(x) * jnp.conj(jnp.asarray(x))
+                    )
+                )
                 for x in jax.tree.leaves(delta)
             ),
             jnp.asarray(0.0, dtype=dtype),
@@ -187,7 +199,8 @@ def _step(
         *[leaf.dtype for leaf in p_leaves],
     )
 
-    # Mean correction variance sets the global covariance scale.
+    # The global scale of the correction variance defines the covariance
+    # reference level.
     v_sum = jnp.asarray(0.0, dtype=precision.dtype("sr", "real"))
     size = 0
 
@@ -218,12 +231,13 @@ def _step(
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
         O = O.reshape(nrow, p_leaf.size).astype(dtype)
 
-        # Conservative covariance:
+        # Conservative diagonal covariance:
         #
-        #   C_i = mean(v) / (v_i + mean(v)).
+        #     C_i = mean(v) / (v_i + mean(v)).
         #
-        # It shrinks historically unstable correction directions.
+        # Directions with large historical corrections are shrunk.
         v_flat = jnp.maximum(jnp.asarray(v_leaf).reshape(-1), 0.0)
+
         numer = jnp.asarray(v_mean, dtype=v_flat.dtype)
         denom = v_flat + numer
 
@@ -246,7 +260,7 @@ def _step(
 
     K = precision.asarray(K, "sr")
 
-    # Residual SR equation around the predictor p.
+    # Residual SR equation around the predicted step p.
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
     rhs = rhs - precision.asarray(Op, "sr").astype(K.dtype)
 

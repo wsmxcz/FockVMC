@@ -30,15 +30,17 @@ def minsr(
     *,
     shift: Shift = 1.0e-3,
 ) -> optax.GradientTransformationExtraArgs:
-    """Dense sample-space minimum-step SR.
+    """Dense sample-space minimum-step stochastic reconfiguration.
 
-    minSR solves
+    minSR solves the damped sample-space SR system
 
         (K + shift I) a = b,
         K = O O^dagger,
         delta = O^dagger a.
 
-    This is the sample-space form of damped SR.
+    Here O is the centered weighted log-derivative matrix and b is the
+    sample-space SR force. This form avoids building the parameter-space
+    QGT S = O^dagger O explicitly.
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
@@ -72,8 +74,8 @@ def minsr(
         if geometry is None:
             raise ValueError("optimizer.minsr requires geometry")
 
-        value = shift(state.step) if callable(shift) else shift
-        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
+        shift_value = shift(state.step) if callable(shift) else shift
+        shift_t = jnp.asarray(shift_value, dtype=precision.dtype("sr", "real"))
 
         delta_raw, info = batch.bucket(
             _step,
@@ -89,7 +91,7 @@ def minsr(
         )
 
         delta = jax.tree.map(
-            lambda d, p: d.astype(p.dtype),
+            lambda d, theta: d.astype(theta.dtype),
             delta_raw,
             geometry.theta,
         )
@@ -97,7 +99,11 @@ def minsr(
         dtype = precision.dtype("sr", "real")
         step_norm2 = sum(
             (
-                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
+                jnp.sum(
+                    jnp.real(
+                        jnp.asarray(x) * jnp.conj(jnp.asarray(x))
+                    )
+                )
                 for x in jax.tree.leaves(delta)
             ),
             jnp.asarray(0.0, dtype=dtype),
@@ -126,11 +132,11 @@ def _step(
     b: jax.Array,
     shift: jax.Array,
 ) -> tuple[Tree, dict[str, jax.Array]]:
-    """One dense minSR solve on one fixed-shape bucket."""
+    """One dense sample-space minSR solve on one fixed-shape bucket."""
     b_flat, _ = ravel_pytree(b)
     nrow = b_flat.size
 
-    jac = jax.jacrev(lambda p: coord(p, x))(theta)
+    jac = jax.jacrev(lambda params: coord(params, x))(theta)
 
     theta_leaves, treedef = tree_util.tree_flatten(theta)
     jac_leaves = tree_util.tree_leaves(jac)
@@ -144,14 +150,17 @@ def _step(
     K = jnp.zeros((nrow, nrow), dtype=dtype)
     blocks = []
 
-    for J, p in zip(jac_leaves, theta_leaves, strict=True):
-        J = J.reshape((w.shape[0], -1, p.size))
+    for J, theta_leaf in zip(jac_leaves, theta_leaves, strict=True):
+        J = J.reshape((w.shape[0], -1, theta_leaf.size))
 
+        # Centered weighted log-derivatives define the SR geometry.
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
-        O = O.reshape(nrow, p.size).astype(dtype)
+        O = O.reshape(nrow, theta_leaf.size).astype(dtype)
 
         blocks.append(O)
+
+        # K = O O^dagger.
         K = K + O @ O.conj().T
 
     K = precision.asarray(K, "sr")
@@ -160,9 +169,10 @@ def _step(
     a, info = linalg.solve_dense(K, rhs, shift)
     a = a.astype(dtype)
 
+    # delta = O^dagger a.
     leaves = [
-        (O.conj().T @ a).reshape(p.shape)
-        for O, p in zip(blocks, theta_leaves, strict=True)
+        (O.conj().T @ a).reshape(theta_leaf.shape)
+        for O, theta_leaf in zip(blocks, theta_leaves, strict=True)
     ]
 
     return tree_util.tree_unflatten(treedef, leaves), info

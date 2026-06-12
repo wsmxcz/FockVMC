@@ -41,7 +41,8 @@ def sr(
         (S + shift I) delta = g,
         S = O^dagger O,
 
-    where O is the centered weighted Jacobian.
+    where O is the centered weighted log-derivative matrix and g is the
+    parameter-space force.
 
     mode="dense":
         Build S explicitly and solve by spectral decomposition.
@@ -89,45 +90,55 @@ def sr(
         if geometry is None:
             raise ValueError("optimizer.sr requires geometry")
 
-        value = shift(state.step) if callable(shift) else shift
-        shift_t = jnp.asarray(value, dtype=precision.dtype("sr", "real"))
+        shift_value = shift(state.step) if callable(shift) else shift
+        shift_t = jnp.asarray(shift_value, dtype=precision.dtype("sr", "real"))
 
         theta = geometry.theta
         w = precision.asarray(normalize(geometry.w), "model", "real")
-        updates = jax.tree.map(
-            lambda g, p: jnp.asarray(g).astype(p.dtype),
+
+        # The input updates are interpreted as the parameter-space force g.
+        g = jax.tree.map(
+            lambda x, theta_leaf: jnp.asarray(x).astype(theta_leaf.dtype),
             updates,
             theta,
         )
 
         if mode == "dense":
-            delta, info = _dense_step(
+            delta_raw, info = _dense_step(
                 geometry.coord,
                 theta,
                 geometry.x,
                 w,
-                updates,
+                g,
                 shift_t,
             )
             x0_next = state.x0
         else:
-            delta, x0_next, info = _matvec_step(
+            delta_raw, x0_next, info = _matvec_step(
                 geometry.coord,
                 theta,
                 geometry.x,
                 w,
-                updates,
+                g,
                 shift_t,
                 state.x0,
                 int(maxiter),
             )
 
-        delta = jax.tree.map(lambda d, p: d.astype(p.dtype), delta, theta)
+        delta = jax.tree.map(
+            lambda d, theta_leaf: d.astype(theta_leaf.dtype),
+            delta_raw,
+            theta,
+        )
 
         dtype = precision.dtype("sr", "real")
         step_norm2 = sum(
             (
-                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
+                jnp.sum(
+                    jnp.real(
+                        jnp.asarray(x) * jnp.conj(jnp.asarray(x))
+                    )
+                )
                 for x in jax.tree.leaves(delta)
             ),
             jnp.asarray(0.0, dtype=dtype),
@@ -157,19 +168,21 @@ def _dense_step(
     theta: Tree,
     x: Any,
     w: jax.Array,
-    updates: Tree,
+    g: Tree,
     shift: jax.Array,
 ) -> tuple[Tree, dict[str, jax.Array]]:
-    """One dense SR step."""
-    updates_flat, unravel = ravel_pytree(updates)
+    """One dense parameter-space SR solve."""
+    g_flat, unravel = ravel_pytree(g)
 
     O = jnp.concatenate(_blocks(coord, theta, x, w), axis=1)
+
+    # S = O^dagger O.
     S = precision.asarray(O.conj().T @ O, "sr")
 
-    rhs = precision.asarray(updates_flat, "sr").astype(S.dtype)
+    rhs = precision.asarray(g_flat, "sr").astype(S.dtype)
 
     delta_flat, info = linalg.solve_dense(S, rhs, shift)
-    delta = unravel(delta_flat.astype(updates_flat.dtype))
+    delta = unravel(delta_flat.astype(g_flat.dtype))
 
     return delta, info
 
@@ -180,18 +193,19 @@ def _matvec_step(
     theta: Tree,
     x: Any,
     w: jax.Array,
-    updates: Tree,
+    g: Tree,
     shift: jax.Array,
     x0: jax.Array,
     maxiter: int,
 ) -> tuple[Tree, jax.Array, dict[str, jax.Array]]:
-    """One matrix-free SR step."""
-    updates_flat, unravel = ravel_pytree(updates)
+    """One matrix-free parameter-space SR solve."""
+    g_flat, unravel = ravel_pytree(g)
 
     blocks = _blocks(coord, theta, x, w)
     sizes = tuple(block.shape[1] for block in blocks)
 
     def matvec(v: jax.Array) -> jax.Array:
+        # Apply S v = O^dagger O v without forming S.
         y = jnp.zeros((blocks[0].shape[0],), dtype=v.dtype)
 
         lo = 0
@@ -202,6 +216,7 @@ def _matvec_step(
         parts = [block.conj().T @ y for block in blocks]
         return jnp.concatenate(parts, axis=0)
 
+    # Jacobi preconditioner diagonal: diag(S).
     diag = jnp.concatenate(
         [
             jnp.sum(jnp.real(block.conj() * block), axis=0)
@@ -210,7 +225,7 @@ def _matvec_step(
         axis=0,
     )
 
-    rhs = precision.asarray(updates_flat, "sr")
+    rhs = precision.asarray(g_flat, "sr")
     x0 = precision.asarray(x0, "sr").astype(rhs.dtype)
 
     delta_flat, info = linalg.solve_matvec(
@@ -222,7 +237,7 @@ def _matvec_step(
         maxiter=maxiter,
     )
 
-    delta = unravel(delta_flat.astype(updates_flat.dtype))
+    delta = unravel(delta_flat.astype(g_flat.dtype))
     return delta, delta_flat.astype(x0.dtype), info
 
 
@@ -232,28 +247,31 @@ def _blocks(
     x: Any,
     w: jax.Array,
 ) -> list[jax.Array]:
-    """Build 2D blocks of O = sqrt(w) * (J - <J>_w).
+    """Build parameter blocks of O = sqrt(w) * (J - <J>_w).
 
     For each parameter leaf,
 
-        J: [N, ..., *p.shape] -> [N, C, P],
+        J: [N, ..., *theta.shape] -> [N, C, P],
 
-    where C is the flattened coordinate channel and P is the leaf size.
-    The returned block has shape [N * C, P].
+    where N is the sample size, C is the flattened output channel size,
+    and P is the flattened parameter-leaf size.
+
+    Each returned block has shape [N * C, P].
     """
-    jac = jax.jacrev(lambda p: coord(p, x))(theta)
+    jac = jax.jacrev(lambda params: coord(params, x))(theta)
 
     blocks = []
-    for J, p in zip(
+
+    for J, theta_leaf in zip(
         tree_util.tree_leaves(jac),
         tree_util.tree_leaves(theta),
         strict=True,
     ):
-        J = J.reshape((w.shape[0], -1, p.size))
+        J = J.reshape((w.shape[0], -1, theta_leaf.size))
 
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
 
-        blocks.append(O.reshape(-1, p.size))
+        blocks.append(O.reshape(-1, theta_leaf.size))
 
     return blocks

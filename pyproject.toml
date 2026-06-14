@@ -19,12 +19,13 @@ authors = [
 ]
 
 dependencies = [
-  "numpy>=1.23",
+  "numpy>=2.0",
   "scipy>=1.10",
   "jax>=0.8",
   "jaxlib>=0.8",
   "flax>=0.12",
   "optax>=0.2",
+  "pyscf>=2.13"
 ]
 
 classifiers = [

@@ -16,87 +16,36 @@ from .proposal import unique_dets
 
 
 @dataclass(frozen=True, slots=True)
-class SampleBatch:
-    """Counted observed determinants.
+class Walkers:
+    """Flattened state of the physical Markov chains.
 
-    The chain state is x. The estimator observes y after an optional
-    Hamiltonian blur kernel B(y|x).
-
-    count:
-        Number of observed walkers at each determinant.
-
-    mass:
-        Statistical mass entering the reweighted estimator. For identity
-        observation, mass == count. For degree-tilted Hamiltonian blur,
-
-            mass(y) = sum_{i: Y_i = y} s(X_i),
-
-        where s(x) = d_B(x) for non-empty blur rows and s(x) = 1 otherwise.
-    """
-
-    dets: np.ndarray
-    count: np.ndarray
-    mass: np.ndarray
-
-
-@dataclass(frozen=True, slots=True)
-class WalkerState:
-    """Counted empirical state of exchangeable Markov walkers.
-
-    Public semantics:
-        n_chains parallel walkers.
-
-    Internal representation:
-        {(x_u, m_u, log|psi(x_u)|)}, with sum_u m_u = n_chains.
-
-    alpha:
-        Current exponent of the reference law
-
-            eta_alpha(x) proportional to |psi(x)|^alpha.
-
-        If MCSampler.alpha is None, MCState updates this value by auto-alpha.
-
-    alpha_step:
-        Adaptive clock for alpha. It must survive chain resets so the kernel
-        changes with diminishing adaptation.
+    ``dets[i]`` and ``logabs[i]`` always describe the same walker. ``alpha``
+    and ``alpha_step`` carry the complete state of adaptive reference sampling.
     """
 
     key: jax.Array
     dets: np.ndarray
-    count: np.ndarray
     logabs: np.ndarray
-    accept: float = 0.0
     alpha: float = 1.0
     alpha_step: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class MCSampler:
-    """Counted determinant-space Metropolis sampler.
+    """Metropolis sampler for determinant-space walkers.
 
-    Physical Born Measure:
-        pi(x) proportional to |psi(x)|^2.
+    The Markov reference law is
 
-    Markov reference:
         eta_alpha(x) proportional to |psi(x)|^alpha.
 
-    Observation:
-        With blur = 0, y = x.
-        With blur > 0, y is drawn from Hamiltonian connections,
-
-            B(y|x) = (1 - beta_x) delta_xy + beta_x |H_yx| / d_B(x).
-
-        If d_B(x) = 0, beta_x is set to zero.
-
-    alpha:
-        A float gives a fixed reference exponent.
-        None enables auto-alpha with the value stored in WalkerState.alpha.
+    The optional Hamiltonian blur changes only the observation law. It does
+    not modify the Markov-chain state.
     """
 
     n_samples: int = 1024
     n_chains: int = 1024
 
-    thermal_steps: int = 1024
+    thermal_steps: int = 32
     discard_steps: int = 0
     sweep_steps: int = 1
     reset_chains: bool = False
@@ -120,50 +69,46 @@ class MCSampler:
         init_method: str | Any = "hf",
         alpha: float | None = None,
         alpha_step: int = 0,
-    ) -> WalkerState:
-        """Initialize counted walkers and run thermalization.
-
-        init_method:
-            "hf"     - lowest n_alpha/n_beta orbitals.
-            "random" - random fixed-(n_alpha, n_beta) determinants.
-            array    - user-provided determinant batch, tiled if needed.
-        """
+    ) -> Walkers:
+        """Initialize all physical chains and run thermalization."""
         n_chains = int(self.n_chains)
         if n_chains <= 0:
             raise ValueError("n_chains must be positive")
 
-        alpha_value = (
-            1.0 if alpha is None else float(alpha)
-            if self.alpha is None
-            else float(self.alpha)
-        )
+        if self.alpha is None:
+            alpha_value = 1.0 if alpha is None else float(alpha)
+        else:
+            alpha_value = float(self.alpha)
 
+        key, init_key = jax.random.split(key)
         nword = int(hamiltonian.nword)
         norb = int(hamiltonian.norb)
+        n_alpha = int(n_alpha)
+        n_beta = int(n_beta)
 
-        match init_method:
-            case "hf":
+        if isinstance(init_method, str):
+            if init_method == "hf":
                 det = np.zeros((1, 2, nword), dtype=np.uint64)
 
-                for p in range(int(n_alpha)):
+                for p in range(n_alpha):
                     det[0, 0, p >> 6] |= np.uint64(1) << np.uint64(p & 63)
 
-                for p in range(int(n_beta)):
+                for p in range(n_beta):
                     det[0, 1, p >> 6] |= np.uint64(1) << np.uint64(p & 63)
 
                 dets = np.repeat(det, n_chains, axis=0)
 
-            case "random":
-                key, subkey = jax.random.split(key)
-                seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
+            elif init_method == "random":
+                seed = int(jax.random.bits(init_key, (), dtype=jnp.uint32))
                 rng = np.random.default_rng(seed)
-
                 dets = np.zeros((n_chains, 2, nword), dtype=np.uint64)
                 rows = np.arange(n_chains, dtype=np.int64)[:, None]
 
-                for spin, n_elec in enumerate((int(n_alpha), int(n_beta))):
+                for spin, n_elec in enumerate((n_alpha, n_beta)):
                     if n_elec < 0 or n_elec > norb:
-                        raise ValueError("electron number must satisfy 0 <= n <= norb")
+                        raise ValueError(
+                            "electron number must satisfy 0 <= n <= norb"
+                        )
                     if n_elec == 0:
                         continue
 
@@ -174,7 +119,9 @@ class MCSampler:
                         )
                     else:
                         score = rng.random((n_chains, norb))
-                        occ = np.argpartition(score, n_elec - 1, axis=1)[:, :n_elec]
+                        occ = np.argpartition(score, n_elec - 1, axis=1)[
+                            :, :n_elec
+                        ]
 
                     word = occ >> 6
                     bit = (occ & 63).astype(np.uint64)
@@ -184,83 +131,68 @@ class MCSampler:
                         np.uint64(1) << bit,
                     )
 
-            case str():
+            else:
                 raise ValueError(
                     "init_method must be 'hf', 'random', or a determinant batch"
                 )
+        else:
+            dets = libdet.to_dets(init_method)
+            if dets.shape[0] == 0:
+                raise ValueError(
+                    "init_method determinant batch must be non-empty"
+                )
 
-            case _:
-                dets = libdet.to_dets(init_method)
+            if dets.shape[0] != n_chains:
+                reps = (n_chains + dets.shape[0] - 1) // dets.shape[0]
+                dets = np.tile(dets, (reps, 1, 1))[:n_chains]
 
-                if dets.shape[0] == 0:
-                    raise ValueError("init_method determinant batch must be non-empty")
+            dets = np.ascontiguousarray(dets)
 
-                if dets.shape[0] != n_chains:
-                    reps = (n_chains + dets.shape[0] - 1) // dets.shape[0]
-                    dets = np.tile(dets, (reps, 1, 1))[:n_chains]
+        logabs = self._eval_logabs(theta, model, dets)
 
-        dets, _, inv = unique_dets(dets)
-        count = np.bincount(inv, minlength=dets.shape[0]).astype(np.int64)
-
-        logabs_jax = utils.apply(model.logabs, theta, dets)
-        jax.block_until_ready(logabs_jax)
-
-        logabs = precision.asarray(
-            np.asarray(utils.host(logabs_jax)).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
-
-        state = WalkerState(
+        state = Walkers(
             key=key,
             dets=dets,
-            count=count,
             logabs=logabs,
             alpha=alpha_value,
             alpha_step=max(0, int(alpha_step)),
         )
 
-        accepted = 0
-        proposed = 0
-
+        # Burn-in advances the same physical chains used by later measurements.
+        # A modest default avoids making initialization dominate large systems.
         for _ in range(max(0, int(self.thermal_steps))):
-            state, acc, prop, _ = self._move(theta, hamiltonian, model, state)
-            accepted += acc
-            proposed += prop
+            state, _, _, _ = self._move(theta, hamiltonian, model, state)
 
-        return replace(state, accept=accepted / proposed if proposed else 0.0)
+        return state
 
     def draw(
         self,
         theta: Any,
         hamiltonian: Any,
         model: Any,
-        state: WalkerState,
-    ) -> tuple[WalkerState, SampleBatch, dict[str, float]]:
-        """Draw counted observed samples and advance the walker state."""
-        if int(self.n_samples) <= 0:
+        state: Walkers,
+    ) -> tuple[Walkers, np.ndarray, np.ndarray, dict[str, float]]:
+        """Draw observations and advance the chains.
+
+        Samples remain walker-wise here. Determinant multiplicities and
+        statistical masses are reduced only at the estimator boundary.
+        """
+        n_samples = int(self.n_samples)
+        if n_samples <= 0:
             raise ValueError("n_samples must be positive")
 
-        alpha_value = float(state.alpha) if self.alpha is None else float(self.alpha)
+        if state.dets.shape[0] != int(self.n_chains):
+            raise ValueError("walker state size must equal n_chains")
 
         timer = utils.Timer()
+        alpha = float(state.alpha) if self.alpha is None else float(self.alpha)
 
-        # Parameters change during optimization. Refresh log|psi| before any
-        # Metropolis ratio is formed.
+        # Parameters change between optimization steps; refresh the chain cache.
         with timer("forward"):
-            logabs_jax = utils.apply(model.logabs, theta, state.dets)
-            jax.block_until_ready(logabs_jax)
-
             state = replace(
                 state,
-                logabs=precision.asarray(
-                    np.asarray(utils.host(logabs_jax)).reshape(-1),
-                    "calc",
-                    "real",
-                    host=True,
-                ),
-                alpha=alpha_value,
+                logabs=self._eval_logabs(theta, model, state.dets),
+                alpha=alpha,
             )
 
         accepted = 0
@@ -281,48 +213,37 @@ class MCSampler:
             n_conn_proposal += n_conn
 
         det_parts: list[np.ndarray] = []
-        count_parts: list[np.ndarray] = []
         mass_parts: list[np.ndarray] = []
-
-        remaining = int(self.n_samples)
-        n_chains = int(self.n_chains)
+        remaining = n_samples
         sweep_steps = max(1, int(self.sweep_steps))
 
         while remaining > 0:
-            with timer("sample"):
-                take = min(n_chains, remaining)
+            take = min(int(self.n_chains), remaining)
 
-                if take == n_chains:
-                    base_dets = state.dets
-                    base_count = state.count.astype(np.int64, copy=False)
-                else:
+            if take == int(self.n_chains):
+                base_dets = state.dets
+            else:
+                with timer("sample"):
                     key, subkey = jax.random.split(state.key)
                     seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
                     rng = np.random.default_rng(seed)
-
-                    sample_count = rng.multivariate_hypergeometric(
-                        state.count.astype(np.int64, copy=False),
-                        take,
-                    ).astype(np.int64)
-
-                    keep = sample_count > 0
-                    base_dets = state.dets[keep]
-                    base_count = sample_count[keep]
+                    index = rng.choice(
+                        int(self.n_chains),
+                        size=take,
+                        replace=False,
+                    )
+                    base_dets = np.ascontiguousarray(state.dets[index])
                     state = replace(state, key=key)
 
-            state, obs_dets, obs_count, obs_mass, n_conn = self._observe(
+            state, observed, mass, n_conn = self._observe(
                 hamiltonian,
                 state,
                 base_dets,
-                base_count,
                 timer=timer,
             )
-
-            with timer("sample"):
-                det_parts.append(obs_dets)
-                count_parts.append(obs_count)
-                mass_parts.append(obs_mass)
-                n_conn_blur += n_conn
+            det_parts.append(observed)
+            mass_parts.append(mass)
+            n_conn_blur += n_conn
 
             for _ in range(sweep_steps):
                 state, acc, prop, n_conn = self._move(
@@ -338,37 +259,22 @@ class MCSampler:
 
             remaining -= take
 
-        with timer("sample"):
-            obs_dets, _, inv = unique_dets(np.concatenate(det_parts, axis=0))
-            raw_count = np.concatenate(count_parts).astype(np.int64, copy=False)
-            raw_mass = np.concatenate(mass_parts).astype(
-                precision.dtype("calc", "real", host=True),
-                copy=False,
-            )
-
-            obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
-            obs_mass = np.zeros(obs_dets.shape[0], dtype=raw_mass.dtype)
-
-            np.add.at(obs_count, inv, raw_count)
-            np.add.at(obs_mass, inv, raw_mass)
-
-            keep = obs_count > 0
-            obs_dets = np.ascontiguousarray(obs_dets[keep])
-            obs_count = obs_count[keep]
-            obs_mass = obs_mass[keep]
-
-            accept = accepted / proposed if proposed else 0.0
-
         stats = {
-            "accept": float(accept),
+            "accept": float(accepted / proposed if proposed else 0.0),
             "n_conn_proposal": float(n_conn_proposal),
             "n_conn_blur": float(n_conn_blur),
         }
         stats.update(timer.stats())
 
         return (
-            replace(state, accept=accept),
-            SampleBatch(dets=obs_dets, count=obs_count, mass=obs_mass),
+            state,
+            np.ascontiguousarray(np.concatenate(det_parts, axis=0)),
+            precision.asarray(
+                np.concatenate(mass_parts),
+                "calc",
+                "real",
+                host=True,
+            ),
             stats,
         )
 
@@ -377,183 +283,154 @@ class MCSampler:
         theta: Any,
         hamiltonian: Any,
         model: Any,
-        state: WalkerState,
+        state: Walkers,
         *,
         timer: utils.Timer | None = None,
-    ) -> tuple[WalkerState, int, int, int]:
-        """Advance the counted walker state by one raw Metropolis step.
+    ) -> tuple[Walkers, int, int, int]:
+        """Advance every walker by one Metropolis-Hastings step.
 
-        Acceptance probability:
-
-            a(x -> y) = min(1, exp[
-                alpha (log|psi(y)| - log|psi(x)|)
-                + log q(x|y) - log q(y|x)
-            ]).
+        log A(x -> y) =
+            alpha [log|psi(y)| - log|psi(x)|]
+            + log q(x|y) - log q(y|x).
         """
         timer = utils.Timer() if timer is None else timer
         rdtype = precision.dtype("calc", "real", host=True)
 
         with timer("sample"):
-            key, subkey = jax.random.split(state.key)
-            seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
-            rng = np.random.default_rng(seed)
-
-            alpha = rdtype(state.alpha)
-            dets = state.dets
-            count = state.count.astype(np.int64, copy=False)
-            logabs = precision.asarray(state.logabs, "calc", "real", host=True)
-            n_ket = int(dets.shape[0])
+            key, proposal_key, accept_key = jax.random.split(state.key, 3)
+            proposal_seed = int(
+                jax.random.bits(proposal_key, (), dtype=jnp.uint32)
+            )
+            accept_seed = int(
+                jax.random.bits(accept_key, (), dtype=jnp.uint32)
+            )
 
         with timer("graph"):
-            batch = propose(
+            dets_y, log_qratio, active, n_conn = propose(
                 self.proposal,
                 hamiltonian,
-                dets,
-                count,
-                seed=seed,
+                state.dets,
+                seed=proposal_seed,
                 eps=float(self.proposal_eps),
             )
 
-        with timer("sample"):
-            proposed = int(np.sum(batch.count))
+        proposed = int(np.count_nonzero(active))
+        if proposed == 0:
+            return replace(state, key=key), 0, 0, int(n_conn)
 
-            if proposed == 0 or batch.dets.shape[0] == 0:
-                return replace(state, key=key), 0, proposed, int(batch.n_conn)
+        logabs_y = np.empty(state.dets.shape[0], dtype=rdtype)
+        logabs_y[~active] = state.logabs[~active]
 
-            bra_logabs = np.empty(batch.dets.shape[0], dtype=rdtype)
+        active_dets = np.ascontiguousarray(dets_y[active])
+        unique_y, _, inv_y = unique_dets(active_dets)
 
-            # Avoid duplicate model evaluations for proposals already present
-            # in the current counted support.
-            _, first, inv_lookup = unique_dets(
-                np.concatenate([dets, batch.dets], axis=0)
-            )
-            bra_first = first[inv_lookup[n_ket:]]
-            known = bra_first < n_ket
+        # The model sees only new unique proposals. Current amplitudes are cached.
+        _, first, lookup = unique_dets(
+            np.concatenate([state.dets, unique_y], axis=0)
+        )
+        y_first = first[lookup[state.dets.shape[0] :]]
+        known = y_first < state.dets.shape[0]
+        unique_logabs = np.empty(unique_y.shape[0], dtype=rdtype)
 
-            if known.any():
-                bra_logabs[known] = logabs[bra_first[known]]
+        if known.any():
+            unique_logabs[known] = state.logabs[y_first[known]]
 
         if (~known).any():
             with timer("forward"):
-                bra_logabs_jax = utils.apply(
-                    model.logabs,
+                unique_logabs[~known] = self._eval_logabs(
                     theta,
-                    np.ascontiguousarray(batch.dets[~known]),
+                    model,
+                    np.ascontiguousarray(unique_y[~known]),
                 )
-                jax.block_until_ready(bra_logabs_jax)
 
-                bra_logabs[~known] = precision.asarray(
-                    np.asarray(utils.host(bra_logabs_jax)).reshape(-1),
-                    "calc",
-                    "real",
-                    host=True,
-                )
+        logabs_y[active] = unique_logabs[inv_y]
 
         with timer("sample"):
             log_ratio = (
-                alpha * (bra_logabs[batch.bra] - logabs[batch.ket])
-                + precision.asarray(batch.log_qratio, "calc", "real", host=True)
+                rdtype(state.alpha) * (logabs_y - state.logabs)
+                + precision.asarray(log_qratio, "calc", "real", host=True)
             )
 
-            accept_prob = np.clip(
-                np.exp(np.minimum(rdtype(0.0), log_ratio)),
-                rdtype(0.0),
-                rdtype(1.0),
-            )
+            rng = np.random.default_rng(accept_seed)
+            log_uniform = np.log(rng.random(state.dets.shape[0]))
+            accept = active & (log_uniform < np.minimum(rdtype(0.0), log_ratio))
 
-            accepted_g = rng.binomial(batch.count, accept_prob).astype(np.int64)
-            accepted = int(accepted_g.sum())
+            det_mask = accept.reshape((-1, 1, 1))
+            next_dets = np.where(det_mask, dets_y, state.dets)
+            next_logabs = np.where(accept, logabs_y, state.logabs)
 
-            next_count = count.copy()
-            np.add.at(next_count, batch.ket, -accepted_g)
-
-            bra_count = np.zeros(batch.dets.shape[0], dtype=np.int64)
-            np.add.at(bra_count, batch.bra, accepted_g)
-
-            all_dets = np.concatenate([dets, batch.dets], axis=0)
-            all_count = np.concatenate([next_count, bra_count])
-            all_logabs = np.concatenate([logabs, bra_logabs])
-
-            next_dets, first, inv = unique_dets(all_dets)
-
-            merged_count = np.zeros(next_dets.shape[0], dtype=np.int64)
-            np.add.at(merged_count, inv, all_count)
-
-            keep = merged_count > 0
-
-            next_state = WalkerState(
+        return (
+            replace(
+                state,
                 key=key,
-                dets=np.ascontiguousarray(next_dets[keep]),
-                count=merged_count[keep],
+                dets=np.ascontiguousarray(next_dets),
                 logabs=precision.asarray(
-                    all_logabs[first][keep],
+                    next_logabs,
                     "calc",
                     "real",
                     host=True,
                 ),
-                accept=accepted / proposed if proposed else 0.0,
-                alpha=float(state.alpha),
-                alpha_step=int(state.alpha_step),
-            )
-
-        return next_state, accepted, proposed, int(batch.n_conn)
+            ),
+            int(np.count_nonzero(accept)),
+            proposed,
+            int(n_conn),
+        )
 
     def _observe(
         self,
         hamiltonian: Any,
-        state: WalkerState,
+        state: Walkers,
         base_dets: np.ndarray,
-        base_count: np.ndarray,
         *,
         timer: utils.Timer | None = None,
-    ) -> tuple[WalkerState, np.ndarray, np.ndarray, np.ndarray, int]:
-        """Apply identity or Hamiltonian blur observation.
+    ) -> tuple[Walkers, np.ndarray, np.ndarray, int]:
+        """Apply the Hamiltonian blur independently to every observation.
 
-        With blur disabled, y = x and mass = count.
+        B(y|x) = (1-beta) delta_xy + beta |H_yx| / d_B(x).
 
-        With blur enabled,
-
-            B(y|x) = (1 - beta_x) delta_xy
-                   + beta_x |H_yx| / d_B(x),
-
-        and each observed sample carries source mass
-
-            s(x) = d_B(x) if d_B(x) > 0 else 1.
+        Each observation carries source mass d_B(x); an empty Hamiltonian row
+        falls back to the identity kernel with unit mass.
         """
         timer = utils.Timer() if timer is None else timer
         rdtype = precision.dtype("calc", "real", host=True)
+        beta = float(np.clip(self.blur, 0.0, 1.0))
 
-        with timer("sample"):
-            beta = float(np.clip(self.blur, 0.0, 1.0))
-            base_count = base_count.astype(np.int64, copy=False)
-
-            if beta <= 0.0:
-                return (
-                    state,
-                    np.ascontiguousarray(base_dets),
-                    base_count,
-                    base_count.astype(rdtype, copy=False),
-                    0,
-                )
-
-            key, subkey = jax.random.split(state.key)
-            seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
-            rng = np.random.default_rng(seed)
-
-            blur_eps = float(
-                self.proposal_eps if self.blur_eps is None else self.blur_eps
+        if beta <= 0.0:
+            return (
+                state,
+                np.ascontiguousarray(base_dets),
+                np.ones(base_dets.shape[0], dtype=rdtype),
+                0,
             )
 
-            move = rng.binomial(base_count, beta).astype(np.int64)
-            stay = base_count - move
+        with timer("sample"):
+            key, choice_key, conn_key = jax.random.split(state.key, 3)
+            choice_seed = int(
+                jax.random.bits(choice_key, (), dtype=jnp.uint32)
+            )
+            conn_seed = int(
+                jax.random.bits(conn_key, (), dtype=jnp.uint32)
+            )
+            rng = np.random.default_rng(choice_seed)
+            move = rng.random(base_dets.shape[0]) < beta
+
+            kets, _, walker_to_ket = unique_dets(base_dets)
+            counts = np.bincount(
+                walker_to_ket[move],
+                minlength=kets.shape[0],
+            ).astype(np.int64)
+
+        blur_eps = float(
+            self.proposal_eps if self.blur_eps is None else self.blur_eps
+        )
 
         with timer("graph"):
             sample = hamiltonian.sample_conns(
-                base_dets,
-                move,
+                kets,
+                counts,
                 eps1=np.inf,
                 eps2=blur_eps,
-                seed=seed,
+                seed=conn_seed,
             )
 
         with timer("sample"):
@@ -563,62 +440,57 @@ class MCSampler:
                 "real",
                 host=True,
             )
+            source_mass = np.where(
+                ket_weight[walker_to_ket] > 0.0,
+                ket_weight[walker_to_ket],
+                rdtype(1.0),
+            )
 
-            # Empty Hamiltonian rows revert to identity observation.
-            dead = ket_weight <= 0.0
-            if dead.any():
-                stay[dead] += move[dead]
-                move[dead] = 0
-
-            source_mass = np.where(ket_weight > 0.0, ket_weight, rdtype(1.0))
-            stay_mass = stay.astype(rdtype, copy=False) * source_mass
-
-            parts = [base_dets]
-            counts = [stay]
-            masses = [stay_mass]
-
-            n_conn_blur = int(np.asarray(sample.ket_nconn, dtype=np.int64).sum())
+            observed = np.ascontiguousarray(base_dets.copy())
+            sampled_ket = np.asarray(sample.ket, dtype=np.int64)
+            sampled_count = np.asarray(sample.counts, dtype=np.int64)
             sampled_bras = np.ascontiguousarray(
                 np.asarray(sample.bras, dtype=np.uint64)
             )
 
-            if sampled_bras.shape[0] > 0:
-                sampled_count = np.asarray(sample.counts, dtype=np.int64)
-                sampled_ket = np.asarray(sample.ket, dtype=np.int64)
+            assign_rng = np.random.default_rng(conn_seed ^ 0x85EBCA6B)
 
-                sampled_mass = (
-                    sampled_count.astype(rdtype, copy=False)
-                    * source_mass[sampled_ket]
-                )
+            for iket in np.unique(sampled_ket):
+                records = np.flatnonzero(sampled_ket == iket)
+                draw = np.repeat(records, sampled_count[records])
+                walkers = np.flatnonzero(move & (walker_to_ket == iket))
 
-                obs_dets, _, obs_inv = unique_dets(sampled_bras)
+                if draw.size != walkers.size:
+                    raise RuntimeError("libdet returned an inconsistent blur count")
 
-                obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
-                obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
+                assign_rng.shuffle(draw)
+                observed[walkers] = sampled_bras[draw]
 
-                np.add.at(obs_count, obs_inv, sampled_count)
-                np.add.at(obs_mass, obs_inv, sampled_mass)
-
-                parts.append(obs_dets)
-                counts.append(obs_count)
-                masses.append(obs_mass)
-
-            obs_dets, _, inv = unique_dets(np.concatenate(parts, axis=0))
-            raw_count = np.concatenate(counts).astype(np.int64, copy=False)
-            raw_mass = np.concatenate(masses).astype(rdtype, copy=False)
-
-            obs_count = np.zeros(obs_dets.shape[0], dtype=np.int64)
-            obs_mass = np.zeros(obs_dets.shape[0], dtype=rdtype)
-
-            np.add.at(obs_count, inv, raw_count)
-            np.add.at(obs_mass, inv, raw_mass)
-
-            keep = obs_count > 0
+            n_conn = int(np.asarray(sample.ket_nconn, dtype=np.int64).sum())
 
         return (
             replace(state, key=key),
-            np.ascontiguousarray(obs_dets[keep]),
-            obs_count[keep],
-            obs_mass[keep],
-            n_conn_blur,
+            observed,
+            precision.asarray(source_mass, "calc", "real", host=True),
+            n_conn,
+        )
+
+    @staticmethod
+    def _eval_logabs(theta: Any, model: Any, dets: np.ndarray) -> np.ndarray:
+        """Evaluate each distinct determinant once and scatter to walkers."""
+        unique, _, inv = unique_dets(dets)
+        value = utils.apply(model.logabs, theta, unique)
+        jax.block_until_ready(value)
+
+        unique_value = precision.asarray(
+            np.asarray(utils.host(value)).reshape(-1),
+            "calc",
+            "real",
+            host=True,
+        )
+        return precision.asarray(
+            unique_value[inv],
+            "calc",
+            "real",
+            host=True,
         )

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from .mcmc import MCSampler
-from .mcmc import SampleBatch
-from .mcmc import WalkerState
+from .mcmc import Walkers
 
 __all__ = [
     "MCSampler",
-    "SampleBatch",
-    "WalkerState",
+    "Walkers",
 ]

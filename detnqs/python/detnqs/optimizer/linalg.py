@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 import jax.scipy.sparse.linalg as jsp_sparse
 
 
@@ -14,12 +15,8 @@ def solve_dense(
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Solve a dense Hermitian PSD SR system.
 
-    The regularized system is
-
-        (A + shift I) x = rhs.
-
-    For shift > 0 this is damped SR. For shift = 0, zero modes are removed
-    by a spectral cutoff.
+    For shift > 0, use Cholesky first. If Cholesky fails numerically,
+    fall back to the spectral PSD solve.
     """
     matrix = jnp.asarray(matrix)
     rhs = jnp.asarray(rhs)
@@ -29,37 +26,71 @@ def solve_dense(
     real_dtype = jnp.real(jnp.zeros((), dtype=matrix.dtype)).dtype
     shift = jnp.asarray(shift, dtype=real_dtype)
 
-    eps = jnp.asarray(jnp.finfo(real_dtype).eps, dtype=real_dtype)
     tiny = jnp.asarray(jnp.finfo(real_dtype).tiny, dtype=real_dtype)
+    eps = jnp.asarray(jnp.finfo(real_dtype).eps, dtype=real_dtype)
 
-    eig, vec = jnp.linalg.eigh(matrix)
-    eig = jnp.maximum(eig.astype(real_dtype), 0.0)
+    eye = jnp.eye(matrix.shape[0], dtype=matrix.dtype)
+    system = matrix + shift.astype(matrix.dtype) * eye
 
-    coeff = vec.conj().T @ rhs
+    def solve_eigh(_):
+        eig, vec = jnp.linalg.eigh(matrix)
+        eig = jnp.maximum(eig.astype(real_dtype), 0.0)
 
-    eig_max = jnp.max(eig)
-    cutoff = eps * jnp.maximum(eig_max, 1.0)
-    active = (shift > 0.0) | (eig > cutoff)
+        coeff = vec.conj().T @ rhs
 
-    denom = jnp.maximum(eig + shift, tiny)
-    inv = jnp.where(active, 1.0 / denom, 0.0)
+        eig_max = jnp.max(eig)
+        cutoff = eps * jnp.maximum(eig_max, 1.0)
 
-    sol = vec @ (inv.astype(coeff.dtype) * coeff)
+        active = (shift > 0.0) | (eig > cutoff)
+        denom = jnp.maximum(eig + shift, tiny)
+        inv = jnp.where(active, 1.0 / denom, 0.0)
 
-    filt = (eig + shift) * inv
-    residual = jnp.linalg.norm((filt.astype(coeff.dtype) - 1.0) * coeff)
-    residual = residual / jnp.maximum(jnp.linalg.norm(rhs), tiny)
+        sol = vec @ (inv.astype(coeff.dtype) * coeff)
 
-    eig_min = jnp.min(jnp.where(eig > cutoff, eig, jnp.inf))
-    eig_min = jnp.where(jnp.isfinite(eig_min), eig_min, 0.0)
+        filt = (eig + shift) * inv
+        residual = jnp.linalg.norm((filt.astype(coeff.dtype) - 1.0) * coeff)
+        residual = residual / jnp.maximum(jnp.linalg.norm(rhs), tiny)
 
-    cond = (eig_max + shift) / jnp.maximum(eig_min + shift, tiny)
+        eig_min = jnp.min(jnp.where(eig > cutoff, eig, jnp.inf))
+        eig_min = jnp.where(jnp.isfinite(eig_min), eig_min, 0.0)
 
-    return sol, {
-        "shift": shift,
-        "residual": residual.astype(real_dtype),
-        "cond": cond.astype(real_dtype),
-    }
+        cond = (eig_max + shift) / jnp.maximum(eig_min + shift, tiny)
+
+        return sol, {
+            "shift": shift,
+            "residual": residual.astype(real_dtype),
+            "cond": cond.astype(real_dtype),
+            "fallback": jnp.asarray(1.0, dtype=real_dtype),
+        }
+
+    def solve_chol(_):
+        chol = jnp.linalg.cholesky(system)
+
+        y = jsp_linalg.solve_triangular(chol, rhs, lower=True)
+        sol = jsp_linalg.solve_triangular(chol.conj().T, y, lower=False)
+
+        residual = jnp.linalg.norm(system @ sol - rhs)
+        residual = residual / jnp.maximum(jnp.linalg.norm(rhs), tiny)
+
+        ok = (
+            jnp.all(jnp.isfinite(chol))
+            & jnp.all(jnp.isfinite(sol))
+            & jnp.isfinite(residual)
+        )
+
+        result = (
+            sol,
+            {
+                "shift": shift,
+                "residual": residual.astype(real_dtype),
+                "cond": jnp.asarray(0.0, dtype=real_dtype),
+                "fallback": jnp.asarray(0.0, dtype=real_dtype),
+            },
+        )
+
+        return jax.lax.cond(ok, lambda _: result, solve_eigh, operand=None)
+
+    return jax.lax.cond(shift > 0.0, solve_chol, solve_eigh, operand=None)
 
 
 def solve_matvec(

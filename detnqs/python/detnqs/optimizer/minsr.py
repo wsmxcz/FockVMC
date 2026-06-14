@@ -133,46 +133,60 @@ def _step(
     shift: jax.Array,
 ) -> tuple[Tree, dict[str, jax.Array]]:
     """One dense sample-space minSR solve on one fixed-shape bucket."""
-    b_flat, _ = ravel_pytree(b)
+    b_flat, unravel_b = ravel_pytree(b)
     nrow = b_flat.size
-
-    jac = jax.jacrev(lambda params: coord(params, x))(theta)
+    nsample = w.shape[0]
 
     theta_leaves, treedef = tree_util.tree_flatten(theta)
-    jac_leaves = tree_util.tree_leaves(jac)
 
     dtype = jnp.result_type(
         b_flat,
         *[leaf.dtype for leaf in theta_leaves],
-        *[leaf.dtype for leaf in jac_leaves],
     )
 
     K = jnp.zeros((nrow, nrow), dtype=dtype)
-    blocks = []
 
-    for J, theta_leaf in zip(jac_leaves, theta_leaves, strict=True):
-        J = J.reshape((w.shape[0], -1, theta_leaf.size))
+    def coord_one(params: Tree, sample: Tree):
+        sample = jax.tree.map(lambda z: z[None, ...], sample)
+        out = coord(params, sample)
+        return jax.tree.map(lambda z: jnp.asarray(z)[0], out)
 
-        # Centered weighted log-derivatives define the SR geometry.
+    for i, theta_leaf in enumerate(theta_leaves):
+        def coord_leaf(leaf, sample):
+            leaves = list(theta_leaves)
+            leaves[i] = leaf
+            params = tree_util.tree_unflatten(treedef, leaves)
+            return coord_one(params, sample)
+
+        J = jax.vmap(
+            jax.jacrev(coord_leaf),
+            in_axes=(None, 0),
+        )(theta_leaf, x)
+        J = J.reshape((nsample, -1, theta_leaf.size))
+
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
         O = O.reshape(nrow, theta_leaf.size).astype(dtype)
 
-        blocks.append(O)
-
-        # K = O O^dagger.
         K = K + O @ O.conj().T
 
     K = precision.asarray(K, "sr")
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
 
     a, info = linalg.solve_dense(K, rhs, shift)
-    a = a.astype(dtype)
+    a_tree = unravel_b(a.astype(dtype))
 
-    # delta = O^dagger a.
-    leaves = [
-        (O.conj().T @ a).reshape(theta_leaf.shape)
-        for O, theta_leaf in zip(blocks, theta_leaves, strict=True)
-    ]
+    def cotangent(a_leaf):
+        shape = (nsample,) + (1,) * (a_leaf.ndim - 1)
+        sqrt_w = jnp.sqrt(w).reshape(shape)
+        weighted = sqrt_w * a_leaf
+        return weighted - w.reshape(shape) * jnp.sum(weighted, axis=0)
 
-    return tree_util.tree_unflatten(treedef, leaves), info
+    delta = batch.vjp(
+        coord,
+        theta,
+        x,
+        jax.tree.map(cotangent, a_tree),
+    )
+
+    return delta, info

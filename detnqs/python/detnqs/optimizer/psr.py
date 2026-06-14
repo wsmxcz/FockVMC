@@ -84,6 +84,7 @@ def psr(
                 "sr_residual": zero,
                 "sr_step_norm": zero,
                 "sr_cond": zero,
+                "sr_fallback": zero,
             },
         )
 
@@ -124,7 +125,7 @@ def psr(
             geometry.theta,
         )
 
-        # Damped constant-step prediction of the next natural update.
+        # Damped prediction of the next natural update.
         p_next = jax.tree.map(
             lambda d: jnp.asarray(mu, dtype=d.dtype) * d,
             delta,
@@ -159,6 +160,7 @@ def psr(
             "sr_residual": info["residual"],
             "sr_step_norm": jnp.sqrt(step_norm2),
             "sr_cond": info["cond"],
+            "sr_fallback": info["fallback"],
         }
 
         return delta, PSRState(
@@ -182,20 +184,17 @@ def _step(
     shift: jax.Array,
 ) -> tuple[Tree, Tree, dict[str, jax.Array]]:
     """One dense sample-space PSR solve on one fixed-shape bucket."""
-    b_flat, _ = ravel_pytree(b)
+    b_flat, unravel_b = ravel_pytree(b)
     nrow = b_flat.size
-
-    jac = jax.jacrev(lambda params: coord(params, x))(theta)
+    nsample = w.shape[0]
 
     theta_leaves, treedef = tree_util.tree_flatten(theta)
-    jac_leaves = tree_util.tree_leaves(jac)
     p_leaves = tree_util.tree_leaves(p)
     v_leaves = tree_util.tree_leaves(v)
 
     dtype = jnp.result_type(
         b_flat,
         *[leaf.dtype for leaf in theta_leaves],
-        *[leaf.dtype for leaf in jac_leaves],
         *[leaf.dtype for leaf in p_leaves],
     )
 
@@ -213,29 +212,31 @@ def _step(
     cold_start = v_mean == 0.0
 
     K = jnp.zeros((nrow, nrow), dtype=dtype)
-    Op = jnp.zeros((nrow,), dtype=dtype)
 
-    blocks = []
-    covariances = []
+    def coord_one(params: Tree, sample: Tree):
+        sample = jax.tree.map(lambda z: z[None, ...], sample)
+        out = coord(params, sample)
+        return jax.tree.map(lambda z: jnp.asarray(z)[0], out)
 
-    for J, p_leaf, v_leaf in zip(
-        jac_leaves,
-        p_leaves,
-        v_leaves,
-        strict=True,
+    for i, (theta_leaf, v_leaf) in enumerate(
+        zip(theta_leaves, v_leaves, strict=True)
     ):
-        J = J.reshape((w.shape[0], -1, p_leaf.size))
+        def coord_leaf(leaf, sample):
+            leaves = list(theta_leaves)
+            leaves[i] = leaf
+            params = tree_util.tree_unflatten(treedef, leaves)
+            return coord_one(params, sample)
 
-        # Centered weighted log-derivatives define the SR geometry.
+        J = jax.vmap(
+            jax.jacrev(coord_leaf),
+            in_axes=(None, 0),
+        )(theta_leaf, x)
+        J = J.reshape((nsample, -1, theta_leaf.size))
+
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
-        O = O.reshape(nrow, p_leaf.size).astype(dtype)
+        O = O.reshape(nrow, theta_leaf.size).astype(dtype)
 
-        # Conservative diagonal covariance:
-        #
-        #     C_i = mean(v) / (v_i + mean(v)).
-        #
-        # Directions with large historical corrections are shrunk.
         v_flat = jnp.maximum(jnp.asarray(v_leaf).reshape(-1), 0.0)
 
         numer = jnp.asarray(v_mean, dtype=v_flat.dtype)
@@ -245,43 +246,63 @@ def _step(
         denom = jnp.where(cold_start, jnp.ones_like(v_flat), denom)
 
         c = (numer / denom).astype(dtype)
-        d = jnp.sqrt(c)
-
-        p_flat = jnp.asarray(p_leaf).reshape(-1).astype(dtype)
-
-        # K = O C O^dagger = (O sqrt(C)) (O sqrt(C))^dagger.
-        OC_sqrt = O * d[None, :]
-
-        blocks.append(O)
-        covariances.append(c)
-
+        OC_sqrt = O * jnp.sqrt(c)[None, :]
         K = K + OC_sqrt @ OC_sqrt.conj().T
-        Op = Op + O @ p_flat
 
     K = precision.asarray(K, "sr")
 
     # Residual SR equation around the predicted step p.
     rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
-    rhs = rhs - precision.asarray(Op, "sr").astype(K.dtype)
+
+    _, Jp = batch.jvp(coord, theta, p, x)
+
+    def center(tangent):
+        shape = (nsample,) + (1,) * (tangent.ndim - 1)
+        weight = w.reshape(shape)
+        mean = jnp.sum(weight * tangent, axis=0)
+        return jnp.sqrt(weight) * (tangent - mean)
+
+    Op, _ = ravel_pytree(jax.tree.map(center, Jp))
+    Op = precision.asarray(Op, "sr")
+    rhs = rhs - Op.astype(K.dtype)
 
     a, info = linalg.solve_dense(K, rhs, shift)
-    a = a.astype(dtype)
+    a_tree = unravel_b(a.astype(dtype))
+
+    def cotangent(a_leaf):
+        shape = (nsample,) + (1,) * (a_leaf.ndim - 1)
+        sqrt_w = jnp.sqrt(w).reshape(shape)
+        weighted = sqrt_w * a_leaf
+        return weighted - w.reshape(shape) * jnp.sum(weighted, axis=0)
+
+    gradient = batch.vjp(
+        coord,
+        theta,
+        x,
+        jax.tree.map(cotangent, a_tree),
+    )
 
     q_leaves = []
     delta_leaves = []
 
-    for O, c, p_leaf in zip(blocks, covariances, p_leaves, strict=True):
-        # q = C O^dagger a.
-        q_flat = c * (O.conj().T @ a)
-        q = q_flat.reshape(p_leaf.shape)
+    for g_leaf, p_leaf, v_leaf in zip(
+        tree_util.tree_leaves(gradient),
+        p_leaves,
+        v_leaves,
+        strict=True,
+    ):
+        v_leaf = jnp.maximum(jnp.asarray(v_leaf), 0.0)
+        numer = jnp.asarray(v_mean, dtype=v_leaf.dtype)
+        denom = v_leaf + numer
 
-        p_cast = jnp.asarray(p_leaf).astype(q.dtype)
+        numer = jnp.where(cold_start, jnp.ones_like(v_leaf), numer)
+        denom = jnp.where(cold_start, jnp.ones_like(v_leaf), denom)
 
-        q_leaves.append(q)
-        delta_leaves.append(p_cast + q)
+        q_leaf = (numer / denom).astype(g_leaf.dtype) * g_leaf
+        q_leaves.append(q_leaf)
+        delta_leaves.append(jnp.asarray(p_leaf).astype(q_leaf.dtype) + q_leaf)
 
-    return (
-        tree_util.tree_unflatten(treedef, delta_leaves),
-        tree_util.tree_unflatten(treedef, q_leaves),
-        info,
-    )
+    q = tree_util.tree_unflatten(treedef, q_leaves)
+    delta = tree_util.tree_unflatten(treedef, delta_leaves)
+
+    return delta, q, info

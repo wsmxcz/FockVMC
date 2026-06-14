@@ -13,7 +13,7 @@
 #include <vector>
 
 #include <libdet/excite.hpp>
-#include <libdet/heatbath.hpp>
+#include <libdet/screen.hpp>
 #include <libdet/sample.hpp>
 #include <libdet/space.hpp>
 
@@ -379,6 +379,19 @@ struct ProjPart {
     std::vector<ProjTerm> terms;
 };
 
+struct ConnSampleRec {
+    i32 iket = 0;
+    std::size_t ibra = 0;
+    double h = 0.0;
+    double pgen = 0.0;
+    i64 count = 0;
+};
+
+struct ConnSamplePart {
+    std::vector<ConnSampleRec> recs;
+    std::vector<u64> words;
+};
+
 struct SampleRec {
     i32 rep = 0;
     std::size_t ibra = 0;
@@ -405,7 +418,7 @@ public:
         if (this != &other) {
             ints_ = other.ints_;
             nword_ = other.nword_;
-            hb_.reset();
+            screen_.reset();
         }
 
         return *this;
@@ -414,13 +427,13 @@ public:
     Hamiltonian(Hamiltonian&& other) noexcept
         : ints_(std::move(other.ints_)),
           nword_(other.nword_),
-          hb_(std::move(other.hb_)) {}
+          screen_(std::move(other.screen_)) {}
 
     Hamiltonian& operator=(Hamiltonian&& other) noexcept {
         if (this != &other) {
             ints_ = std::move(other.ints_);
             nword_ = other.nword_;
-            hb_ = std::move(other.hb_);
+            screen_ = std::move(other.screen_);
         }
 
         return *this;
@@ -699,8 +712,8 @@ private:
     RHFIntegrals ints_;
     u32 nword_ = 0;
 
-    mutable std::mutex hb_mutex_;
-    mutable std::shared_ptr<const HeatBathTable> hb_;
+    mutable std::mutex screen_mutex_;
+    mutable std::shared_ptr<const Screen> screen_;
 
     void check_one(DetRef det, const char* where) const {
         if (det.nword() != nword_) {
@@ -727,20 +740,40 @@ private:
         if (eps2 > eps1) throw std::invalid_argument("eps2 must be <= eps1");
     }
 
-    [[nodiscard]] const HeatBathTable& heatbath() const {
-        std::lock_guard<std::mutex> lock(hb_mutex_);
+    [[nodiscard]] std::shared_ptr<const Screen> screen(double cutoff) const {
+        if (cutoff <= 0.0 || !std::isfinite(cutoff)) return {};
 
-        if (!hb_) {
-            hb_ = std::make_shared<HeatBathTable>(ints_);
+        std::lock_guard<std::mutex> lock(screen_mutex_);
+
+        if (!screen_ || cutoff < screen_->cutoff()) {
+            screen_ = std::make_shared<Screen>(ints_, cutoff);
         }
 
-        return *hb_;
+        return screen_;
     }
 
-    [[nodiscard]] static double ket_eps(double eps, double scale) noexcept {
+    [[nodiscard]] static double max_abs(std::span<const double> values) noexcept {
+        double out = 0.0;
+
+        for (double x : values) {
+            out = std::max(out, std::abs(x));
+        }
+
+        return out;
+    }
+
+    [[nodiscard]] static double screen_cutoff(double eps, double max_scale) noexcept {
         if (eps <= 0.0) return 0.0;
-        if (scale <= 0.0) return std::numeric_limits<double>::infinity();
-        return eps / scale;
+        if (max_scale <= 0.0) return std::numeric_limits<double>::infinity();
+        return eps / max_scale;
+    }
+
+    [[nodiscard]] static EdgeWindow edge_window(
+        double lo,
+        double hi,
+        double scale
+    ) noexcept {
+        return EdgeWindow{lo, hi, scale};
     }
 
     template <class F>
@@ -833,7 +866,8 @@ private:
         std::span<const double> coeffs,
         DetBatchView exclude
     ) const {
-        const HeatBathTable& hb = heatbath();
+        const double max_scale = coeffs.empty() ? 1.0 : max_abs(coeffs);
+        auto screen_ptr = screen(screen_cutoff(eps, max_scale));
         const DetIndex exclude_index(exclude);
 
 #if defined(_OPENMP)
@@ -862,15 +896,10 @@ private:
             for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
 #endif
                 const double scale = coeffs.empty() ? 1.0 : std::abs(coeffs[iket]);
+                const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), scale);
 
-                if (scale <= 0.0) continue;
-
-                const double eps_h = ket_eps(eps, scale);
-                if (!std::isfinite(eps_h)) continue;
-
-                scan_conns(ints_, hb, kets[iket], work, eps_h, [&](DetRef bra, double h) {
-                    if (exclude_index.find(bra) >= 0) return;
-                    if (std::abs(h) * scale >= eps) append_det(words, bra);
+                scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double) {
+                    if (exclude_index.find(bra) < 0) append_det(words, bra);
                 });
             }
         }
@@ -926,7 +955,8 @@ private:
         double eps,
         DetBatchView exclude
     ) const {
-        const HeatBathTable& hb = heatbath();
+        const double max_scale = max_abs(coeffs);
+        auto screen_ptr = screen(screen_cutoff(eps, max_scale));
         const DetIndex exclude_index(exclude);
 
 #if defined(_OPENMP)
@@ -961,15 +991,10 @@ private:
 #endif
                 const double coeff = coeffs[iket];
                 const double scale = std::abs(coeff);
+                const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), scale);
 
-                if (scale <= 0.0) continue;
-
-                const double eps_h = ket_eps(eps, scale);
-                if (!std::isfinite(eps_h)) continue;
-
-                scan_conns(ints_, hb, kets[iket], work, eps_h, [&](DetRef bra, double h) {
+                scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
                     if (exclude_index.find(bra) >= 0) return;
-                    if (std::abs(h) * scale < eps) return;
 
                     const i32 ibra = part.pool.find_or_add(bra);
                     part.terms.push_back(detail_ham::ProjTerm{ibra, h * coeff});
@@ -977,31 +1002,37 @@ private:
             }
         }
 
-        detail_ham::DetPool global(nword_);
-        std::vector<std::vector<i32>> remap(local.size());
+        std::vector<u64> global_words;
 
-        for (std::size_t t = 0; t < local.size(); ++t) {
-            remap[t].resize(local[t].pool.size());
-
-            for (std::size_t ibra = 0; ibra < local[t].pool.size(); ++ibra) {
-                remap[t][ibra] = global.find_or_add(local[t].pool.get(ibra));
-            }
+        for (const auto& part : local) {
+            global_words.insert(global_words.end(), part.pool.words().begin(), part.pool.words().end());
         }
 
-        std::vector<double> hpsi(global.size(), 0.0);
+        sort_unique_dets(global_words, nword_);
+
+        const DetBatchView global_view{
+            global_words.data(),
+            global_words.size() / det_size(nword_),
+            nword_
+        };
+
+        const DetIndex global_index(global_view);
+        std::vector<double> hpsi(global_view.n_dets, 0.0);
 
         for (std::size_t t = 0; t < local.size(); ++t) {
             for (const auto& term : local[t].terms) {
-                const std::size_t ibra =
-                    static_cast<std::size_t>(remap[t][static_cast<std::size_t>(term.ibra)]);
+                const DetRef bra = local[t].pool.get(static_cast<std::size_t>(term.ibra));
+                const i32 ibra = global_index.find(bra);
 
-                hpsi[ibra] += term.hpsi;
+                if (ibra >= 0) {
+                    hpsi[static_cast<std::size_t>(ibra)] += term.hpsi;
+                }
             }
         }
 
         Projection out;
         out.set_nword(nword_);
-        out.bra_words_mut() = global.words();
+        out.bra_words_mut() = std::move(global_words);
         out.hpsi_mut() = std::move(hpsi);
 
         const DetBatchView bras{
@@ -1016,7 +1047,7 @@ private:
     }
 
     [[nodiscard]] Conns conns_impl(DetBatchView kets, double eps) const {
-        const HeatBathTable& hb = heatbath();
+        auto screen_ptr = screen(eps);
 
 #if defined(_OPENMP)
         const int nthread = std::max(1, omp_get_max_threads());
@@ -1048,7 +1079,9 @@ private:
 
             for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
 #endif
-                scan_conns(ints_, hb, kets[iket], work, eps, [&](DetRef bra, double h) {
+                const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), 1.0);
+
+                scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
                     const i32 ibra = part.pool.find_or_add(bra);
                     part.conns.push_back(detail_ham::ConnRec{
                         static_cast<i32>(iket),
@@ -1059,28 +1092,28 @@ private:
             }
         }
 
-        detail_ham::DetPool global(nword_);
+        std::vector<u64> global_words;
 
-        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-            global.find_or_add(kets[iket]);
+        for (const auto& part : local) {
+            global_words.insert(global_words.end(), part.pool.words().begin(), part.pool.words().end());
         }
 
-        std::vector<std::vector<i32>> remap(local.size());
+        sort_unique_dets(global_words, nword_);
 
-        for (std::size_t t = 0; t < local.size(); ++t) {
-            remap[t].resize(local[t].pool.size());
+        const DetBatchView global_view{
+            global_words.data(),
+            global_words.size() / det_size(nword_),
+            nword_
+        };
 
-            for (std::size_t ibra = 0; ibra < local[t].pool.size(); ++ibra) {
-                remap[t][ibra] = global.find_or_add(local[t].pool.get(ibra));
-            }
-        }
+        const DetIndex global_index(global_view);
 
         Conns out;
         out.set_nword(nword_);
         out.set_n_kets(kets.n_dets);
 
         copy_batch(out.ket_words_mut(), kets);
-        out.bra_words_mut() = global.words();
+        out.bra_words_mut() = std::move(global_words);
 
         out.diags_mut() = diags(kets);
         out.ket_ptr_mut().assign(kets.n_dets + 1u, 0);
@@ -1114,8 +1147,9 @@ private:
             for (const auto& c : local[t].conns) {
                 const std::size_t iket = static_cast<std::size_t>(c.iket);
                 const std::size_t p = static_cast<std::size_t>(pos[iket]++);
+                const DetRef bra = local[t].pool.get(static_cast<std::size_t>(c.ibra));
 
-                out.bra_mut()[p] = remap[t][static_cast<std::size_t>(c.ibra)];
+                out.bra_mut()[p] = global_index.find(bra);
                 out.h_mut()[p] = c.h;
             }
         }
@@ -1124,7 +1158,7 @@ private:
     }
 
     [[nodiscard]] Degrees degrees_impl(DetBatchView kets, double eps) const {
-        const HeatBathTable& hb = heatbath();
+        auto screen_ptr = screen(eps);
 
         Degrees out;
         out.ket_nconn_mut().assign(kets.n_dets, 0);
@@ -1133,8 +1167,9 @@ private:
         for_guided(kets.n_dets, [&](std::size_t iket, KetWork& work) {
             i64 nconn = 0;
             double weight = 0.0;
+            const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), 1.0);
 
-            scan_values(ints_, hb, kets[iket], work, eps, [&](double h) {
+            scan_values(ints_, screen_ptr.get(), kets[iket], work, win, [&](double h) {
                 ++nconn;
                 weight += std::abs(h);
             });
@@ -1210,7 +1245,7 @@ private:
         double eps2,
         u64 seed
     ) const {
-        const HeatBathTable& hb = heatbath();
+        auto screen_ptr = screen(eps2);
         const bool draw = !counts.empty();
 
         ConnSamples out;
@@ -1224,26 +1259,19 @@ private:
         const int nthread = 1;
 #endif
 
-        std::vector<std::vector<i32>> local_ket(static_cast<std::size_t>(nthread));
-        std::vector<std::vector<u64>> local_bra_words(static_cast<std::size_t>(nthread));
-        std::vector<std::vector<double>> local_h(static_cast<std::size_t>(nthread));
-        std::vector<std::vector<double>> local_pgen(static_cast<std::size_t>(nthread));
-        std::vector<std::vector<i64>> local_counts(static_cast<std::size_t>(nthread));
+        std::vector<detail_ham::ConnSamplePart> local(static_cast<std::size_t>(nthread));
 
         auto process_one = [&](
             std::size_t iket,
             KetWork& work,
             std::vector<double>& targets,
-            std::vector<i32>& ket_ids,
-            std::vector<u64>& bra_words,
-            std::vector<double>& hs,
-            std::vector<double>& pgens,
-            std::vector<i64>& cts
+            detail_ham::ConnSamplePart& part
         ) {
             i64 nconn = 0;
             double weight = 0.0;
+            const EdgeWindow win = edge_window(eps2, eps1, 1.0);
 
-            scan_window_values(ints_, hb, kets[iket], work, eps2, eps1, [&](double h) {
+            scan_values(ints_, screen_ptr.get(), kets[iket], work, win, [&](double h) {
                 ++nconn;
                 weight += std::abs(h);
             });
@@ -1263,7 +1291,7 @@ private:
             std::size_t target_pos = 0;
             double cdf = 0.0;
 
-            scan_window_conns(ints_, hb, kets[iket], work, eps2, eps1, [&](DetRef bra, double h) {
+            scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
                 const double abs_h = std::abs(h);
                 cdf += abs_h;
 
@@ -1276,11 +1304,14 @@ private:
 
                 if (hit <= 0) return;
 
-                ket_ids.push_back(static_cast<i32>(iket));
-                append_det(bra_words, bra);
-                hs.push_back(h);
-                pgens.push_back(abs_h / weight);
-                cts.push_back(hit);
+                detail_ham::ConnSampleRec rec;
+                rec.iket = static_cast<i32>(iket);
+                rec.ibra = append_det_index(part.words, nword_, bra);
+                rec.h = h;
+                rec.pgen = abs_h / weight;
+                rec.count = hit;
+
+                part.recs.push_back(rec);
             });
         };
 
@@ -1293,17 +1324,11 @@ private:
 
 #pragma omp for schedule(guided)
             for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
-                const std::size_t iket = static_cast<std::size_t>(ii);
-
                 process_one(
-                    iket,
+                    static_cast<std::size_t>(ii),
                     work,
                     targets,
-                    local_ket[static_cast<std::size_t>(tid)],
-                    local_bra_words[static_cast<std::size_t>(tid)],
-                    local_h[static_cast<std::size_t>(tid)],
-                    local_pgen[static_cast<std::size_t>(tid)],
-                    local_counts[static_cast<std::size_t>(tid)]
+                    local[static_cast<std::size_t>(tid)]
                 );
             }
         }
@@ -1313,26 +1338,51 @@ private:
             std::vector<double> targets;
 
             for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-                process_one(
-                    iket,
-                    work,
-                    targets,
-                    local_ket[0],
-                    local_bra_words[0],
-                    local_h[0],
-                    local_pgen[0],
-                    local_counts[0]
-                );
+                process_one(iket, work, targets, local[0]);
             }
         }
 #endif
 
-        for (std::size_t t = 0; t < local_ket.size(); ++t) {
-            out.ket_mut().insert(out.ket_mut().end(), local_ket[t].begin(), local_ket[t].end());
-            out.bra_words_mut().insert(out.bra_words_mut().end(), local_bra_words[t].begin(), local_bra_words[t].end());
-            out.h_mut().insert(out.h_mut().end(), local_h[t].begin(), local_h[t].end());
-            out.pgen_mut().insert(out.pgen_mut().end(), local_pgen[t].begin(), local_pgen[t].end());
-            out.counts_mut().insert(out.counts_mut().end(), local_counts[t].begin(), local_counts[t].end());
+        std::vector<detail_ham::ConnSampleRec> records;
+        std::vector<u64> record_words;
+
+        std::size_t nrec = 0;
+        std::size_t nwords = 0;
+
+        for (const auto& part : local) {
+            nrec += part.recs.size();
+            nwords += part.words.size();
+        }
+
+        records.reserve(nrec);
+        record_words.reserve(nwords);
+
+        for (auto& part : local) {
+            const std::size_t offset = record_words.size() / det_size(nword_);
+
+            record_words.insert(record_words.end(), part.words.begin(), part.words.end());
+
+            for (auto rec : part.recs) {
+                rec.ibra += offset;
+                records.push_back(rec);
+            }
+        }
+
+        std::sort(records.begin(), records.end(), [&](const auto& x, const auto& y) {
+            if (x.iket != y.iket) return x.iket < y.iket;
+
+            return DetLess{}(
+                det_at(record_words, nword_, x.ibra),
+                det_at(record_words, nword_, y.ibra)
+            );
+        });
+
+        for (const auto& rec : records) {
+            out.ket_mut().push_back(rec.iket);
+            append_det(out.bra_words_mut(), det_at(record_words, nword_, rec.ibra));
+            out.h_mut().push_back(rec.h);
+            out.pgen_mut().push_back(rec.pgen);
+            out.counts_mut().push_back(rec.count);
         }
 
         return out;
@@ -1348,7 +1398,8 @@ private:
         i64 n_rep,
         u64 seed
     ) const {
-        const HeatBathTable& hb = heatbath();
+        const double max_scale = max_abs(coeffs);
+        auto screen_ptr = screen(screen_cutoff(eps2, max_scale));
         const DetIndex exclude_index(exclude);
 
 #if defined(_OPENMP)
@@ -1371,14 +1422,10 @@ private:
 
             if (n_draw <= 0 || scale <= 0.0) return;
 
-            const double eps2_h = ket_eps(eps2, scale);
-            const double eps1_h = ket_eps(eps1, scale);
-
-            if (!std::isfinite(eps2_h) || eps1_h <= eps2_h) return;
-
+            const EdgeWindow win = edge_window(eps2, eps1, scale);
             double weight = 0.0;
 
-            scan_window_conns(ints_, hb, kets[iket], work, eps2_h, eps1_h, [&](DetRef bra, double h) {
+            scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
                 if (exclude_index.find(bra) >= 0) return;
                 weight += std::abs(h);
             });
@@ -1395,7 +1442,7 @@ private:
                     std::size_t target_pos = 0;
                     double cdf = 0.0;
 
-                    scan_window_conns(ints_, hb, kets[iket], work, eps2_h, eps1_h, [&](DetRef bra, double h) {
+                    scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
                         if (exclude_index.find(bra) >= 0) return;
 
                         const double abs_h = std::abs(h);

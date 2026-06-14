@@ -273,16 +273,16 @@ NB_MODULE(_libdet_cpp, m) {
             }
 
             const int norb = static_cast<int>(h1.shape(0));
-
-            return libdet::Hamiltonian::make(
-                std::span<const double>(
-                    h1.data(),
-                    static_cast<std::size_t>(h1.shape(0) * h1.shape(1))
-                ),
-                norb,
-                as_f64(eri),
-                ecore
+            const auto h1_view = std::span<const double>(
+                h1.data(),
+                static_cast<std::size_t>(h1.shape(0) * h1.shape(1))
             );
+            const auto eri_view = as_f64(eri);
+
+            return [&]() {
+                nb::gil_scoped_release release;
+                return libdet::Hamiltonian::make(h1_view, norb, eri_view, ecore);
+            }();
         }, "h1"_a.noconvert(), "eri"_a.noconvert(), "ecore"_a = 0.0)
 
         .def_prop_ro("norb", &libdet::Hamiltonian::norb)
@@ -291,11 +291,23 @@ NB_MODULE(_libdet_cpp, m) {
         .def("hij", [](const libdet::Hamiltonian& ham,
                        const U64Array& bra,
                        const U64Array& ket) {
-            return ham.hij(to_single_det(bra), to_single_det(ket));
+            const auto bra_ref = to_single_det(bra);
+            const auto ket_ref = to_single_det(ket);
+
+            nb::gil_scoped_release release;
+            return ham.hij(bra_ref, ket_ref);
         }, "bra"_a.noconvert(), "ket"_a.noconvert())
 
         .def("diags", [](const libdet::Hamiltonian& ham, const U64Array& dets) {
-            return own_1d(ham.diags(to_det_view(dets)));
+            const auto det_view = to_det_view(dets);
+            std::vector<double> out;
+
+            {
+                nb::gil_scoped_release release;
+                out = ham.diags(det_view);
+            }
+
+            return own_1d(std::move(out));
         }, "dets"_a.noconvert())
 
         .def("expand", [](const libdet::Hamiltonian& ham,
@@ -305,14 +317,26 @@ NB_MODULE(_libdet_cpp, m) {
                           nb::object exclude_obj) {
             const auto ket_view = to_det_view(kets);
             const auto coeff_view = optional_f64(coeffs_obj);
+            libdet::Determinants out;
 
             if (!exclude_obj.is_none()) {
                 const U64Array exclude_arr = nb::cast<U64Array>(exclude_obj);
                 const auto exclude_view = to_det_view(exclude_arr);
-                return ham.expand(ket_view, eps, coeff_view, &exclude_view);
+
+                {
+                    nb::gil_scoped_release release;
+                    out = ham.expand(ket_view, eps, coeff_view, &exclude_view);
+                }
+
+                return out;
             }
 
-            return ham.expand(ket_view, eps, coeff_view, nullptr);
+            {
+                nb::gil_scoped_release release;
+                out = ham.expand(ket_view, eps, coeff_view, nullptr);
+            }
+
+            return out;
         }, "kets"_a.noconvert(),
            "eps"_a,
            "coeffs"_a = nb::none(),
@@ -326,15 +350,27 @@ NB_MODULE(_libdet_cpp, m) {
                            nb::object exclude_obj) {
             const auto ket_view = to_det_view(kets);
             const auto coeff_view = as_f64(coeffs);
+            libdet::Projection out;
 
             if (bras_obj.is_none()) {
                 if (!exclude_obj.is_none()) {
                     const U64Array exclude_arr = nb::cast<U64Array>(exclude_obj);
                     const auto exclude_view = to_det_view(exclude_arr);
-                    return ham.project(ket_view, coeff_view, eps, &exclude_view);
+
+                    {
+                        nb::gil_scoped_release release;
+                        out = ham.project(ket_view, coeff_view, eps, &exclude_view);
+                    }
+
+                    return out;
                 }
 
-                return ham.project(ket_view, coeff_view, eps, nullptr);
+                {
+                    nb::gil_scoped_release release;
+                    out = ham.project(ket_view, coeff_view, eps, nullptr);
+                }
+
+                return out;
             }
 
             if (!exclude_obj.is_none()) {
@@ -342,13 +378,14 @@ NB_MODULE(_libdet_cpp, m) {
             }
 
             const U64Array bras_arr = nb::cast<U64Array>(bras_obj);
+            const auto bra_view = to_det_view(bras_arr);
 
-            return ham.project(
-                to_det_view(bras_arr),
-                ket_view,
-                coeff_view,
-                eps
-            );
+            {
+                nb::gil_scoped_release release;
+                out = ham.project(bra_view, ket_view, coeff_view, eps);
+            }
+
+            return out;
         }, "bras"_a.none(),
            "kets"_a.noconvert(),
            "coeffs"_a.noconvert(),
@@ -358,32 +395,61 @@ NB_MODULE(_libdet_cpp, m) {
         .def("conns", [](const libdet::Hamiltonian& ham,
                          const U64Array& kets,
                          double eps) {
-            return ham.conns(to_det_view(kets), eps);
+            const auto ket_view = to_det_view(kets);
+            libdet::Conns out;
+
+            {
+                nb::gil_scoped_release release;
+                out = ham.conns(ket_view, eps);
+            }
+
+            return out;
         }, "kets"_a.noconvert(), "eps"_a)
 
         .def("degrees", [](const libdet::Hamiltonian& ham,
                            const U64Array& kets,
                            double eps) {
-            return ham.degrees(to_det_view(kets), eps);
+            const auto ket_view = to_det_view(kets);
+            libdet::Degrees out;
+
+            {
+                nb::gil_scoped_release release;
+                out = ham.degrees(ket_view, eps);
+            }
+
+            return out;
         }, "kets"_a.noconvert(), "eps"_a)
 
         .def("matrix", [](const libdet::Hamiltonian& ham,
                           const U64Array& bras,
                           const U64Array& kets) {
-            return ham.matrix(to_det_view(bras), to_det_view(kets));
+            const auto bra_view = to_det_view(bras);
+            const auto ket_view = to_det_view(kets);
+            libdet::Matrix out;
+
+            {
+                nb::gil_scoped_release release;
+                out = ham.matrix(bra_view, ket_view);
+            }
+
+            return out;
         }, "bras"_a.noconvert(), "kets"_a.noconvert())
 
         .def("matvec", [](const libdet::Hamiltonian& ham,
                           const U64Array& bras,
                           const U64Array& kets,
                           const F64Vec& x) {
-            return own_1d(
-                ham.matvec(
-                    to_det_view(bras),
-                    to_det_view(kets),
-                    as_f64(x)
-                )
-            );
+            const auto bra_view = to_det_view(bras);
+            const auto ket_view = to_det_view(kets);
+            const auto x_view = as_f64(x);
+            std::vector<double> out;
+
+            {
+                nb::gil_scoped_release release;
+                out = ham.matvec(bra_view, ket_view, x_view);
+            }
+
+            return own_1d(std::move(out));
         }, "bras"_a.noconvert(),
            "kets"_a.noconvert(),
            "x"_a.noconvert())
@@ -393,14 +459,15 @@ NB_MODULE(_libdet_cpp, m) {
                           const U64Array& kets,
                           const F64Mat& x) {
             const auto bra_view = to_det_view(bras);
+            const auto ket_view = to_det_view(kets);
+            const auto x_view = as_f64_matrix(x);
             const std::size_t nrhs = static_cast<std::size_t>(x.shape(1));
+            std::vector<double> out;
 
-            auto out = ham.matmat(
-                bra_view,
-                to_det_view(kets),
-                as_f64_matrix(x),
-                nrhs
-            );
+            {
+                nb::gil_scoped_release release;
+                out = ham.matmat(bra_view, ket_view, x_view, nrhs);
+            }
 
             return own_2d(std::move(out), bra_view.n_dets, nrhs);
         }, "bras"_a.noconvert(),
@@ -414,20 +481,20 @@ NB_MODULE(_libdet_cpp, m) {
                                 double eps2,
                                 std::uint64_t seed) {
             const auto ket_view = to_det_view(kets);
+            libdet::ConnSamples out;
 
             if (counts_obj.is_none()) {
-                return ham.sample_conns(ket_view, {}, eps1, eps2, seed);
+                nb::gil_scoped_release release;
+                out = ham.sample_conns(ket_view, {}, eps1, eps2, seed);
+            } else {
+                const I64Vec counts = nb::cast<I64Vec>(counts_obj);
+                const auto count_view = as_i64(counts);
+
+                nb::gil_scoped_release release;
+                out = ham.sample_conns(ket_view, count_view, eps1, eps2, seed);
             }
 
-            const I64Vec counts = nb::cast<I64Vec>(counts_obj);
-
-            return ham.sample_conns(
-                ket_view,
-                as_i64(counts),
-                eps1,
-                eps2,
-                seed
-            );
+            return out;
         }, "kets"_a.noconvert(),
            "counts"_a = nb::none(),
            "eps1"_a = 1.0e-6,
@@ -444,33 +511,46 @@ NB_MODULE(_libdet_cpp, m) {
                                   libdet::i64 n_rep,
                                   std::uint64_t seed) {
             const auto ket_view = to_det_view(kets);
+            const auto coeff_view = as_f64(coeffs);
+            const auto count_view = as_i64(counts);
+            libdet::ProjectSamples out;
 
             if (!exclude_obj.is_none()) {
                 const U64Array exclude_arr = nb::cast<U64Array>(exclude_obj);
                 const auto exclude_view = to_det_view(exclude_arr);
 
-                return ham.sample_project(
+                {
+                    nb::gil_scoped_release release;
+                    out = ham.sample_project(
+                        ket_view,
+                        coeff_view,
+                        eps1,
+                        eps2,
+                        count_view,
+                        &exclude_view,
+                        n_rep,
+                        seed
+                    );
+                }
+
+                return out;
+            }
+
+            {
+                nb::gil_scoped_release release;
+                out = ham.sample_project(
                     ket_view,
-                    as_f64(coeffs),
+                    coeff_view,
                     eps1,
                     eps2,
-                    as_i64(counts),
-                    &exclude_view,
+                    count_view,
+                    nullptr,
                     n_rep,
                     seed
                 );
             }
 
-            return ham.sample_project(
-                ket_view,
-                as_f64(coeffs),
-                eps1,
-                eps2,
-                as_i64(counts),
-                nullptr,
-                n_rep,
-                seed
-            );
+            return out;
         }, "kets"_a.noconvert(),
            "coeffs"_a.noconvert(),
            "eps1"_a,

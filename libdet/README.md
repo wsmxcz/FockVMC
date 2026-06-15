@@ -72,38 +72,55 @@ proj_ext = ham.project(None, kets, coeffs, eps=eps)
 
 If `kets` is omitted in finite-space operations, it defaults to `bras`.
 
-## Screened graph queries
+## Row queries
 
-Generated connections can be materialized:
-
-```python
-conns = ham.conns(kets, eps)
-```
-
-or summarized without storing connected bras:
+The public row-query surface consists of three operations:
 
 ```python
-deg = ham.degrees(kets, eps)
+weight, nconn = ham.degrees(kets, eps)
+
+sample = ham.sample_conns(
+    kets,
+    counts,
+    eps1=np.inf,
+    eps2=eps,
+    seed=seed,
+)
+
+graph = ham.conns(
+    kets,
+    eps,
+    sample=n_sample,
+    sample_eps=weak_eps,
+    seed=seed,
+)
 ```
 
-`conns` represents a ket-partitioned graph. `degrees` computes the same per-ket connection counts and absolute Hamiltonian weights without materializing the graph.
+`degrees` returns row weights and connection counts without materializing
+destinations.
 
-## Sampling weak connections
+`sample_conns` performs categorical sampling in
+`eps2 <= |H_ai| < eps1`. `counts` has shape `(N,)` or `(S, N)`; streams
+share one candidate scan and use independent deterministic targets.
 
-Weak connections can be sampled from a window
+`conns` returns exact CSR rows and can sample the weak window
+`sample_eps <= |H_ai| < eps` in the same determinant pool.
+
+Both result types store a global `dets` pool whose first `N` entries equal the
+input kets. All `col` arrays index this pool directly.
+
+`ConnSamples` stores stream-major CSR rows:
 
 ```text
-eps2 <= value < eps1
+dets, ptr, col, h, count, weight
 ```
 
-where `value` is either `|H_ai|` or `|H_ai c_i|`.
+`Conns` stores exact and sampled rows in the same pool:
 
-```python
-samples = ham.sample_conns(kets, counts, eps1, eps2, seed=0)
-proj_samples = ham.sample_project(kets, coeffs, eps1, eps2, counts, n_rep=2)
+```text
+dets, diag, ptr, col, h, weight
+sample_ptr, sample_col, sample_h, sample_count, sample_weight
 ```
-
-Sampling probabilities are proportional to absolute Hamiltonian weight within each ket row.
 
 ## Design principles
 

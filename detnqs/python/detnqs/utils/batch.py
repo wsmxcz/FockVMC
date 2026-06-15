@@ -31,12 +31,12 @@ import jax.numpy as jnp
 Tree = Any
 
 _CONFIG = {
-    "chunk": 1024,
-    "bucket_min": 256,
+    "chunk": 8192,
+    "bucket_min": 1024,
 }
 
 
-def configure(*, chunk: int | None = 1024, bucket_min: int = 256) -> None:
+def configure(*, chunk: int | None = 8192, bucket_min: int = 1024) -> None:
     """Set global shape policy for streaming and bucketed kernels."""
     if chunk is not None:
         chunk = int(chunk)

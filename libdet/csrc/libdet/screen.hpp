@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -19,7 +20,7 @@ struct Cand {
 };
 
 /*
- * Screened Hamiltonian Grpah.
+ * Screened Hamiltonian graph.
  *
  * A Screen owns all same-spin and opposite-spin double candidates whose
  * integral factor satisfies abs(h) >= cutoff. Candidate lists are sorted by
@@ -53,32 +54,39 @@ public:
     [[nodiscard]] std::span<const Cand> aa(
         int i,
         int j,
-        double min_abs = 0.0
+        double lo = 0.0,
+        double hi = std::numeric_limits<double>::infinity()
     ) const noexcept {
-        return prefix_ge(aa_candidates(i, j), min_abs);
+        return window(aa_candidates(i, j), lo, hi);
     }
 
     [[nodiscard]] std::span<const Cand> bb(
         int i,
         int j,
-        double min_abs = 0.0
+        double lo = 0.0,
+        double hi = std::numeric_limits<double>::infinity()
     ) const noexcept {
-        return prefix_ge(aa_candidates(i, j), min_abs);
+        return window(aa_candidates(i, j), lo, hi);
     }
 
     [[nodiscard]] std::span<const Cand> ab(
         int ia,
         int ib,
-        double min_abs = 0.0
+        double min_abs = 0.0,
+        double max_abs = std::numeric_limits<double>::infinity()
     ) const noexcept {
         const std::size_t k =
             static_cast<std::size_t>(ia) * static_cast<std::size_t>(norb_)
             + static_cast<std::size_t>(ib);
 
-        const std::size_t lo = ab_off_[k];
-        const std::size_t hi = ab_off_[k + 1u];
+        const std::size_t begin = ab_off_[k];
+        const std::size_t end = ab_off_[k + 1u];
 
-        return prefix_ge({ab_data_.data() + lo, hi - lo}, min_abs);
+        return window(
+            {ab_data_.data() + begin, end - begin},
+            min_abs,
+            max_abs
+        );
     }
 
 private:
@@ -143,14 +151,17 @@ private:
         return lo;
     }
 
-    [[nodiscard]] static std::span<const Cand> prefix_ge(
+    [[nodiscard]] static std::span<const Cand> window(
         std::span<const Cand> cands,
-        double min_abs
+        double lo,
+        double hi
     ) noexcept {
-        if (cands.empty()) return {};
+        if (cands.empty() || hi <= lo) return {};
 
-        const std::size_t end = first_lt(cands, min_abs);
-        return {cands.data(), end};
+        const std::size_t begin = std::isfinite(hi) ? first_lt(cands, hi) : 0u;
+        const std::size_t end = first_lt(cands, lo);
+        if (end <= begin) return {};
+        return {cands.data() + begin, end - begin};
     }
 
     void build_aa(const RHFIntegrals& ints) {

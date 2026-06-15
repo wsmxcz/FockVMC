@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+import libdet
 import numpy as np
 
 from detnqs import utils
@@ -15,25 +15,8 @@ from ..model.base import to_ratio
 from ..optimizer import Geometry
 from ..sampler.mcmc import MCSampler
 from ..sampler.mcmc import Walkers
-from ..sampler.proposal import unique_dets
 from ..utils import precision
 from .base import VState
-
-
-@dataclass(frozen=True, slots=True)
-class Edges:
-    """Hamiltonian edges from observed kets to a unique bra pool.
-
-    ``scale`` is an optional stochastic correction. Exact edges use unit
-    scale; sampled weak edges use ``count / (n_sample * pgen)``.
-    """
-
-    ket: np.ndarray
-    bras: np.ndarray
-    bra: np.ndarray
-    h: np.ndarray
-    scale: np.ndarray | None = None
-
 
 @dataclass(slots=True)
 class MCState(VState):
@@ -183,7 +166,7 @@ class MCState(VState):
 
         with timer("reduce"):
             # count and mass are estimator-local; they never enter chain state.
-            kets, _, sample_to_ket = unique_dets(samples)
+            kets, _, sample_to_ket = libdet.unique_dets(samples)
             n_ket = int(kets.shape[0])
 
             rdtype = precision.dtype("calc", "real", host=True)
@@ -205,165 +188,26 @@ class MCState(VState):
                 sampler_state = replace(sampler_state, key=key)
 
         with timer("graph"):
-            # Strong edges are summed exactly:
-            # E_loc(i) = H_ii + sum_a H_ia psi(a) / psi(i).
-            strong_raw = self.hamiltonian.conns(
-                kets,
-                float(self.eloc_eps1),
-            )
-            diag = precision.asarray(
-                np.asarray(strong_raw.diags).reshape(-1),
-                "calc",
-                "real",
-                host=True,
-            )
-            strong_ptr = np.asarray(strong_raw.ket_ptr, dtype=np.int64)
-            strong = Edges(
-                ket=np.repeat(
-                    np.arange(n_ket, dtype=np.int64),
-                    np.diff(strong_ptr),
-                ),
-                bras=np.ascontiguousarray(
-                    np.asarray(strong_raw.bras, dtype=np.uint64)
-                ),
-                bra=np.asarray(strong_raw.bra, dtype=np.int64),
-                h=precision.asarray(
-                    np.asarray(strong_raw.h),
-                    "calc",
-                    "real",
-                    host=True,
-                ),
-            )
-
-            empty_bras = np.empty(
-                (0, 2, int(self.hamiltonian.nword)),
-                dtype=np.uint64,
-            )
-            weak = Edges(
-                ket=np.empty(0, dtype=np.int64),
-                bras=empty_bras,
-                bra=np.empty(0, dtype=np.int64),
-                h=np.empty(0, dtype=rdtype),
-            )
-            n_conn_weak = 0
-
-            if self.eloc_sample > 0:
-                weak_raw = self.hamiltonian.sample_conns(
-                    kets,
-                    int(self.eloc_sample),
-                    eps1=float(self.eloc_eps1),
-                    eps2=float(self.eloc_eps2),
-                    seed=seed,
-                )
-                n_conn_weak = int(
-                    np.asarray(weak_raw.ket_nconn, dtype=np.int64).sum()
-                )
-                weak_bras = np.ascontiguousarray(
-                    np.asarray(weak_raw.bras, dtype=np.uint64)
-                )
-
-                if weak_bras.shape[0] > 0:
-                    weak_bras, _, weak_bra = unique_dets(weak_bras)
-                    pgen = precision.asarray(
-                        np.asarray(weak_raw.pgen),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
-                    count = precision.asarray(
-                        np.asarray(weak_raw.counts),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
-                    denom = np.maximum(
-                        rdtype(self.eloc_sample) * pgen,
-                        rdtype(precision.tiny("calc")),
-                    )
-                    weak = Edges(
-                        ket=np.asarray(weak_raw.ket, dtype=np.int64),
-                        bras=weak_bras,
-                        bra=weak_bra,
-                        h=precision.asarray(
-                            np.asarray(weak_raw.h),
-                            "calc",
-                            "real",
-                            host=True,
-                        ),
-                        # Multiplicity / (S pgen) gives an unbiased weak sum.
-                        scale=precision.asarray(
-                            count / denom,
-                            "calc",
-                            "real",
-                            host=True,
-                        ),
-                    )
-
             beta = float(np.clip(self.sampler.blur, 0.0, 1.0))
-            blur = None
-            blur_degree = np.zeros(n_ket, dtype=rdtype)
-
-            if beta > 0.0:
-                blur_eps = float(
-                    self.sampler.proposal_eps
-                    if self.sampler.blur_eps is None
-                    else self.sampler.blur_eps
-                )
-
-                if blur_eps == float(self.eloc_eps1):
-                    blur = strong
-                    blur_degree = precision.asarray(
-                        np.asarray(strong_raw.ket_weight),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
-                else:
-                    blur_raw = self.hamiltonian.conns(kets, blur_eps)
-                    blur_ptr = np.asarray(blur_raw.ket_ptr, dtype=np.int64)
-                    blur = Edges(
-                        ket=np.repeat(
-                            np.arange(n_ket, dtype=np.int64),
-                            np.diff(blur_ptr),
-                        ),
-                        bras=np.ascontiguousarray(
-                            np.asarray(blur_raw.bras, dtype=np.uint64)
-                        ),
-                        bra=np.asarray(blur_raw.bra, dtype=np.int64),
-                        h=precision.asarray(
-                            np.asarray(blur_raw.h),
-                            "calc",
-                            "real",
-                            host=True,
-                        ),
-                    )
-                    blur_degree = precision.asarray(
-                        np.asarray(blur_raw.ket_weight),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
-
-        with timer("reduce"):
-            # Every expensive model call receives one global unique pool.
-            parts = [kets, strong.bras, weak.bras]
-            if blur is not None and blur is not strong:
-                parts.append(blur.bras)
-
-            pool, _, inv = unique_dets(np.concatenate(parts, axis=0))
-            offset = n_ket
-            ket_uid = inv[:offset]
-            strong_uid = inv[offset : offset + strong.bras.shape[0]]
-            offset += strong.bras.shape[0]
-            weak_uid = inv[offset : offset + weak.bras.shape[0]]
-            offset += weak.bras.shape[0]
-
-            if blur is None:
-                blur_uid = None
-            elif blur is strong:
-                blur_uid = strong_uid
-            else:
-                blur_uid = inv[offset : offset + blur.bras.shape[0]]
+            blur_eps = float(
+                self.sampler.proposal_eps
+                if self.sampler.blur_eps is None
+                else self.sampler.blur_eps
+            )
+            graph_eps = min(
+                float(self.eloc_eps1),
+                blur_eps if beta > 0.0 else float(self.eloc_eps1),
+            )
+            graph = self.hamiltonian.conns(
+                kets,
+                graph_eps,
+                sample=max(0, int(self.eloc_sample)),
+                sample_eps=min(float(self.eloc_eps2), graph_eps),
+                seed=seed,
+            )
+            pool = np.ascontiguousarray(
+                np.asarray(graph.dets, dtype=np.uint64)
+            )
 
         with timer("forward"):
             logpsi_pool_jax = utils.apply(
@@ -375,7 +219,7 @@ class MCState(VState):
             logpsi_pool = utils.host(logpsi_pool_jax)
 
         with timer("reduce"):
-            ket_logpsi = jax.tree.map(lambda a: a[ket_uid], logpsi_pool)
+            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], logpsi_pool)
             ket_logabs = precision.asarray(
                 np.asarray(to_logabs(ket_logpsi)).reshape(-1),
                 "calc",
@@ -386,19 +230,15 @@ class MCState(VState):
             lognu = self._lognu(
                 ket_logabs=ket_logabs,
                 logpsi_pool=logpsi_pool,
-                blur=blur,
-                blur_uid=blur_uid,
-                blur_degree=blur_degree,
+                graph=graph,
+                blur_eps=blur_eps,
                 alpha=alpha,
             )
             eloc = self._eloc(
-                diag=diag,
+                graph=graph,
                 logpsi_pool=logpsi_pool,
-                ket_uid=ket_uid,
-                strong=strong,
-                strong_uid=strong_uid,
-                weak=weak,
-                weak_uid=weak_uid,
+                n_ket=n_ket,
+                n_sample=max(0, int(self.eloc_sample)),
             )
             w, ess = self._weights(
                 mass=mass,
@@ -478,14 +318,20 @@ class MCState(VState):
             "n_unique": float(n_ket),
             "unique_frac": float(n_ket / max(1, n_sample)),
             "n_eval": float(pool.shape[0]),
-            "n_conn_eloc": float(strong.h.size),
-            "n_conn_weak": float(n_conn_weak),
+            "n_conn_eloc": float(np.asarray(graph.h).size),
+            "n_conn_weak": float(np.asarray(graph.sample_h).size),
             "n_conn_proposal": float(
                 sampler_stats.get("n_conn_proposal", 0.0)
             ),
             "n_conn_blur": float(
                 sampler_stats.get("n_conn_blur", 0.0)
-                + (0 if blur is None else blur.h.size)
+                + (
+                    0
+                    if beta <= 0.0
+                    else np.count_nonzero(
+                        np.abs(np.asarray(graph.h)) >= blur_eps
+                    )
+                )
             ),
             "alpha": alpha,
         }
@@ -498,9 +344,8 @@ class MCState(VState):
         *,
         ket_logabs: np.ndarray,
         logpsi_pool: Any,
-        blur: Edges | None,
-        blur_uid: np.ndarray | None,
-        blur_degree: np.ndarray,
+        graph: Any,
+        blur_eps: float,
         alpha: float,
     ) -> np.ndarray:
         """Return the unnormalized density of blurred observations.
@@ -522,13 +367,41 @@ class MCState(VState):
             host=True,
         )
 
-        if beta <= 0.0 or blur is None or blur_uid is None:
+        if beta <= 0.0:
             return logrho
+
+        ptr = np.asarray(graph.ptr, dtype=np.int64)
+        row = np.repeat(
+            np.arange(ket_logabs.shape[0], dtype=np.int64),
+            np.diff(ptr),
+        )
+        col = np.asarray(graph.col, dtype=np.int64)
+        h = precision.asarray(
+            np.asarray(graph.h),
+            "calc",
+            "real",
+            host=True,
+        )
+        keep_edge = np.abs(h) >= rdtype(blur_eps)
+        row = row[keep_edge]
+        col = col[keep_edge]
+        h = h[keep_edge]
+
+        if keep_edge.all():
+            degree = precision.asarray(
+                np.asarray(graph.weight),
+                "calc",
+                "real",
+                host=True,
+            )
+        else:
+            degree = np.zeros(ket_logabs.shape[0], dtype=rdtype)
+            np.add.at(degree, row, np.abs(h))
 
         # Empty Hamiltonian rows revert to the identity observation.
         stay_scale = np.where(
-            blur_degree > 0.0,
-            (rdtype(1.0) - beta) * blur_degree,
+            degree > 0.0,
+            (rdtype(1.0) - beta) * degree,
             rdtype(1.0),
         )
         log_stay = np.full(ket_logabs.shape[0], -np.inf, dtype=rdtype)
@@ -537,14 +410,14 @@ class MCState(VState):
             np.log(np.maximum(stay_scale[keep], tiny)) + logrho[keep]
         )
 
-        if blur.h.size == 0:
+        if h.size == 0:
             return log_stay
 
         bra_logabs = precision.asarray(
             np.asarray(
                 to_logabs(
                     jax.tree.map(
-                        lambda a: a[blur_uid[blur.bra]],
+                        lambda a: a[col],
                         logpsi_pool,
                     )
                 )
@@ -553,16 +426,16 @@ class MCState(VState):
             "real",
             host=True,
         )
-        abs_h = np.abs(blur.h)
+        abs_h = np.abs(h)
         valid = abs_h > 0.0
-        terms = np.full(blur.h.size, -np.inf, dtype=rdtype)
+        terms = np.full(h.size, -np.inf, dtype=rdtype)
         terms[valid] = (
             alpha_r * bra_logabs[valid]
             + np.log(np.maximum(abs_h[valid], tiny))
         )
 
         row_count = np.bincount(
-            blur.ket,
+            row,
             minlength=ket_logabs.shape[0],
         ).astype(np.int64)
         row_ptr = np.concatenate(
@@ -584,38 +457,73 @@ class MCState(VState):
     def _eloc(
         self,
         *,
-        diag: np.ndarray,
+        graph: Any,
         logpsi_pool: Any,
-        ket_uid: np.ndarray,
-        strong: Edges,
-        strong_uid: np.ndarray,
-        weak: Edges,
-        weak_uid: np.ndarray,
+        n_ket: int,
+        n_sample: int,
     ) -> np.ndarray:
         """Evaluate the semi-stochastic local energy.
 
-        Strong edges are exact. A sampled weak edge contributes
+        Exact edges are summed directly. A sampled weak edge contributes
 
-            count * H_ia / (S p_ia) * psi(a) / psi(i).
+            count * weight_i / (S |H_ia|)
+            * H_ia * psi(a) / psi(i).
         """
-        eloc = precision.asarray(diag.copy(), "calc", host=True)
+        rdtype = precision.dtype("calc", "real", host=True)
+        eloc = precision.asarray(
+            np.asarray(graph.diag).copy(),
+            "calc",
+            host=True,
+        )
 
-        for edge, bra_uid in (
-            (strong, strong_uid),
-            (weak, weak_uid),
-        ):
-            if edge.h.size == 0:
-                continue
+        ptr = np.asarray(graph.ptr, dtype=np.int64)
+        row = np.repeat(
+            np.arange(n_ket, dtype=np.int64),
+            np.diff(ptr),
+        )
+        col = np.asarray(graph.col, dtype=np.int64)
+        h = precision.asarray(np.asarray(graph.h), "calc", host=True)
 
+        if h.size:
+            ratio = precision.asarray(
+                np.asarray(
+                    to_ratio(
+                        jax.tree.map(lambda a: a[col], logpsi_pool),
+                        jax.tree.map(lambda a: a[row], logpsi_pool),
+                    )
+                ),
+                "calc",
+                host=True,
+            )
+            contribution = h * ratio
+            eloc = eloc.astype(
+                np.result_type(eloc, contribution),
+                copy=False,
+            )
+            np.add.at(eloc, row, contribution)
+
+        sample_ptr = np.asarray(graph.sample_ptr, dtype=np.int64)
+        sample_row = np.repeat(
+            np.arange(n_ket, dtype=np.int64),
+            np.diff(sample_ptr),
+        )
+        sample_col = np.asarray(graph.sample_col, dtype=np.int64)
+        sample_h = precision.asarray(
+            np.asarray(graph.sample_h),
+            "calc",
+            host=True,
+        )
+
+        if sample_h.size and n_sample > 0:
             ratio = precision.asarray(
                 np.asarray(
                     to_ratio(
                         jax.tree.map(
-                            lambda a: a[bra_uid[edge.bra]],
+                            lambda a: a[sample_col],
                             logpsi_pool,
                         ),
                         jax.tree.map(
-                            lambda a: a[ket_uid[edge.ket]],
+                            lambda a: a[sample_row],
                             logpsi_pool,
                         ),
                     )
@@ -623,16 +531,28 @@ class MCState(VState):
                 "calc",
                 host=True,
             )
-            contribution = edge.h * ratio
-
-            if edge.scale is not None:
-                contribution = edge.scale * contribution
-
+            count = precision.asarray(
+                np.asarray(graph.sample_count),
+                "calc",
+                "real",
+                host=True,
+            )
+            weight = precision.asarray(
+                np.asarray(graph.sample_weight),
+                "calc",
+                "real",
+                host=True,
+            )
+            scale = count * weight[sample_row] / np.maximum(
+                rdtype(n_sample) * np.abs(sample_h),
+                rdtype(precision.tiny("calc")),
+            )
+            contribution = scale * sample_h * ratio
             eloc = eloc.astype(
                 np.result_type(eloc, contribution),
                 copy=False,
             )
-            np.add.at(eloc, edge.ket, contribution)
+            np.add.at(eloc, sample_row, contribution)
 
         return precision.asarray(eloc, "calc", host=True)
 

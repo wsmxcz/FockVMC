@@ -46,6 +46,13 @@ using I64Vec = nb::ndarray<
     nb::device::cpu
 >;
 
+using I64Array = nb::ndarray<
+    const libdet::i64,
+    nb::numpy,
+    nb::c_contig,
+    nb::device::cpu
+>;
+
 [[nodiscard]] libdet::DetBatchView to_det_view(const U64Array& dets) {
     if (dets.ndim() != 3 || dets.shape(1) != 2 || dets.shape(2) <= 0) {
         throw std::invalid_argument("determinants must have shape (N, 2, nword)");
@@ -160,39 +167,38 @@ NB_MODULE(_libdet_cpp, m) {
 
     nb::class_<libdet::Conns>(m, "Conns")
         .def_prop_ro("n_kets", &libdet::Conns::n_kets)
-        .def_prop_ro("n_bras", &libdet::Conns::n_bras)
-        .def_prop_ro("kets", [](const libdet::Conns& out) {
-            return view_dets(out.ket_words(), out.n_kets(), out.nword());
+        .def_prop_ro("dets", [](const libdet::Conns& out) {
+            return view_dets(out.det_words(), out.n_dets(), out.nword());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("bras", [](const libdet::Conns& out) {
-            return view_dets(out.bra_words(), out.n_bras(), out.nword());
+        .def_prop_ro("diag", [](const libdet::Conns& out) {
+            return view_1d(out.diag());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diags", [](const libdet::Conns& out) {
-            return view_1d(out.diags());
+        .def_prop_ro("ptr", [](const libdet::Conns& out) {
+            return view_1d(out.ptr());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ket_ptr", [](const libdet::Conns& out) {
-            return view_1d(out.ket_ptr());
-        }, nb::rv_policy::reference_internal)
-        .def_prop_ro("bra", [](const libdet::Conns& out) {
-            return view_1d(out.bra());
+        .def_prop_ro("col", [](const libdet::Conns& out) {
+            return view_1d(out.col());
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("h", [](const libdet::Conns& out) {
             return view_1d(out.h());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ket_weight", [](const libdet::Conns& out) {
-            return view_1d(out.ket_weight());
+        .def_prop_ro("weight", [](const libdet::Conns& out) {
+            return view_1d(out.weight());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ket_nconn", [](const libdet::Conns& out) {
-            return view_1d(out.ket_nconn());
-        }, nb::rv_policy::reference_internal);
-
-    nb::class_<libdet::Degrees>(m, "Degrees")
-        .def_prop_ro("n_kets", &libdet::Degrees::n_kets)
-        .def_prop_ro("ket_nconn", [](const libdet::Degrees& out) {
-            return view_1d(out.ket_nconn());
+        .def_prop_ro("sample_ptr", [](const libdet::Conns& out) {
+            return view_1d(out.sample_ptr());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ket_weight", [](const libdet::Degrees& out) {
-            return view_1d(out.ket_weight());
+        .def_prop_ro("sample_col", [](const libdet::Conns& out) {
+            return view_1d(out.sample_col());
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("sample_h", [](const libdet::Conns& out) {
+            return view_1d(out.sample_h());
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("sample_count", [](const libdet::Conns& out) {
+            return view_1d(out.sample_count());
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("sample_weight", [](const libdet::Conns& out) {
+            return view_1d(out.sample_weight());
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Matrix>(m, "Matrix")
@@ -224,26 +230,25 @@ NB_MODULE(_libdet_cpp, m) {
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::ConnSamples>(m, "ConnSamples")
-        .def_prop_ro("ket_nconn", [](const libdet::ConnSamples& out) {
-            return view_1d(out.ket_nconn());
+        .def_prop_ro("n_kets", &libdet::ConnSamples::n_kets)
+        .def_prop_ro("n_streams", &libdet::ConnSamples::n_streams)
+        .def_prop_ro("dets", [](const libdet::ConnSamples& out) {
+            return view_dets(out.det_words(), out.n_dets(), out.nword());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ket_weight", [](const libdet::ConnSamples& out) {
-            return view_1d(out.ket_weight());
+        .def_prop_ro("ptr", [](const libdet::ConnSamples& out) {
+            return view_1d(out.ptr());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ket", [](const libdet::ConnSamples& out) {
-            return view_1d(out.ket());
-        }, nb::rv_policy::reference_internal)
-        .def_prop_ro("bras", [](const libdet::ConnSamples& out) {
-            return view_dets(out.bra_words(), out.n_samples(), out.nword());
+        .def_prop_ro("col", [](const libdet::ConnSamples& out) {
+            return view_1d(out.col());
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("h", [](const libdet::ConnSamples& out) {
             return view_1d(out.h());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("pgen", [](const libdet::ConnSamples& out) {
-            return view_1d(out.pgen());
+        .def_prop_ro("count", [](const libdet::ConnSamples& out) {
+            return view_1d(out.count());
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("counts", [](const libdet::ConnSamples& out) {
-            return view_1d(out.counts());
+        .def_prop_ro("weight", [](const libdet::ConnSamples& out) {
+            return view_1d(out.weight());
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::ProjectSamples>(m, "ProjectSamples")
@@ -394,30 +399,40 @@ NB_MODULE(_libdet_cpp, m) {
 
         .def("conns", [](const libdet::Hamiltonian& ham,
                          const U64Array& kets,
-                         double eps) {
+                         double eps,
+                         libdet::i64 sample,
+                         double sample_eps,
+                         std::uint64_t seed) {
             const auto ket_view = to_det_view(kets);
             libdet::Conns out;
 
             {
                 nb::gil_scoped_release release;
-                out = ham.conns(ket_view, eps);
+                out = ham.conns(ket_view, eps, sample, sample_eps, seed);
             }
 
             return out;
-        }, "kets"_a.noconvert(), "eps"_a)
+        }, "kets"_a.noconvert(),
+           "eps"_a,
+           "sample"_a = libdet::i64{0},
+           "sample_eps"_a = 0.0,
+           "seed"_a = std::uint64_t{0})
 
         .def("degrees", [](const libdet::Hamiltonian& ham,
                            const U64Array& kets,
                            double eps) {
             const auto ket_view = to_det_view(kets);
-            libdet::Degrees out;
+            std::pair<std::vector<double>, std::vector<libdet::i64>> out;
 
             {
                 nb::gil_scoped_release release;
                 out = ham.degrees(ket_view, eps);
             }
 
-            return out;
+            return nb::make_tuple(
+                own_1d(std::move(out.first)),
+                own_1d(std::move(out.second))
+            );
         }, "kets"_a.noconvert(), "eps"_a)
 
         .def("matrix", [](const libdet::Hamiltonian& ham,
@@ -476,27 +491,48 @@ NB_MODULE(_libdet_cpp, m) {
 
         .def("sample_conns", [](const libdet::Hamiltonian& ham,
                                 const U64Array& kets,
-                                nb::object counts_obj,
+                                const I64Array& counts,
                                 double eps1,
                                 double eps2,
                                 std::uint64_t seed) {
             const auto ket_view = to_det_view(kets);
-            libdet::ConnSamples out;
-
-            if (counts_obj.is_none()) {
-                nb::gil_scoped_release release;
-                out = ham.sample_conns(ket_view, {}, eps1, eps2, seed);
-            } else {
-                const I64Vec counts = nb::cast<I64Vec>(counts_obj);
-                const auto count_view = as_i64(counts);
-
-                nb::gil_scoped_release release;
-                out = ham.sample_conns(ket_view, count_view, eps1, eps2, seed);
+            if (counts.ndim() != 1 && counts.ndim() != 2) {
+                throw std::invalid_argument(
+                    "counts must have shape (N,) or (S, N)"
+                );
             }
 
+            const std::size_t n_streams = counts.ndim() == 1
+                ? 1u
+                : static_cast<std::size_t>(counts.shape(0));
+            const std::size_t n_kets = static_cast<std::size_t>(
+                counts.shape(counts.ndim() - 1)
+            );
+            if (n_kets != ket_view.n_dets) {
+                throw std::invalid_argument(
+                    "counts last dimension must match kets"
+                );
+            }
+
+            const std::span<const libdet::i64> count_view{
+                counts.data(),
+                n_streams * n_kets
+            };
+            libdet::ConnSamples out;
+            {
+                nb::gil_scoped_release release;
+                out = ham.sample_conns(
+                    ket_view,
+                    count_view,
+                    n_streams,
+                    eps1,
+                    eps2,
+                    seed
+                );
+            }
             return out;
         }, "kets"_a.noconvert(),
-           "counts"_a = nb::none(),
+           "counts"_a.noconvert(),
            "eps1"_a = 1.0e-6,
            "eps2"_a = 0.0,
            "seed"_a = std::uint64_t{0})

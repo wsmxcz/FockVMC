@@ -8,7 +8,6 @@ from scipy.sparse import csr_matrix
 
 from ._libdet_cpp import Conns
 from ._libdet_cpp import ConnSamples
-from ._libdet_cpp import Degrees
 from ._libdet_cpp import Hamiltonian as _RawHamiltonian
 from ._libdet_cpp import Matrix
 from ._libdet_cpp import Projection
@@ -17,12 +16,12 @@ from ._libdet_cpp import ProjectSamples
 __all__ = [
     "Conns",
     "ConnSamples",
-    "Degrees",
     "Hamiltonian",
     "Matrix",
     "Projection",
     "ProjectSamples",
     "to_dets",
+    "unique_dets",
 ]
 
 
@@ -34,6 +33,34 @@ def to_dets(dets: Any) -> np.ndarray:
         raise ValueError("determinants must have shape (N, 2, nword)")
 
     return np.ascontiguousarray(arr)
+
+
+def unique_dets(dets: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return unique determinants, first positions, and inverse indices."""
+    dets = to_dets(dets)
+    n_dets = int(dets.shape[0])
+
+    if n_dets == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return dets, empty, empty
+
+    flat = dets.reshape(n_dets, -1)
+    row = flat.view(
+        np.dtype((np.void, flat.dtype.itemsize * flat.shape[1]))
+    ).ravel()
+    _, first, inverse = np.unique(
+        row,
+        return_index=True,
+        return_inverse=True,
+    )
+
+    order = np.argsort(first, kind="stable")
+    first = first[order].astype(np.int64, copy=False)
+    remap = np.empty(order.size, dtype=np.int64)
+    remap[order] = np.arange(order.size, dtype=np.int64)
+    inverse = remap[inverse]
+
+    return np.ascontiguousarray(dets[first]), first, inverse
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,17 +192,35 @@ class Hamiltonian:
             None,
         )
 
-    def conns(self, kets: Any, eps: float) -> Conns:
-        """Return screened Hamiltonian connections generated from kets."""
-        return self._raw.conns(to_dets(kets), float(eps))
+    def conns(
+        self,
+        kets: Any,
+        eps: float,
+        *,
+        sample: int = 0,
+        sample_eps: float = 0.0,
+        seed: int = 0,
+    ) -> Conns:
+        """Return exact rows and optional sampled weak connections."""
+        return self._raw.conns(
+            to_dets(kets),
+            float(eps),
+            int(sample),
+            float(sample_eps),
+            int(seed),
+        )
 
-    def degrees(self, kets: Any, eps: float) -> Degrees:
-        """Return per-ket connection counts and absolute Hamiltonian weights.
-
-        This is the lightweight counterpart of conns(). It computes ket_nconn
-        and ket_weight without materializing connected bras.
-        """
-        return self._raw.degrees(to_dets(kets), float(eps))
+    def degrees(
+        self,
+        kets: Any,
+        eps: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return row absolute weights and connection counts."""
+        weight, nconn = self._raw.degrees(to_dets(kets), float(eps))
+        return (
+            np.asarray(weight, dtype=np.float64),
+            np.asarray(nconn, dtype=np.int64),
+        )
 
     def matrix(
         self,
@@ -245,33 +290,27 @@ class Hamiltonian:
     def sample_conns(
         self,
         kets: Any,
-        counts: Any | None = None,
+        counts: Any,
         *,
         eps1: float = 1.0e-6,
         eps2: float = 0.0,
         seed: int = 0,
     ) -> ConnSamples:
-        """Return window connection statistics and optional sampled connections.
+        """Sample row connections in ``eps2 <= |H| < eps1``.
 
-        The sampled window is eps2 <= |H_ai| < eps1.
-
-        If counts is omitted, only ket_nconn and ket_weight are returned.
-        If counts is provided, connected bras are sampled with probability
-        |H_ai| / ket_weight within each ket.
+        ``counts`` has shape ``(N,)`` or ``(S, N)`` for independent streams.
         """
         ket_arr = to_dets(kets)
+        counts_arr = np.ascontiguousarray(
+            np.asarray(counts, dtype=np.int64)
+        )
 
-        counts_arr = None
-        if counts is not None:
-            if np.isscalar(counts):
-                counts_arr = np.full(ket_arr.shape[0], int(counts), dtype=np.int64)
-            else:
-                counts_arr = np.ascontiguousarray(
-                    np.asarray(counts, dtype=np.int64).reshape(-1)
-                )
-
-                if counts_arr.shape[0] != ket_arr.shape[0]:
-                    raise ValueError("counts length must match number of kets")
+        if counts_arr.ndim not in (1, 2):
+            raise ValueError("counts must have shape (N,) or (S, N)")
+        if counts_arr.shape[-1] != ket_arr.shape[0]:
+            raise ValueError("counts last dimension must match kets")
+        if np.any(counts_arr < 0):
+            raise ValueError("counts must be nonnegative")
 
         return self._raw.sample_conns(
             ket_arr,

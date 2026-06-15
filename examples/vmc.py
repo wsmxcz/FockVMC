@@ -25,11 +25,24 @@ jax.config.update("jax_log_compiles", False)
 
 
 mol = gto.M(
-    atom="""
-    N    0.53920000,  0.00000000,  0.00000000
-    N   -0.53920000,  0.00000000,  0.00000000
-    """,
-    basis="sto-3g",
+    # atom=
+    # '''
+    # N   0.53920000,  0.00000000,  0.0000000
+    # N   -0.539200000,  0.00000000,  0.0000000
+    # ''',
+    atom=
+    '''
+    O   0.00000000,  0.00000000,  0.00000000
+    H   0.75700000,  0.00000000,  0.58590000
+    H  -0.75700000,  0.00000000,  0.58590000
+    ''',
+    # atom=
+    # '''
+    # Li   3.732, 0.25, 0.0
+    # Li   2.0, 0.25, 0.0
+    # O  2.866, -0.25, 0.0
+    # ''',
+    basis="6-31g",
     unit="Angstrom",
     spin=0,
     verbose=0,
@@ -45,6 +58,10 @@ eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=n
 
 ham = Hamiltonian.rhf(h1e, eri, ecore=mol.energy_nuc())
 
+# e_fci = -109.099941428008 # N2_631g
+# e_fci = -87.892693 # Li2O_sto3g
+# e_fci = -76.243769 # H2O_ccpvdz
+
 solver = fci.direct_spin0.FCI(mol)
 e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
 s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
@@ -59,9 +76,9 @@ model = RBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 # model = RBM(norb=norb, alpha=1)
 
 sampler = MCSampler(
-    n_samples=1024,
-    n_chains=1024,
-    thermal_steps=32,
+    n_samples=4096,
+    n_chains=4096,
+    thermal_steps=16,
     proposal="ham",
     blur=0.5,
 )
@@ -100,7 +117,7 @@ line = run_utils.print_metrics(metrics)
 
 history = []
 total_times = defaultdict(float)
-steps = 1000
+steps = 500
 
 for step in range(steps):
     stats = dict(vmc.step())

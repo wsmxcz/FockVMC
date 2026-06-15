@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -73,65 +74,56 @@ private:
 class Conns {
 public:
     [[nodiscard]] std::size_t n_kets() const noexcept { return n_kets_; }
-
-    [[nodiscard]] std::size_t n_bras() const noexcept {
-        return nword_ == 0 ? 0u : bra_words_.size() / det_size(nword_);
+    [[nodiscard]] std::size_t n_dets() const noexcept {
+        return nword_ == 0 ? 0u : det_words_.size() / det_size(nword_);
     }
-
     [[nodiscard]] u32 nword() const noexcept { return nword_; }
 
-    [[nodiscard]] std::span<const u64> ket_words() const noexcept { return ket_words_; }
-    [[nodiscard]] std::span<const u64> bra_words() const noexcept { return bra_words_; }
-
-    [[nodiscard]] std::span<const double> diags() const noexcept { return diags_; }
-    [[nodiscard]] std::span<const i32> ket_ptr() const noexcept { return ket_ptr_; }
-    [[nodiscard]] std::span<const i32> bra() const noexcept { return bra_; }
+    [[nodiscard]] std::span<const u64> det_words() const noexcept { return det_words_; }
+    [[nodiscard]] std::span<const double> diag() const noexcept { return diag_; }
+    [[nodiscard]] std::span<const i32> ptr() const noexcept { return ptr_; }
+    [[nodiscard]] std::span<const i32> col() const noexcept { return col_; }
     [[nodiscard]] std::span<const double> h() const noexcept { return h_; }
-    [[nodiscard]] std::span<const double> ket_weight() const noexcept { return ket_weight_; }
-    [[nodiscard]] std::span<const i64> ket_nconn() const noexcept { return ket_nconn_; }
+    [[nodiscard]] std::span<const double> weight() const noexcept { return weight_; }
+    [[nodiscard]] std::span<const i32> sample_ptr() const noexcept { return sample_ptr_; }
+    [[nodiscard]] std::span<const i32> sample_col() const noexcept { return sample_col_; }
+    [[nodiscard]] std::span<const double> sample_h() const noexcept { return sample_h_; }
+    [[nodiscard]] std::span<const i64> sample_count() const noexcept { return sample_count_; }
+    [[nodiscard]] std::span<const double> sample_weight() const noexcept {
+        return sample_weight_;
+    }
 
     void set_nword(u32 x) noexcept { nword_ = x; }
     void set_n_kets(std::size_t x) noexcept { n_kets_ = x; }
 
-    [[nodiscard]] std::vector<u64>& ket_words_mut() noexcept { return ket_words_; }
-    [[nodiscard]] std::vector<u64>& bra_words_mut() noexcept { return bra_words_; }
-
-    [[nodiscard]] std::vector<double>& diags_mut() noexcept { return diags_; }
-    [[nodiscard]] std::vector<i32>& ket_ptr_mut() noexcept { return ket_ptr_; }
-    [[nodiscard]] std::vector<i32>& bra_mut() noexcept { return bra_; }
+    [[nodiscard]] std::vector<u64>& det_words_mut() noexcept { return det_words_; }
+    [[nodiscard]] std::vector<double>& diag_mut() noexcept { return diag_; }
+    [[nodiscard]] std::vector<i32>& ptr_mut() noexcept { return ptr_; }
+    [[nodiscard]] std::vector<i32>& col_mut() noexcept { return col_; }
     [[nodiscard]] std::vector<double>& h_mut() noexcept { return h_; }
-    [[nodiscard]] std::vector<double>& ket_weight_mut() noexcept { return ket_weight_; }
-    [[nodiscard]] std::vector<i64>& ket_nconn_mut() noexcept { return ket_nconn_; }
+    [[nodiscard]] std::vector<double>& weight_mut() noexcept { return weight_; }
+    [[nodiscard]] std::vector<i32>& sample_ptr_mut() noexcept { return sample_ptr_; }
+    [[nodiscard]] std::vector<i32>& sample_col_mut() noexcept { return sample_col_; }
+    [[nodiscard]] std::vector<double>& sample_h_mut() noexcept { return sample_h_; }
+    [[nodiscard]] std::vector<i64>& sample_count_mut() noexcept { return sample_count_; }
+    [[nodiscard]] std::vector<double>& sample_weight_mut() noexcept {
+        return sample_weight_;
+    }
 
 private:
     u32 nword_ = 0;
     std::size_t n_kets_ = 0;
-
-    std::vector<u64> ket_words_;
-    std::vector<u64> bra_words_;
-
-    std::vector<double> diags_;
-    std::vector<i32> ket_ptr_;
-    std::vector<i32> bra_;
+    std::vector<u64> det_words_;
+    std::vector<double> diag_;
+    std::vector<i32> ptr_;
+    std::vector<i32> col_;
     std::vector<double> h_;
-
-    std::vector<double> ket_weight_;
-    std::vector<i64> ket_nconn_;
-};
-
-class Degrees {
-public:
-    [[nodiscard]] std::size_t n_kets() const noexcept { return ket_nconn_.size(); }
-
-    [[nodiscard]] std::span<const i64> ket_nconn() const noexcept { return ket_nconn_; }
-    [[nodiscard]] std::span<const double> ket_weight() const noexcept { return ket_weight_; }
-
-    [[nodiscard]] std::vector<i64>& ket_nconn_mut() noexcept { return ket_nconn_; }
-    [[nodiscard]] std::vector<double>& ket_weight_mut() noexcept { return ket_weight_; }
-
-private:
-    std::vector<i64> ket_nconn_;
-    std::vector<double> ket_weight_;
+    std::vector<double> weight_;
+    std::vector<i32> sample_ptr_;
+    std::vector<i32> sample_col_;
+    std::vector<double> sample_h_;
+    std::vector<i64> sample_count_;
+    std::vector<double> sample_weight_;
 };
 
 class Projection {
@@ -160,37 +152,40 @@ private:
 class ConnSamples {
 public:
     [[nodiscard]] u32 nword() const noexcept { return nword_; }
-    [[nodiscard]] std::size_t n_samples() const noexcept { return pgen_.size(); }
+    [[nodiscard]] std::size_t n_kets() const noexcept { return n_kets_; }
+    [[nodiscard]] std::size_t n_dets() const noexcept {
+        return nword_ == 0 ? 0u : det_words_.size() / det_size(nword_);
+    }
+    [[nodiscard]] std::size_t n_streams() const noexcept { return n_streams_; }
 
     void set_nword(u32 x) noexcept { nword_ = x; }
+    void set_n_kets(std::size_t x) noexcept { n_kets_ = x; }
+    void set_n_streams(std::size_t x) noexcept { n_streams_ = x; }
 
-    [[nodiscard]] std::span<const i64> ket_nconn() const noexcept { return ket_nconn_; }
-    [[nodiscard]] std::span<const double> ket_weight() const noexcept { return ket_weight_; }
-    [[nodiscard]] std::span<const i32> ket() const noexcept { return ket_; }
-    [[nodiscard]] std::span<const u64> bra_words() const noexcept { return bra_words_; }
+    [[nodiscard]] std::span<const u64> det_words() const noexcept { return det_words_; }
+    [[nodiscard]] std::span<const i32> ptr() const noexcept { return ptr_; }
+    [[nodiscard]] std::span<const i32> col() const noexcept { return col_; }
     [[nodiscard]] std::span<const double> h() const noexcept { return h_; }
-    [[nodiscard]] std::span<const double> pgen() const noexcept { return pgen_; }
-    [[nodiscard]] std::span<const i64> counts() const noexcept { return counts_; }
+    [[nodiscard]] std::span<const i64> count() const noexcept { return count_; }
+    [[nodiscard]] std::span<const double> weight() const noexcept { return weight_; }
 
-    [[nodiscard]] std::vector<i64>& ket_nconn_mut() noexcept { return ket_nconn_; }
-    [[nodiscard]] std::vector<double>& ket_weight_mut() noexcept { return ket_weight_; }
-    [[nodiscard]] std::vector<i32>& ket_mut() noexcept { return ket_; }
-    [[nodiscard]] std::vector<u64>& bra_words_mut() noexcept { return bra_words_; }
+    [[nodiscard]] std::vector<u64>& det_words_mut() noexcept { return det_words_; }
+    [[nodiscard]] std::vector<i32>& ptr_mut() noexcept { return ptr_; }
+    [[nodiscard]] std::vector<i32>& col_mut() noexcept { return col_; }
     [[nodiscard]] std::vector<double>& h_mut() noexcept { return h_; }
-    [[nodiscard]] std::vector<double>& pgen_mut() noexcept { return pgen_; }
-    [[nodiscard]] std::vector<i64>& counts_mut() noexcept { return counts_; }
+    [[nodiscard]] std::vector<i64>& count_mut() noexcept { return count_; }
+    [[nodiscard]] std::vector<double>& weight_mut() noexcept { return weight_; }
 
 private:
     u32 nword_ = 0;
-
-    std::vector<i64> ket_nconn_;
-    std::vector<double> ket_weight_;
-
-    std::vector<i32> ket_;
-    std::vector<u64> bra_words_;
+    std::size_t n_kets_ = 0;
+    std::size_t n_streams_ = 1;
+    std::vector<u64> det_words_;
+    std::vector<i32> ptr_;
+    std::vector<i32> col_;
     std::vector<double> h_;
-    std::vector<double> pgen_;
-    std::vector<i64> counts_;
+    std::vector<i64> count_;
+    std::vector<double> weight_;
 };
 
 class ProjectSamples {
@@ -280,11 +275,90 @@ private:
 
 namespace detail_ham {
 
+class RowCache {
+public:
+    static constexpr std::size_t capacity = 8192;
+
+    explicit RowCache(u32 nword = 0)
+        : nword_(nword),
+          words_(capacity * det_size(nword), 0),
+          lo_(capacity, 0),
+          hi_(capacity, 0),
+          weight_(capacity, 0.0),
+          nconn_(capacity, 0),
+          valid_(capacity, 0) {}
+
+    [[nodiscard]] bool find(
+        DetRef det,
+        double lo,
+        double hi,
+        double& weight,
+        i64& nconn
+    ) const noexcept {
+        if (nword_ == 0 || det.nword() != nword_) return false;
+
+        const std::size_t slot = index(det, lo, hi);
+        if (!valid_[slot]) return false;
+        if (lo_[slot] != std::bit_cast<u64>(lo)) return false;
+        if (hi_[slot] != std::bit_cast<u64>(hi)) return false;
+
+        const DetRef stored = det_at(words_, nword_, slot);
+        if (!det_equal(stored, det)) return false;
+
+        weight = weight_[slot];
+        nconn = nconn_[slot];
+        return true;
+    }
+
+    void insert(DetRef det, double lo, double hi, double weight, i64 nconn) {
+        if (nword_ == 0 || det.nword() != nword_) return;
+
+        const std::size_t slot = index(det, lo, hi);
+        const std::size_t stride = det_size(nword_);
+        u64* dst = words_.data() + slot * stride;
+
+        std::copy(det.alpha().begin(), det.alpha().end(), dst);
+        std::copy(det.beta().begin(), det.beta().end(), dst + nword_);
+
+        lo_[slot] = std::bit_cast<u64>(lo);
+        hi_[slot] = std::bit_cast<u64>(hi);
+        weight_[slot] = weight;
+        nconn_[slot] = nconn;
+        valid_[slot] = 1;
+    }
+
+private:
+    u32 nword_ = 0;
+    std::vector<u64> words_;
+    std::vector<u64> lo_;
+    std::vector<u64> hi_;
+    std::vector<double> weight_;
+    std::vector<i64> nconn_;
+    std::vector<unsigned char> valid_;
+
+    [[nodiscard]] static std::size_t index(
+        DetRef det,
+        double lo,
+        double hi
+    ) noexcept {
+        u64 h = static_cast<u64>(DetHash{}(det));
+        h = splitmix64(h ^ std::bit_cast<u64>(lo));
+        h = splitmix64(h ^ std::bit_cast<u64>(hi));
+        return static_cast<std::size_t>(h) & (capacity - 1u);
+    }
+};
+
 class DetPool {
 public:
     explicit DetPool(u32 nword = 0)
         : nword_(nword) {
         rehash(8);
+    }
+
+    explicit DetPool(DetBatchView dets)
+        : nword_(dets.nword) {
+        copy_batch(words_, dets);
+        rehash(std::max<std::size_t>(8, dets.n_dets * 2u + 1u));
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -352,20 +426,6 @@ private:
     }
 };
 
-struct ConnRec {
-    i32 iket = 0;
-    i32 ibra = 0;
-    double h = 0.0;
-};
-
-struct ConnPart {
-    explicit ConnPart(u32 nword = 0)
-        : pool(nword) {}
-
-    DetPool pool;
-    std::vector<ConnRec> conns;
-};
-
 struct ProjTerm {
     i32 ibra = 0;
     double hpsi = 0.0;
@@ -377,19 +437,6 @@ struct ProjPart {
 
     DetPool pool;
     std::vector<ProjTerm> terms;
-};
-
-struct ConnSampleRec {
-    i32 iket = 0;
-    std::size_t ibra = 0;
-    double h = 0.0;
-    double pgen = 0.0;
-    i64 count = 0;
-};
-
-struct ConnSamplePart {
-    std::vector<ConnSampleRec> recs;
-    std::vector<u64> words;
 };
 
 struct SampleRec {
@@ -412,13 +459,15 @@ public:
 
     Hamiltonian(const Hamiltonian& other)
         : ints_(other.ints_),
-          nword_(other.nword_) {}
+          nword_(other.nword_),
+          row_cache_(other.nword_) {}
 
     Hamiltonian& operator=(const Hamiltonian& other) {
         if (this != &other) {
             ints_ = other.ints_;
             nword_ = other.nword_;
             screen_.reset();
+            row_cache_ = detail_ham::RowCache(nword_);
         }
 
         return *this;
@@ -427,13 +476,15 @@ public:
     Hamiltonian(Hamiltonian&& other) noexcept
         : ints_(std::move(other.ints_)),
           nword_(other.nword_),
-          screen_(std::move(other.screen_)) {}
+          screen_(std::move(other.screen_)),
+          row_cache_(other.nword_) {}
 
     Hamiltonian& operator=(Hamiltonian&& other) noexcept {
         if (this != &other) {
             ints_ = std::move(other.ints_);
             nword_ = other.nword_;
             screen_ = std::move(other.screen_);
+            row_cache_ = detail_ham::RowCache(nword_);
         }
 
         return *this;
@@ -553,14 +604,30 @@ public:
         return project_generated_impl(kets, coeffs, eps, base);
     }
 
-    [[nodiscard]] Conns conns(DetBatchView kets, double eps) const {
+    [[nodiscard]] Conns conns(
+        DetBatchView kets,
+        double eps,
+        i64 sample = 0,
+        double sample_eps = 0.0,
+        u64 seed = 0
+    ) const {
         check_dets(kets, "conns(kets)");
         check_eps(eps);
+        check_eps(sample_eps);
+        if (sample < 0) {
+            throw std::invalid_argument("conns: sample must be nonnegative");
+        }
+        if (sample > 0 && sample_eps > eps) {
+            throw std::invalid_argument("conns: sample_eps must be <= eps");
+        }
 
-        return conns_impl(kets, eps);
+        return conns_impl(kets, eps, sample, sample_eps, seed);
     }
 
-    [[nodiscard]] Degrees degrees(DetBatchView kets, double eps) const {
+    [[nodiscard]] std::pair<std::vector<double>, std::vector<i64>> degrees(
+        DetBatchView kets,
+        double eps
+    ) const {
         check_dets(kets, "degrees(kets)");
         check_eps(eps);
 
@@ -658,6 +725,7 @@ public:
     [[nodiscard]] ConnSamples sample_conns(
         DetBatchView kets,
         std::span<const i64> counts,
+        std::size_t n_streams,
         double eps1,
         double eps2,
         u64 seed = 0
@@ -665,11 +733,24 @@ public:
         check_dets(kets, "sample_conns(kets)");
         check_window_eps(eps1, eps2);
 
-        if (!counts.empty() && counts.size() != kets.n_dets) {
-            throw std::invalid_argument("sample_conns: counts size must match kets");
+        if (n_streams == 0) {
+            throw std::invalid_argument("sample_conns: n_streams must be positive");
         }
 
-        return sample_conns_impl(kets, counts, eps1, eps2, seed);
+        if (counts.size() != n_streams * kets.n_dets) {
+            throw std::invalid_argument(
+                "sample_conns: counts shape must be (n_streams, n_kets)"
+            );
+        }
+        if (std::any_of(counts.begin(), counts.end(), [](i64 n) {
+            return n < 0;
+        })) {
+            throw std::invalid_argument(
+                "sample_conns: counts must be nonnegative"
+            );
+        }
+
+        return sample_conns_impl(kets, counts, n_streams, eps1, eps2, seed);
     }
 
     [[nodiscard]] ProjectSamples sample_project(
@@ -707,13 +788,16 @@ public:
 private:
     explicit Hamiltonian(RHFIntegrals ints)
         : ints_(std::move(ints)),
-          nword_(bits::words_for(ints_.norb())) {}
+          nword_(bits::words_for(ints_.norb())),
+          row_cache_(nword_) {}
 
     RHFIntegrals ints_;
     u32 nword_ = 0;
 
     mutable std::mutex screen_mutex_;
     mutable std::shared_ptr<const Screen> screen_;
+    mutable std::mutex row_cache_mutex_;
+    mutable detail_ham::RowCache row_cache_;
 
     void check_one(DetRef det, const char* where) const {
         if (det.nword() != nword_) {
@@ -898,9 +982,19 @@ private:
                 const double scale = coeffs.empty() ? 1.0 : std::abs(coeffs[iket]);
                 const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), scale);
 
-                scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double) {
-                    if (exclude_index.find(bra) < 0) append_det(words, bra);
-                });
+                scan(
+                    ints_,
+                    screen_ptr.get(),
+                    kets[iket],
+                    work,
+                    win,
+                    [](double) { return EmitRequest{true, 0}; },
+                    [&](DetRef bra, double, EmitRequest) {
+                        if (exclude_index.find(bra) < 0) {
+                            append_det(words, bra);
+                        }
+                    }
+                );
             }
         }
 
@@ -993,12 +1087,22 @@ private:
                 const double scale = std::abs(coeff);
                 const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), scale);
 
-                scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
-                    if (exclude_index.find(bra) >= 0) return;
+                scan(
+                    ints_,
+                    screen_ptr.get(),
+                    kets[iket],
+                    work,
+                    win,
+                    [](double) { return EmitRequest{true, 0}; },
+                    [&](DetRef bra, double h, EmitRequest) {
+                        if (exclude_index.find(bra) >= 0) return;
 
-                    const i32 ibra = part.pool.find_or_add(bra);
-                    part.terms.push_back(detail_ham::ProjTerm{ibra, h * coeff});
-                });
+                        const i32 ibra = part.pool.find_or_add(bra);
+                        part.terms.push_back(
+                            detail_ham::ProjTerm{ibra, h * coeff}
+                        );
+                    }
+                );
             }
         }
 
@@ -1046,139 +1150,243 @@ private:
         return out;
     }
 
-    [[nodiscard]] Conns conns_impl(DetBatchView kets, double eps) const {
-        auto screen_ptr = screen(eps);
-
-#if defined(_OPENMP)
-        const int nthread = std::max(1, omp_get_max_threads());
-#else
-        const int nthread = 1;
-#endif
-
-        std::vector<detail_ham::ConnPart> local;
-        local.reserve(static_cast<std::size_t>(nthread));
-
-        for (int t = 0; t < nthread; ++t) {
-            local.emplace_back(nword_);
-        }
-
-#if defined(_OPENMP)
-#pragma omp parallel
-        {
-            const int tid = omp_get_thread_num();
-            auto& part = local[static_cast<std::size_t>(tid)];
-            KetWork work(nword_, ints_.norb());
-
-#pragma omp for schedule(guided)
-            for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
-                const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-        {
-            auto& part = local[0];
-            KetWork work(nword_, ints_.norb());
-
-            for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-#endif
-                const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), 1.0);
-
-                scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
-                    const i32 ibra = part.pool.find_or_add(bra);
-                    part.conns.push_back(detail_ham::ConnRec{
-                        static_cast<i32>(iket),
-                        ibra,
-                        h
-                    });
-                });
-            }
-        }
-
-        std::vector<u64> global_words;
-
-        for (const auto& part : local) {
-            global_words.insert(global_words.end(), part.pool.words().begin(), part.pool.words().end());
-        }
-
-        sort_unique_dets(global_words, nword_);
-
-        const DetBatchView global_view{
-            global_words.data(),
-            global_words.size() / det_size(nword_),
-            nword_
-        };
-
-        const DetIndex global_index(global_view);
+    [[nodiscard]] Conns conns_impl(
+        DetBatchView kets,
+        double eps,
+        i64 n_sample,
+        double sample_eps,
+        u64 seed
+    ) const {
+        const bool sample_weak = n_sample > 0 && sample_eps < eps;
+        auto screen_ptr = screen(sample_weak ? sample_eps : eps);
 
         Conns out;
         out.set_nword(nword_);
         out.set_n_kets(kets.n_dets);
+        out.diag_mut().assign(kets.n_dets, 0.0);
+        out.ptr_mut().assign(1, 0);
+        out.weight_mut().assign(kets.n_dets, 0.0);
+        out.sample_ptr_mut().assign(1, 0);
+        out.sample_weight_mut().assign(kets.n_dets, 0.0);
 
-        copy_batch(out.ket_words_mut(), kets);
-        out.bra_words_mut() = std::move(global_words);
+        detail_ham::DetPool pool(kets);
+        std::vector<i64> exact_nconn(kets.n_dets, 0);
+        std::vector<i64> weak_nconn(kets.n_dets, 0);
+        std::vector<unsigned char> weak_hit(kets.n_dets, 0);
 
-        out.diags_mut() = diags(kets);
-        out.ket_ptr_mut().assign(kets.n_dets + 1u, 0);
-        out.ket_weight_mut().assign(kets.n_dets, 0.0);
-        out.ket_nconn_mut().assign(kets.n_dets, 0);
-
-        std::size_t nconn = 0;
-
-        for (std::size_t t = 0; t < local.size(); ++t) {
-            nconn += local[t].conns.size();
-
-            for (const auto& c : local[t].conns) {
-                ++out.ket_ptr_mut()[static_cast<std::size_t>(c.iket) + 1u];
-                out.ket_weight_mut()[static_cast<std::size_t>(c.iket)] += std::abs(c.h);
-                ++out.ket_nconn_mut()[static_cast<std::size_t>(c.iket)];
+        if (sample_weak) {
+            std::lock_guard<std::mutex> lock(row_cache_mutex_);
+            for (std::size_t row = 0; row < kets.n_dets; ++row) {
+                weak_hit[row] = row_cache_.find(
+                    kets[row],
+                    sample_eps,
+                    eps,
+                    out.sample_weight_mut()[row],
+                    weak_nconn[row]
+                );
             }
         }
 
-        std::size_t acc = 0;
-        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-            acc += static_cast<std::size_t>(out.ket_ptr_mut()[iket + 1u]);
-            out.ket_ptr_mut()[iket + 1u] = to_i32(acc);
+        KetWork work(nword_, ints_.norb());
+        std::vector<double> targets;
+
+        for (std::size_t row = 0; row < kets.n_dets; ++row) {
+            fill_occ(kets[row], ints_.norb(), work.occ);
+            out.diag_mut()[row] = Slater::diag(ints_, work.occ);
+
+            std::size_t target_pos = 0;
+            double cdf = 0.0;
+
+            if (sample_weak && weak_hit[row]) {
+                SmallRng rng(sample_seed(seed, kets[row], 0));
+                make_targets(
+                    rng,
+                    n_sample,
+                    out.sample_weight()[row],
+                    targets
+                );
+            } else {
+                targets.clear();
+            }
+
+            scan_prepared(
+                ints_,
+                screen_ptr.get(),
+                kets[row],
+                work.occ,
+                edge_window(
+                    sample_weak ? sample_eps : eps,
+                    std::numeric_limits<double>::infinity(),
+                    1.0
+                ),
+                [&](double h) {
+                    const double value = std::abs(h);
+                    if (value >= eps) {
+                        out.weight_mut()[row] += value;
+                        ++exact_nconn[row];
+                        return EmitRequest{true, 0};
+                    }
+
+                    if (!sample_weak) return EmitRequest{};
+
+                    if (!weak_hit[row]) {
+                        out.sample_weight_mut()[row] += value;
+                        ++weak_nconn[row];
+                        return EmitRequest{};
+                    }
+
+                    cdf += value;
+                    i64 count = 0;
+                    while (
+                        target_pos < targets.size()
+                        && targets[target_pos] <= cdf
+                    ) {
+                        ++count;
+                        ++target_pos;
+                    }
+                    return EmitRequest{false, count};
+                },
+                [&](DetRef bra, double h, EmitRequest req) {
+                    const i32 col = pool.find_or_add(bra);
+                    if (req.exact) {
+                        out.col_mut().push_back(col);
+                        out.h_mut().push_back(h);
+                    }
+                    if (req.count > 0) {
+                        out.sample_col_mut().push_back(col);
+                        out.sample_h_mut().push_back(h);
+                        out.sample_count_mut().push_back(req.count);
+                    }
+                }
+            );
+
+            if (sample_weak && !weak_hit[row] && out.sample_weight()[row] > 0.0) {
+                SmallRng rng(sample_seed(seed, kets[row], 0));
+                make_targets(
+                    rng,
+                    n_sample,
+                    out.sample_weight()[row],
+                    targets
+                );
+                target_pos = 0;
+                cdf = 0.0;
+
+                scan(
+                    ints_,
+                    screen_ptr.get(),
+                    kets[row],
+                    work,
+                    edge_window(sample_eps, eps, 1.0),
+                    [&](double h) {
+                        cdf += std::abs(h);
+                        i64 count = 0;
+                        while (
+                            target_pos < targets.size()
+                            && targets[target_pos] <= cdf
+                        ) {
+                            ++count;
+                            ++target_pos;
+                        }
+                        return EmitRequest{false, count};
+                    },
+                    [&](DetRef bra, double h, EmitRequest req) {
+                        out.sample_col_mut().push_back(pool.find_or_add(bra));
+                        out.sample_h_mut().push_back(h);
+                        out.sample_count_mut().push_back(req.count);
+                    }
+                );
+            }
+
+            out.ptr_mut().push_back(to_i32(out.col().size()));
+            out.sample_ptr_mut().push_back(to_i32(out.sample_col().size()));
         }
 
-        out.bra_mut().resize(nconn);
-        out.h_mut().resize(nconn);
+        out.det_words_mut() = std::move(pool.words());
 
-        std::vector<i32> pos = out.ket_ptr_mut();
-
-        for (std::size_t t = 0; t < local.size(); ++t) {
-            for (const auto& c : local[t].conns) {
-                const std::size_t iket = static_cast<std::size_t>(c.iket);
-                const std::size_t p = static_cast<std::size_t>(pos[iket]++);
-                const DetRef bra = local[t].pool.get(static_cast<std::size_t>(c.ibra));
-
-                out.bra_mut()[p] = global_index.find(bra);
-                out.h_mut()[p] = c.h;
+        {
+            std::lock_guard<std::mutex> lock(row_cache_mutex_);
+            for (std::size_t row = 0; row < kets.n_dets; ++row) {
+                row_cache_.insert(
+                    kets[row],
+                    eps,
+                    std::numeric_limits<double>::infinity(),
+                    out.weight()[row],
+                    exact_nconn[row]
+                );
+                if (sample_weak && !weak_hit[row]) {
+                    row_cache_.insert(
+                        kets[row],
+                        sample_eps,
+                        eps,
+                        out.sample_weight()[row],
+                        weak_nconn[row]
+                    );
+                }
             }
         }
 
         return out;
     }
 
-    [[nodiscard]] Degrees degrees_impl(DetBatchView kets, double eps) const {
+    [[nodiscard]] std::pair<std::vector<double>, std::vector<i64>> degrees_impl(
+        DetBatchView kets,
+        double eps
+    ) const {
         auto screen_ptr = screen(eps);
+        std::vector<double> weight(kets.n_dets, 0.0);
+        std::vector<i64> nconn(kets.n_dets, 0);
+        std::vector<unsigned char> hit(kets.n_dets, 0);
 
-        Degrees out;
-        out.ket_nconn_mut().assign(kets.n_dets, 0);
-        out.ket_weight_mut().assign(kets.n_dets, 0.0);
+        {
+            std::lock_guard<std::mutex> lock(row_cache_mutex_);
+            for (std::size_t row = 0; row < kets.n_dets; ++row) {
+                hit[row] = row_cache_.find(
+                    kets[row],
+                    eps,
+                    std::numeric_limits<double>::infinity(),
+                    weight[row],
+                    nconn[row]
+                );
+            }
+        }
 
-        for_guided(kets.n_dets, [&](std::size_t iket, KetWork& work) {
-            i64 nconn = 0;
-            double weight = 0.0;
-            const EdgeWindow win = edge_window(eps, std::numeric_limits<double>::infinity(), 1.0);
-
-            scan_values(ints_, screen_ptr.get(), kets[iket], work, win, [&](double h) {
-                ++nconn;
-                weight += std::abs(h);
-            });
-
-            out.ket_nconn_mut()[iket] = nconn;
-            out.ket_weight_mut()[iket] = weight;
+        for_guided(kets.n_dets, [&](std::size_t row, KetWork& work) {
+            if (hit[row]) return;
+            scan(
+                ints_,
+                screen_ptr.get(),
+                kets[row],
+                work,
+                edge_window(
+                    eps,
+                    std::numeric_limits<double>::infinity(),
+                    1.0
+                ),
+                [&](double h) {
+                    weight[row] += std::abs(h);
+                    ++nconn[row];
+                    return EmitRequest{};
+                },
+                [](DetRef, double, EmitRequest) {}
+            );
         });
 
-        return out;
+        {
+            std::lock_guard<std::mutex> lock(row_cache_mutex_);
+            for (std::size_t row = 0; row < kets.n_dets; ++row) {
+                if (!hit[row]) {
+                    row_cache_.insert(
+                        kets[row],
+                        eps,
+                        std::numeric_limits<double>::infinity(),
+                        weight[row],
+                        nconn[row]
+                    );
+                }
+            }
+        }
+
+        return {std::move(weight), std::move(nconn)};
     }
 
     void build_matrix(Matrix& out, DetBatchView bras, DetBatchView kets) const {
@@ -1241,149 +1449,148 @@ private:
     [[nodiscard]] ConnSamples sample_conns_impl(
         DetBatchView kets,
         std::span<const i64> counts,
+        std::size_t n_streams,
         double eps1,
         double eps2,
         u64 seed
     ) const {
         auto screen_ptr = screen(eps2);
-        const bool draw = !counts.empty();
-
         ConnSamples out;
         out.set_nword(nword_);
-        out.ket_nconn_mut().assign(kets.n_dets, 0);
-        out.ket_weight_mut().assign(kets.n_dets, 0.0);
+        out.set_n_kets(kets.n_dets);
+        out.set_n_streams(n_streams);
+        out.weight_mut().assign(kets.n_dets, 0.0);
+        std::vector<unsigned char> hit(kets.n_dets, 0);
+        std::vector<i64> nconn(kets.n_dets, 0);
 
-#if defined(_OPENMP)
-        const int nthread = std::max(1, omp_get_max_threads());
-#else
-        const int nthread = 1;
-#endif
-
-        std::vector<detail_ham::ConnSamplePart> local(static_cast<std::size_t>(nthread));
-
-        auto process_one = [&](
-            std::size_t iket,
-            KetWork& work,
-            std::vector<double>& targets,
-            detail_ham::ConnSamplePart& part
-        ) {
-            i64 nconn = 0;
-            double weight = 0.0;
-            const EdgeWindow win = edge_window(eps2, eps1, 1.0);
-
-            scan_values(ints_, screen_ptr.get(), kets[iket], work, win, [&](double h) {
-                ++nconn;
-                weight += std::abs(h);
-            });
-
-            out.ket_nconn_mut()[iket] = nconn;
-            out.ket_weight_mut()[iket] = weight;
-
-            if (!draw || counts[iket] <= 0 || nconn == 0 || !(weight > 0.0)) {
-                return;
-            }
-
-            SmallRng rng(sample_seed(seed, kets[iket]));
-            make_targets(rng, counts[iket], weight, targets);
-
-            if (targets.empty()) return;
-
-            std::size_t target_pos = 0;
-            double cdf = 0.0;
-
-            scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
-                const double abs_h = std::abs(h);
-                cdf += abs_h;
-
-                i64 hit = 0;
-
-                while (target_pos < targets.size() && targets[target_pos] <= cdf) {
-                    ++hit;
-                    ++target_pos;
-                }
-
-                if (hit <= 0) return;
-
-                detail_ham::ConnSampleRec rec;
-                rec.iket = static_cast<i32>(iket);
-                rec.ibra = append_det_index(part.words, nword_, bra);
-                rec.h = h;
-                rec.pgen = abs_h / weight;
-                rec.count = hit;
-
-                part.recs.push_back(rec);
-            });
-        };
-
-#if defined(_OPENMP)
-#pragma omp parallel
         {
-            const int tid = omp_get_thread_num();
-            KetWork work(nword_, ints_.norb());
-            std::vector<double> targets;
+            std::lock_guard<std::mutex> lock(row_cache_mutex_);
 
-#pragma omp for schedule(guided)
-            for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
-                process_one(
-                    static_cast<std::size_t>(ii),
-                    work,
-                    targets,
-                    local[static_cast<std::size_t>(tid)]
+            for (std::size_t row = 0; row < kets.n_dets; ++row) {
+                hit[row] = row_cache_.find(
+                    kets[row],
+                    eps2,
+                    eps1,
+                    out.weight_mut()[row],
+                    nconn[row]
                 );
             }
         }
-#else
-        {
-            KetWork work(nword_, ints_.norb());
-            std::vector<double> targets;
 
-            for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-                process_one(iket, work, targets, local[0]);
+        struct Record {
+            i32 col = 0;
+            double h = 0.0;
+            i64 count = 0;
+        };
+
+        detail_ham::DetPool pool(kets);
+        std::vector<std::vector<Record>> rows(n_streams * kets.n_dets);
+        KetWork work(nword_, ints_.norb());
+        std::vector<std::vector<double>> targets(n_streams);
+        std::vector<std::size_t> pos(n_streams, 0);
+        std::vector<i64> pending(n_streams, 0);
+
+        for (std::size_t row = 0; row < kets.n_dets; ++row) {
+            const EdgeWindow win = edge_window(eps2, eps1, 1.0);
+
+            if (!hit[row]) {
+                scan(
+                    ints_,
+                    screen_ptr.get(),
+                    kets[row],
+                    work,
+                    win,
+                    [&](double h) {
+                        out.weight_mut()[row] += std::abs(h);
+                        ++nconn[row];
+                        return EmitRequest{};
+                    },
+                    [](DetRef, double, EmitRequest) {}
+                );
             }
-        }
-#endif
 
-        std::vector<detail_ham::ConnSampleRec> records;
-        std::vector<u64> record_words;
+            if (!(out.weight()[row] > 0.0)) continue;
 
-        std::size_t nrec = 0;
-        std::size_t nwords = 0;
-
-        for (const auto& part : local) {
-            nrec += part.recs.size();
-            nwords += part.words.size();
-        }
-
-        records.reserve(nrec);
-        record_words.reserve(nwords);
-
-        for (auto& part : local) {
-            const std::size_t offset = record_words.size() / det_size(nword_);
-
-            record_words.insert(record_words.end(), part.words.begin(), part.words.end());
-
-            for (auto rec : part.recs) {
-                rec.ibra += offset;
-                records.push_back(rec);
+            bool any = false;
+            for (std::size_t stream = 0; stream < n_streams; ++stream) {
+                SmallRng rng(sample_seed(
+                    seed,
+                    kets[row],
+                    static_cast<i64>(stream)
+                ));
+                make_targets(
+                    rng,
+                    counts[stream * kets.n_dets + row],
+                    out.weight()[row],
+                    targets[stream]
+                );
+                pos[stream] = 0;
+                any = any || !targets[stream].empty();
             }
-        }
+            if (!any) continue;
 
-        std::sort(records.begin(), records.end(), [&](const auto& x, const auto& y) {
-            if (x.iket != y.iket) return x.iket < y.iket;
-
-            return DetLess{}(
-                det_at(record_words, nword_, x.ibra),
-                det_at(record_words, nword_, y.ibra)
+            double cdf = 0.0;
+            scan(
+                ints_,
+                screen_ptr.get(),
+                kets[row],
+                work,
+                win,
+                [&](double h) {
+                    cdf += std::abs(h);
+                    i64 total = 0;
+                    for (std::size_t stream = 0; stream < n_streams; ++stream) {
+                        pending[stream] = 0;
+                        while (
+                            pos[stream] < targets[stream].size()
+                            && targets[stream][pos[stream]] <= cdf
+                        ) {
+                            ++pending[stream];
+                            ++pos[stream];
+                        }
+                        total += pending[stream];
+                    }
+                    return EmitRequest{false, total};
+                },
+                [&](DetRef bra, double h, EmitRequest) {
+                    const i32 col = pool.find_or_add(bra);
+                    for (std::size_t stream = 0; stream < n_streams; ++stream) {
+                        if (pending[stream] > 0) {
+                            rows[stream * kets.n_dets + row].push_back(
+                                Record{col, h, pending[stream]}
+                            );
+                        }
+                    }
+                }
             );
-        });
-
-        for (const auto& rec : records) {
-            out.ket_mut().push_back(rec.iket);
-            append_det(out.bra_words_mut(), det_at(record_words, nword_, rec.ibra));
-            out.h_mut().push_back(rec.h);
-            out.pgen_mut().push_back(rec.pgen);
-            out.counts_mut().push_back(rec.count);
         }
+
+        {
+            std::lock_guard<std::mutex> lock(row_cache_mutex_);
+
+            for (std::size_t row = 0; row < kets.n_dets; ++row) {
+                if (!hit[row]) {
+                    row_cache_.insert(
+                        kets[row],
+                        eps2,
+                        eps1,
+                        out.weight()[row],
+                        nconn[row]
+                    );
+                }
+            }
+        }
+
+        out.ptr_mut().assign(1, 0);
+        for (const auto& row : rows) {
+            for (const Record& rec : row) {
+                out.col_mut().push_back(rec.col);
+                out.h_mut().push_back(rec.h);
+                out.count_mut().push_back(rec.count);
+            }
+            out.ptr_mut().push_back(to_i32(out.col().size()));
+        }
+        out.det_words_mut() = std::move(pool.words());
 
         return out;
     }
@@ -1425,10 +1632,19 @@ private:
             const EdgeWindow win = edge_window(eps2, eps1, scale);
             double weight = 0.0;
 
-            scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
-                if (exclude_index.find(bra) >= 0) return;
-                weight += std::abs(h);
-            });
+            scan(
+                ints_,
+                screen_ptr.get(),
+                kets[iket],
+                work,
+                win,
+                [](double) { return EmitRequest{true, 0}; },
+                [&](DetRef bra, double h, EmitRequest) {
+                    if (exclude_index.find(bra) < 0) {
+                        weight += std::abs(h);
+                    }
+                }
+            );
 
             if (!(weight > 0.0)) return;
 
@@ -1442,34 +1658,46 @@ private:
                     std::size_t target_pos = 0;
                     double cdf = 0.0;
 
-                    scan_conns(ints_, screen_ptr.get(), kets[iket], work, win, [&](DetRef bra, double h) {
-                        if (exclude_index.find(bra) >= 0) return;
+                    scan(
+                        ints_,
+                        screen_ptr.get(),
+                        kets[iket],
+                        work,
+                        win,
+                        [](double) { return EmitRequest{true, 0}; },
+                        [&](DetRef bra, double h, EmitRequest) {
+                            if (exclude_index.find(bra) >= 0) return;
 
-                        const double abs_h = std::abs(h);
-                        cdf += abs_h;
+                            const double abs_h = std::abs(h);
+                            cdf += abs_h;
 
-                        i64 hit = 0;
+                            i64 hit = 0;
+                            while (
+                                target_pos < targets.size()
+                                && targets[target_pos] <= cdf
+                            ) {
+                                ++hit;
+                                ++target_pos;
+                            }
+                            if (hit <= 0) return;
 
-                        while (target_pos < targets.size() && targets[target_pos] <= cdf) {
-                            ++hit;
-                            ++target_pos;
+                            const double delta =
+                                static_cast<double>(hit)
+                                * coeff * h * weight
+                                / (static_cast<double>(n_draw) * abs_h);
+
+                            detail_ham::SampleRec rec;
+                            rec.rep = static_cast<i32>(rep);
+                            rec.ibra = append_det_index(
+                                part.words,
+                                nword_,
+                                bra
+                            );
+                            if (stream == 0) rec.hpsi_a = delta;
+                            else rec.hpsi_b = delta;
+                            part.recs.push_back(rec);
                         }
-
-                        if (hit <= 0) return;
-
-                        const double delta =
-                            static_cast<double>(hit) * coeff * h * weight
-                            / (static_cast<double>(n_draw) * abs_h);
-
-                        detail_ham::SampleRec rec;
-                        rec.rep = static_cast<i32>(rep);
-                        rec.ibra = append_det_index(part.words, nword_, bra);
-
-                        if (stream == 0) rec.hpsi_a = delta;
-                        else rec.hpsi_b = delta;
-
-                        part.recs.push_back(rec);
-                    });
+                    );
                 }
             }
         };

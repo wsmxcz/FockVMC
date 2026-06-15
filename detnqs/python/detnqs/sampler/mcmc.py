@@ -11,8 +11,6 @@ import numpy as np
 
 from .. import utils
 from ..utils import precision
-from .proposal import propose
-from .proposal import unique_dets
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +159,12 @@ class MCSampler:
         # Burn-in advances the same physical chains used by later measurements.
         # A modest default avoids making initialization dominate large systems.
         for _ in range(max(0, int(self.thermal_steps))):
-            state, _, _, _ = self._move(theta, hamiltonian, model, state)
+            state, _, _, _ = self._step(
+                theta,
+                hamiltonian,
+                model,
+                state,
+            )
 
         return state
 
@@ -201,16 +204,16 @@ class MCSampler:
         n_conn_blur = 0
 
         for _ in range(max(0, int(self.discard_steps))):
-            state, acc, prop, n_conn = self._move(
+            state, _, _, info = self._step(
                 theta,
                 hamiltonian,
                 model,
                 state,
                 timer=timer,
             )
-            accepted += acc
-            proposed += prop
-            n_conn_proposal += n_conn
+            accepted += info["accepted"]
+            proposed += info["proposed"]
+            n_conn_proposal += info["proposal_conn"]
 
         det_parts: list[np.ndarray] = []
         mass_parts: list[np.ndarray] = []
@@ -220,42 +223,32 @@ class MCSampler:
         while remaining > 0:
             take = min(int(self.n_chains), remaining)
 
-            if take == int(self.n_chains):
-                base_dets = state.dets
-            else:
-                with timer("sample"):
-                    key, subkey = jax.random.split(state.key)
-                    seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
-                    rng = np.random.default_rng(seed)
-                    index = rng.choice(
-                        int(self.n_chains),
-                        size=take,
-                        replace=False,
-                    )
-                    base_dets = np.ascontiguousarray(state.dets[index])
-                    state = replace(state, key=key)
-
-            state, observed, mass, n_conn = self._observe(
+            state, dets, mass, info = self._step(
+                theta,
                 hamiltonian,
+                model,
                 state,
-                base_dets,
+                n_observe=take,
                 timer=timer,
             )
-            det_parts.append(observed)
+            det_parts.append(dets)
             mass_parts.append(mass)
-            n_conn_blur += n_conn
+            accepted += info["accepted"]
+            proposed += info["proposed"]
+            n_conn_proposal += info["proposal_conn"]
+            n_conn_blur += info["blur_conn"]
 
-            for _ in range(sweep_steps):
-                state, acc, prop, n_conn = self._move(
+            for _ in range(sweep_steps - 1):
+                state, _, _, info = self._step(
                     theta,
                     hamiltonian,
                     model,
                     state,
                     timer=timer,
                 )
-                accepted += acc
-                proposed += prop
-                n_conn_proposal += n_conn
+                accepted += info["accepted"]
+                proposed += info["proposed"]
+                n_conn_proposal += info["proposal_conn"]
 
             remaining -= take
 
@@ -278,16 +271,17 @@ class MCSampler:
             stats,
         )
 
-    def _move(
+    def _step(
         self,
         theta: Any,
         hamiltonian: Any,
         model: Any,
         state: Walkers,
         *,
+        n_observe: int = 0,
         timer: utils.Timer | None = None,
-    ) -> tuple[Walkers, int, int, int]:
-        """Advance every walker by one Metropolis-Hastings step.
+    ) -> tuple[Walkers, np.ndarray, np.ndarray, dict[str, int]]:
+        """Observe selected walkers, then advance every chain by one step.
 
         log A(x -> y) =
             alpha [log|psi(y)| - log|psi(x)|]
@@ -295,190 +289,402 @@ class MCSampler:
         """
         timer = utils.Timer() if timer is None else timer
         rdtype = precision.dtype("calc", "real", host=True)
+        n_walker = int(state.dets.shape[0])
+        n_observe = int(n_observe)
+        if n_observe < 0 or n_observe > n_walker:
+            raise ValueError("n_observe must be between zero and n_chains")
+
+        beta = float(np.clip(self.blur, 0.0, 1.0))
+        eps = float(self.proposal_eps)
+        blur_eps = float(
+            eps if self.blur_eps is None else self.blur_eps
+        )
 
         with timer("sample"):
-            key, proposal_key, accept_key = jax.random.split(state.key, 3)
-            proposal_seed = int(
-                jax.random.bits(proposal_key, (), dtype=jnp.uint32)
-            )
-            accept_seed = int(
-                jax.random.bits(accept_key, (), dtype=jnp.uint32)
-            )
+            key, random_key = jax.random.split(state.key)
+            seed = int(jax.random.bits(random_key, (), dtype=jnp.uint32))
+            rng = np.random.default_rng(seed)
+            if n_observe == n_walker:
+                observe_rows = np.arange(n_walker, dtype=np.int64)
+            else:
+                observe_rows = rng.choice(
+                    n_walker,
+                    size=n_observe,
+                    replace=False,
+                )
+            observed = np.ascontiguousarray(state.dets[observe_rows])
+            mass = np.ones(n_observe, dtype=rdtype)
 
-        with timer("graph"):
-            dets_y, log_qratio, active, n_conn = propose(
-                self.proposal,
-                hamiltonian,
-                state.dets,
-                seed=proposal_seed,
-                eps=float(self.proposal_eps),
-            )
-
-        proposed = int(np.count_nonzero(active))
-        if proposed == 0:
-            return replace(state, key=key), 0, 0, int(n_conn)
-
-        logabs_y = np.empty(state.dets.shape[0], dtype=rdtype)
-        logabs_y[~active] = state.logabs[~active]
-
-        active_dets = np.ascontiguousarray(dets_y[active])
-        unique_y, _, inv_y = unique_dets(active_dets)
-
-        # The model sees only new unique proposals. Current amplitudes are cached.
-        _, first, lookup = unique_dets(
-            np.concatenate([state.dets, unique_y], axis=0)
+        shared = (
+            n_observe > 0
+            and beta > 0.0
+            and self.proposal == "ham"
+            and blur_eps == eps
         )
-        y_first = first[lookup[state.dets.shape[0] :]]
-        known = y_first < state.dets.shape[0]
-        unique_logabs = np.empty(unique_y.shape[0], dtype=rdtype)
+        proposal_conn = 0
+        blur_conn = 0
 
-        if known.any():
-            unique_logabs[known] = state.logabs[y_first[known]]
+        if self.proposal == "single":
+            with timer("sample"):
+                trial, log_q, active = self._single_proposal(
+                    hamiltonian,
+                    state.dets,
+                    rng,
+                )
+        elif self.proposal == "ham":
+            with timer("sample"):
+                kets, _, ket_index = libdet.unique_dets(state.dets)
+                counts = np.bincount(
+                    ket_index,
+                    minlength=kets.shape[0],
+                ).astype(np.int64)
 
-        if (~known).any():
-            with timer("forward"):
-                unique_logabs[~known] = self._eval_logabs(
-                    theta,
-                    model,
-                    np.ascontiguousarray(unique_y[~known]),
+                if shared:
+                    obs_index = ket_index[observe_rows]
+                    blur = rng.random(n_observe) < beta
+                    blur_counts = np.bincount(
+                        obs_index[blur],
+                        minlength=kets.shape[0],
+                    ).astype(np.int64)
+                    counts = np.stack((counts, blur_counts))
+
+            with timer("graph"):
+                sample = hamiltonian.sample_conns(
+                    kets,
+                    np.ascontiguousarray(counts),
+                    eps1=np.inf,
+                    eps2=eps,
+                    seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
+                )
+                proposal_conn = int(np.asarray(sample.h).size)
+
+            with timer("sample"):
+                trial, active = self._draw_conns(
+                    state.dets,
+                    ket_index,
+                    np.ones(n_walker, dtype=bool),
+                    sample,
+                    stream=0,
+                    rng=rng,
                 )
 
-        logabs_y[active] = unique_logabs[inv_y]
+                if shared:
+                    observed, _ = self._draw_conns(
+                        observed,
+                        obs_index,
+                        blur,
+                        sample,
+                        stream=1,
+                        rng=rng,
+                    )
+                    weight = precision.asarray(
+                        np.asarray(sample.weight),
+                        "calc",
+                        "real",
+                        host=True,
+                    )
+                    mass = np.where(
+                        weight[obs_index] > 0.0,
+                        weight[obs_index],
+                        rdtype(1.0),
+                    )
 
-        with timer("sample"):
-            log_ratio = (
-                rdtype(state.alpha) * (logabs_y - state.logabs)
-                + precision.asarray(log_qratio, "calc", "real", host=True)
-            )
+            with timer("graph"):
+                log_q = self._ham_log_ratio(
+                    hamiltonian,
+                    kets,
+                    ket_index,
+                    trial,
+                    active,
+                    sample,
+                    eps,
+                )
+        else:
+            raise ValueError("proposal must be 'ham' or 'single'")
 
-            rng = np.random.default_rng(accept_seed)
-            log_uniform = np.log(rng.random(state.dets.shape[0]))
-            accept = active & (log_uniform < np.minimum(rdtype(0.0), log_ratio))
+        if n_observe > 0 and beta > 0.0 and not shared:
+            with timer("sample"):
+                if self.proposal == "single":
+                    blur_kets, _, obs_index = libdet.unique_dets(observed)
+                else:
+                    blur_kets = kets
+                    obs_index = ket_index[observe_rows]
 
-            det_mask = accept.reshape((-1, 1, 1))
-            next_dets = np.where(det_mask, dets_y, state.dets)
-            next_logabs = np.where(accept, logabs_y, state.logabs)
+                blur = rng.random(n_observe) < beta
+                counts = np.bincount(
+                    obs_index[blur],
+                    minlength=blur_kets.shape[0],
+                ).astype(np.int64)
 
-        return (
-            replace(
-                state,
-                key=key,
-                dets=np.ascontiguousarray(next_dets),
-                logabs=precision.asarray(
-                    next_logabs,
+            with timer("graph"):
+                sample = hamiltonian.sample_conns(
+                    blur_kets,
+                    np.ascontiguousarray(counts),
+                    eps1=np.inf,
+                    eps2=blur_eps,
+                    seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
+                )
+                blur_conn = int(np.asarray(sample.h).size)
+
+            with timer("sample"):
+                observed, _ = self._draw_conns(
+                    observed,
+                    obs_index,
+                    blur,
+                    sample,
+                    stream=0,
+                    rng=rng,
+                )
+                weight = precision.asarray(
+                    np.asarray(sample.weight),
                     "calc",
                     "real",
                     host=True,
-                ),
+                )
+                mass = np.where(
+                    weight[obs_index] > 0.0,
+                    weight[obs_index],
+                    rdtype(1.0),
+                )
+
+        proposed = int(np.count_nonzero(active))
+        accepted = 0
+        next_state = replace(state, key=key)
+
+        if proposed:
+            logabs_y = np.empty(n_walker, dtype=rdtype)
+            logabs_y[~active] = state.logabs[~active]
+            unique_y, _, inverse_y = libdet.unique_dets(trial[active])
+
+            # Reuse cached amplitudes when a proposal is a current walker.
+            _, first, lookup = libdet.unique_dets(
+                np.concatenate([state.dets, unique_y], axis=0)
+            )
+            first_y = first[lookup[n_walker:]]
+            known = first_y < n_walker
+            unique_logabs = np.empty(unique_y.shape[0], dtype=rdtype)
+
+            if known.any():
+                unique_logabs[known] = state.logabs[first_y[known]]
+
+            if (~known).any():
+                with timer("forward"):
+                    unique_logabs[~known] = self._eval_logabs(
+                        theta,
+                        model,
+                        np.ascontiguousarray(unique_y[~known]),
+                    )
+
+            logabs_y[active] = unique_logabs[inverse_y]
+
+            with timer("sample"):
+                log_accept = (
+                    rdtype(state.alpha) * (logabs_y - state.logabs)
+                    + precision.asarray(log_q, "calc", "real", host=True)
+                )
+                accept = active & (
+                    np.log(rng.random(n_walker))
+                    < np.minimum(rdtype(0.0), log_accept)
+                )
+                accepted = int(np.count_nonzero(accept))
+                next_state = replace(
+                    state,
+                    key=key,
+                    dets=np.ascontiguousarray(
+                        np.where(
+                            accept.reshape((-1, 1, 1)),
+                            trial,
+                            state.dets,
+                        )
+                    ),
+                    logabs=precision.asarray(
+                        np.where(accept, logabs_y, state.logabs),
+                        "calc",
+                        "real",
+                        host=True,
+                    ),
+                )
+
+        return (
+            next_state,
+            observed,
+            precision.asarray(
+                mass,
+                "calc",
+                "real",
+                host=True,
             ),
-            int(np.count_nonzero(accept)),
-            proposed,
-            int(n_conn),
+            {
+                "accepted": accepted,
+                "proposed": proposed,
+                "proposal_conn": proposal_conn,
+                "blur_conn": blur_conn,
+            },
         )
 
-    def _observe(
-        self,
-        hamiltonian: Any,
-        state: Walkers,
-        base_dets: np.ndarray,
+    @staticmethod
+    def _draw_conns(
+        dets: np.ndarray,
+        index: np.ndarray,
+        selected: np.ndarray,
+        sample: Any,
         *,
-        timer: utils.Timer | None = None,
-    ) -> tuple[Walkers, np.ndarray, np.ndarray, int]:
-        """Apply the Hamiltonian blur independently to every observation.
+        stream: int,
+        rng: np.random.Generator,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Assign sampled connections to selected determinant rows."""
+        out = np.ascontiguousarray(dets.copy())
+        changed = np.zeros(dets.shape[0], dtype=bool)
+        n_ket = int(sample.n_kets)
+        ptr = np.asarray(sample.ptr, dtype=np.int64)
+        col = np.asarray(sample.col, dtype=np.int64)
+        count = np.asarray(sample.count, dtype=np.int64)
+        pool = np.asarray(sample.dets, dtype=np.uint64)
 
-        B(y|x) = (1-beta) delta_xy + beta |H_yx| / d_B(x).
+        for i in np.unique(index[selected]):
+            block = int(stream) * n_ket + int(i)
+            records = np.arange(ptr[block], ptr[block + 1])
+            if records.size == 0:
+                continue
+            draw = np.repeat(records, count[records])
+            rows = np.flatnonzero(selected & (index == i))
+            if draw.size != rows.size:
+                raise RuntimeError(
+                    "libdet returned an inconsistent sample count"
+                )
 
-        Each observation carries source mass d_B(x); an empty Hamiltonian row
-        falls back to the identity kernel with unit mass.
-        """
-        timer = utils.Timer() if timer is None else timer
+            rng.shuffle(draw)
+            out[rows] = pool[col[draw]]
+            changed[rows] = True
+
+        return out, changed
+
+    @staticmethod
+    def _ham_log_ratio(
+        hamiltonian: Any,
+        kets: np.ndarray,
+        ket_index: np.ndarray,
+        trial: np.ndarray,
+        active: np.ndarray,
+        sample: Any,
+        eps: float,
+    ) -> np.ndarray:
+        """Return the heat-bath Hastings correction."""
         rdtype = precision.dtype("calc", "real", host=True)
-        beta = float(np.clip(self.blur, 0.0, 1.0))
+        tiny = rdtype(precision.tiny("calc"))
+        log_q = np.zeros(trial.shape[0], dtype=rdtype)
 
-        if beta <= 0.0:
-            return (
-                state,
-                np.ascontiguousarray(base_dets),
-                np.ones(base_dets.shape[0], dtype=rdtype),
-                0,
-            )
+        if not active.any():
+            return log_q
 
-        with timer("sample"):
-            key, choice_key, conn_key = jax.random.split(state.key, 3)
-            choice_seed = int(
-                jax.random.bits(choice_key, (), dtype=jnp.uint32)
-            )
-            conn_seed = int(
-                jax.random.bits(conn_key, (), dtype=jnp.uint32)
-            )
-            rng = np.random.default_rng(choice_seed)
-            move = rng.random(base_dets.shape[0]) < beta
-
-            kets, _, walker_to_ket = unique_dets(base_dets)
-            counts = np.bincount(
-                walker_to_ket[move],
-                minlength=kets.shape[0],
-            ).astype(np.int64)
-
-        blur_eps = float(
-            self.proposal_eps if self.blur_eps is None else self.blur_eps
+        source_weight = precision.asarray(
+            np.asarray(sample.weight),
+            "calc",
+            "real",
+            host=True,
         )
+        bras, _, bra_index = libdet.unique_dets(trial[active])
+        bra_weight = np.empty(bras.shape[0], dtype=rdtype)
 
-        with timer("graph"):
-            sample = hamiltonian.sample_conns(
-                kets,
-                counts,
-                eps1=np.inf,
-                eps2=blur_eps,
-                seed=conn_seed,
+        # Current rows already have their degree from the proposal scan.
+        _, first, lookup = libdet.unique_dets(
+            np.concatenate([kets, bras], axis=0)
+        )
+        bra_first = first[lookup[kets.shape[0] :]]
+        known = bra_first < kets.shape[0]
+        if known.any():
+            bra_weight[known] = source_weight[bra_first[known]]
+
+        if (~known).any():
+            weight, _ = hamiltonian.degrees(
+                np.ascontiguousarray(bras[~known]),
+                eps,
             )
-
-        with timer("sample"):
-            ket_weight = precision.asarray(
-                np.asarray(sample.ket_weight),
+            bra_weight[~known] = precision.asarray(
+                weight,
                 "calc",
                 "real",
                 host=True,
             )
-            source_mass = np.where(
-                ket_weight[walker_to_ket] > 0.0,
-                ket_weight[walker_to_ket],
-                rdtype(1.0),
-            )
 
-            observed = np.ascontiguousarray(base_dets.copy())
-            sampled_ket = np.asarray(sample.ket, dtype=np.int64)
-            sampled_count = np.asarray(sample.counts, dtype=np.int64)
-            sampled_bras = np.ascontiguousarray(
-                np.asarray(sample.bras, dtype=np.uint64)
-            )
-
-            assign_rng = np.random.default_rng(conn_seed ^ 0x85EBCA6B)
-
-            for iket in np.unique(sampled_ket):
-                records = np.flatnonzero(sampled_ket == iket)
-                draw = np.repeat(records, sampled_count[records])
-                walkers = np.flatnonzero(move & (walker_to_ket == iket))
-
-                if draw.size != walkers.size:
-                    raise RuntimeError("libdet returned an inconsistent blur count")
-
-                assign_rng.shuffle(draw)
-                observed[walkers] = sampled_bras[draw]
-
-            n_conn = int(np.asarray(sample.ket_nconn, dtype=np.int64).sum())
-
-        return (
-            replace(state, key=key),
-            observed,
-            precision.asarray(source_mass, "calc", "real", host=True),
-            n_conn,
+        source = source_weight[ket_index[active]]
+        target = bra_weight[bra_index]
+        log_q[active] = (
+            np.log(np.maximum(source, tiny))
+            - np.log(np.maximum(target, tiny))
         )
+        return log_q
+
+    @staticmethod
+    def _single_proposal(
+        hamiltonian: Any,
+        dets: np.ndarray,
+        rng: np.random.Generator,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Draw a uniform single excitation in a fixed number sector."""
+        n_walker = int(dets.shape[0])
+        rdtype = precision.dtype("calc", "real", host=True)
+
+        trial = np.ascontiguousarray(dets.copy())
+        log_q = np.zeros(n_walker, dtype=rdtype)
+        active = np.zeros(n_walker, dtype=bool)
+        if n_walker == 0:
+            return trial, log_q, active
+
+        norb = int(hamiltonian.norb)
+        orbitals = np.arange(norb, dtype=np.int64)
+        word = orbitals >> 6
+        bit = (orbitals & 63).astype(np.uint64)
+        occ = ((dets[:, :, word] >> bit) & np.uint64(1)).astype(bool)
+        n_occ = occ.sum(axis=2)
+
+        if not np.all(n_occ == n_occ[0]):
+            raise ValueError(
+                "single proposal requires a fixed particle-number sector"
+            )
+
+        n_alpha = int(n_occ[0, 0])
+        n_beta = int(n_occ[0, 1])
+        n_move_a = n_alpha * (norb - n_alpha)
+        n_move_b = n_beta * (norb - n_beta)
+        n_move = n_move_a + n_move_b
+        if n_move <= 0:
+            return trial, log_q, active
+
+        move = rng.integers(n_move, size=n_walker, dtype=np.int64)
+        spin = np.where(move < n_move_a, 0, 1).astype(np.int64)
+        move_spin = np.where(spin == 0, move, move - n_move_a)
+        n_vir = np.where(spin == 0, norb - n_alpha, norb - n_beta)
+        occ_rank = move_spin // n_vir
+        vir_rank = move_spin % n_vir
+
+        walker_occ = occ[np.arange(n_walker), spin]
+        walker_vir = ~walker_occ
+        occ_pos = np.cumsum(walker_occ, axis=1) - 1
+        vir_pos = np.cumsum(walker_vir, axis=1) - 1
+        occ_orb = np.argmax(
+            walker_occ & (occ_pos == occ_rank[:, None]),
+            axis=1,
+        ).astype(np.int64)
+        vir_orb = np.argmax(
+            walker_vir & (vir_pos == vir_rank[:, None]),
+            axis=1,
+        ).astype(np.int64)
+
+        row = np.arange(n_walker, dtype=np.int64)
+        occ_word = occ_orb >> 6
+        occ_bit = (occ_orb & 63).astype(np.uint64)
+        vir_word = vir_orb >> 6
+        vir_bit = (vir_orb & 63).astype(np.uint64)
+        trial[row, spin, occ_word] &= ~(np.uint64(1) << occ_bit)
+        trial[row, spin, vir_word] |= np.uint64(1) << vir_bit
+        active[:] = True
+        return trial, log_q, active
 
     @staticmethod
     def _eval_logabs(theta: Any, model: Any, dets: np.ndarray) -> np.ndarray:
         """Evaluate each distinct determinant once and scatter to walkers."""
-        unique, _, inv = unique_dets(dets)
+        unique, _, inv = libdet.unique_dets(dets)
         value = utils.apply(model.logabs, theta, unique)
         jax.block_until_ready(value)
 

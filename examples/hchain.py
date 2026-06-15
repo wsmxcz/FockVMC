@@ -26,7 +26,7 @@ jax.config.update("jax_log_compiles", False)
 
 
 mol = gto.M(
-    atom="; ".join(f"H 0 0 {i * 2.00}" for i in range(10)),
+    atom="; ".join(f"H 0 0 {i * 2.00}" for i in range(16)),
     basis="sto-6g",
     unit="Angstrom",
     verbose=0,
@@ -57,14 +57,17 @@ ref_mat = np.zeros((n_alpha + n_beta, 2 * norb), dtype=np.float64)
 ref_mat[:n_alpha, :norb] = mo_oao[:, :n_alpha].T
 ref_mat[n_alpha:, norb:] = mo_oao[:, :n_beta].T
 
-solver = fci.direct_spin0.FCI(mol)
-e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
-s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
+# solver = fci.direct_spin0.FCI(mol)
+# e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
+# s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
 
-print(f"SCF energy : {mf.e_tot:.12f}")
-print(f"FCI energy : {e_fci:.12f}")
-print(f"S^2        : {s2:.6f}")
+# print(f"SCF energy : {mf.e_tot:.12f}")
+# print(f"FCI energy : {e_fci:.12f}")
+# print(f"S^2        : {s2:.6f}")
 
+e_fci = -7.66653 # H16_2.00A
+# e_fci = -14.46061 # H30_3.60Bohr
+# e_fci = -24.10276	# H50_3.60Bohr
 
 model = RBackflow(
     norb=norb,
@@ -75,9 +78,9 @@ model = RBackflow(
 )
 
 sampler = MCSampler(
-    n_samples=1024,
-    n_chains=1024,
-    thermal_steps=1024,
+    n_samples=4096,
+    n_chains=4096,
+    thermal_steps=4096,
     proposal="ham",
     blur=0.5,
 )
@@ -109,7 +112,6 @@ metrics = {
     "n_unique": ("N_u", ".0f", 7),
     "n_eval": ("N_f", ".0f", 7),
     "alpha": ("alpha", ".3f", 7),
-    "sr_cond": ("SR cond", ".2e", 10),
 }
 
 line = run_utils.print_metrics(metrics)

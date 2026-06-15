@@ -317,7 +317,6 @@ class MCState(VState):
             "ess_frac": float(ess / max(1, n_sample)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),
-            "unique_frac": float(n_ket / max(1, n_sample)),
             "n_eval": float(pool.shape[0]),
             "n_conn_eloc": float(np.asarray(conns.h).size),
             "n_conn_weak": float(np.asarray(conns.sample_h).size),

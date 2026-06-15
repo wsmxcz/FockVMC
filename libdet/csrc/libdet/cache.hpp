@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <limits>
+#include <list>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <libdet/bras.hpp>
@@ -59,7 +60,9 @@ public:
     explicit KetCache(u32 nword = 0)
         : nword_(nword),
           words_(capacity * det_size(nword), 0u),
-          entries_(capacity) {}
+          entries_(capacity) {
+        index_.reserve(capacity);
+    }
 
     [[nodiscard]] std::shared_ptr<const KetConns> find(
         DetRef ket,
@@ -71,7 +74,7 @@ public:
         Entry& entry = entries_[slot];
         if (entry.conns->cutoff > eps) return {};
 
-        entry.stamp = ++clock_;
+        touch(slot);
         return entry.conns;
     }
 
@@ -81,17 +84,41 @@ public:
         }
 
         const std::size_t old = find_slot(ket);
+        const u64 fingerprint = det_fingerprint(ket);
+
+        const auto collision = index_.find(fingerprint);
+        if (
+            old == npos
+            && collision != index_.end()
+            && !det_equal(ket_at(collision->second), ket)
+        ) {
+            return;
+        }
 
         if (
             old != npos
             && entries_[old].conns
             && entries_[old].conns->cutoff <= conns->cutoff
         ) {
-            entries_[old].stamp = ++clock_;
+            touch(old);
             return;
         }
 
-        const std::size_t slot = old == npos ? victim_slot() : old;
+        std::size_t slot = old;
+        if (old == npos) {
+            if (size_ < capacity) {
+                slot = size_++;
+                lru_.push_front(slot);
+                entries_[slot].position = lru_.begin();
+            } else {
+                slot = lru_.back();
+                erase_index(slot);
+                touch(slot);
+            }
+        } else {
+            touch(slot);
+        }
+
         const std::size_t stride = det_size(nword_);
         u64* dst = words_.data() + slot * stride;
 
@@ -99,7 +126,10 @@ public:
         std::copy(ket.beta().begin(), ket.beta().end(), dst + nword_);
 
         entries_[slot].conns = std::move(conns);
-        entries_[slot].stamp = ++clock_;
+        entries_[slot].fingerprint = fingerprint;
+        if (old == npos) {
+            index_.emplace(fingerprint, slot);
+        }
     }
 
 private:
@@ -107,14 +137,16 @@ private:
 
     struct Entry {
         std::shared_ptr<const KetConns> conns;
-        u64 stamp = 0;
+        u64 fingerprint = 0;
+        std::list<std::size_t>::iterator position;
     };
 
     u32 nword_ = 0;
     std::vector<u64> words_;
     std::vector<Entry> entries_;
+    std::unordered_map<u64, std::size_t> index_;
+    std::list<std::size_t> lru_;
     std::size_t size_ = 0;
-    u64 clock_ = 0;
 
     [[nodiscard]] DetRef ket_at(std::size_t slot) const noexcept {
         const std::size_t stride = det_size(nword_);
@@ -125,27 +157,22 @@ private:
     [[nodiscard]] std::size_t find_slot(DetRef ket) const noexcept {
         if (nword_ == 0 || ket.nword() != nword_) return npos;
 
-        for (std::size_t slot = 0; slot < size_; ++slot) {
-            if (det_equal(ket_at(slot), ket)) return slot;
-        }
+        const u64 fingerprint = det_fingerprint(ket);
+        const auto it = index_.find(fingerprint);
+        if (it == index_.end()) return npos;
 
-        return npos;
+        const std::size_t slot = it->second;
+        return det_equal(ket_at(slot), ket) ? slot : npos;
     }
 
-    [[nodiscard]] std::size_t victim_slot() noexcept {
-        if (size_ < capacity) return size_++;
+    void erase_index(std::size_t slot) {
+        const u64 fingerprint = entries_[slot].fingerprint;
+        const auto it = index_.find(fingerprint);
+        if (it != index_.end() && it->second == slot) index_.erase(it);
+    }
 
-        std::size_t victim = 0;
-        u64 oldest = std::numeric_limits<u64>::max();
-
-        for (std::size_t slot = 0; slot < size_; ++slot) {
-            if (entries_[slot].stamp < oldest) {
-                oldest = entries_[slot].stamp;
-                victim = slot;
-            }
-        }
-
-        return victim;
+    void touch(std::size_t slot) {
+        lru_.splice(lru_.begin(), lru_, entries_[slot].position);
     }
 };
 

@@ -91,6 +91,7 @@ state = MCState.init(
     n_beta=n_beta,
     init_method="hf",
     key=jax.random.key(0),
+    eloc_sample=1024
 )
 
 optimizer = optax.chain(

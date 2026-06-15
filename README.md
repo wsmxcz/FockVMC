@@ -1,24 +1,66 @@
-# DetNQS: An Efficient Framework for Neural Network Quantum States in Quantum Chemistry
+# DetNQS
 
-[![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://isocpp.org/std/the-standard)
-[![Python](https://img.shields.io/badge/Python-3.13%2B-EE4C2C.svg)](https://www.python.org/)
-[![JAX](https://img.shields.io/badge/JAX-0.8%2B-EE4C2C.svg)](https://docs.jax.dev/)
+DetNQS is a compact experimental framework for determinant-space neural
+quantum states in quantum chemistry. It combines JAX variational models with
+an OpenMP-parallel C++ determinant Hamiltonian backend.
 
-## Install
+The repository supports three main workflows:
+
+- exact and selected determinant-space optimization;
+- variational Monte Carlo with determinant-valued Markov chains;
+- heat-bath CI and perturbative estimation.
+
+## Structure
+
+- [`detnqs`](detnqs/README.md): models, variational states, samplers,
+  optimizers, and the VMC driver.
+- [`libdet`](libdet/README.md): screened Slater-Condon operations, connections,
+  sampling, sparse matrices, and matrix-vector products.
+- [`examples`](examples): executable research workflows.
+- [`tests`](tests): focused numerical and integration tests.
+
+`detnqs` owns the variational algorithm. `libdet` owns determinant Hamiltonian
+operations. Solver and workflow policy remain outside `libdet`.
+
+## Installation
+
+DetNQS requires Python 3.11 or later and a C++20 compiler.
 
 ```bash
 pip install .
 ```
 
-For editable development:
+For an editable development installation:
 
 ```bash
-pip install -e .
+pip install -e ".[dev]"
+```
+
+This installs both Python packages, `detnqs` and `libdet`.
+
+## Usage
+
+The examples are the primary usage reference:
+
+- `examples/exact.py`: exact-space optimization;
+- `examples/selected.py`: selected-space optimization;
+- `examples/vmc.py`: Monte Carlo optimization;
+- `examples/hci.py`: heat-bath CI and perturbative estimation;
+- `examples/hchain.py`: hydrogen-chain calculations.
+
+Run them from the repository root:
+
+```bash
+python examples/exact.py
+```
+
+Run the test suite with:
+
+```bash
+pytest
 ```
 
 ## Citation
-
-If you find this work useful for your research, or if you use the DetNQS source code in your project, we would appreciate it if you could cite our work:
 
 ```bibtex
 @article{che2026detnqs,
@@ -31,4 +73,4 @@ If you find this work useful for your research, or if you use the DetNQS source 
 
 ## License
 
-This project is licensed under the **Apache 2.0 License**. See the `LICENSE` file for more details.
+Apache License 2.0. See [`LICENSE`](LICENSE).

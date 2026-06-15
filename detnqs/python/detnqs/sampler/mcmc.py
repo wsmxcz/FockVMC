@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import jax
@@ -326,11 +325,77 @@ class MCSampler:
 
         if self.proposal == "single":
             with timer("sample"):
-                trial, log_q, active = self._single_proposal(
-                    hamiltonian,
-                    state.dets,
-                    rng,
-                )
+                trial = np.ascontiguousarray(state.dets.copy())
+                log_q = np.zeros(n_walker, dtype=rdtype)
+                active = np.zeros(n_walker, dtype=bool)
+
+                # Uniform single excitations are symmetric within a fixed sector.
+                norb = int(hamiltonian.norb)
+                if n_walker > 0:
+                    orbitals = np.arange(norb, dtype=np.int64)
+                    word = orbitals >> 6
+                    bit = (orbitals & 63).astype(np.uint64)
+                    occ = (
+                        (state.dets[:, :, word] >> bit) & np.uint64(1)
+                    ).astype(bool)
+                    n_occ = occ.sum(axis=2)
+
+                    if not np.all(n_occ == n_occ[0]):
+                        raise ValueError(
+                            "single proposal requires a fixed particle-number sector"
+                        )
+
+                    n_alpha = int(n_occ[0, 0])
+                    n_beta = int(n_occ[0, 1])
+                    n_move_a = n_alpha * (norb - n_alpha)
+                    n_move_b = n_beta * (norb - n_beta)
+                    n_move = n_move_a + n_move_b
+
+                    if n_move > 0:
+                        move = rng.integers(
+                            n_move,
+                            size=n_walker,
+                            dtype=np.int64,
+                        )
+                        spin = np.where(move < n_move_a, 0, 1).astype(np.int64)
+                        move_spin = np.where(
+                            spin == 0,
+                            move,
+                            move - n_move_a,
+                        )
+                        n_vir = np.where(
+                            spin == 0,
+                            norb - n_alpha,
+                            norb - n_beta,
+                        )
+                        occ_rank = move_spin // n_vir
+                        vir_rank = move_spin % n_vir
+
+                        walker_occ = occ[np.arange(n_walker), spin]
+                        walker_vir = ~walker_occ
+                        occ_pos = np.cumsum(walker_occ, axis=1) - 1
+                        vir_pos = np.cumsum(walker_vir, axis=1) - 1
+                        occ_orb = np.argmax(
+                            walker_occ & (occ_pos == occ_rank[:, None]),
+                            axis=1,
+                        ).astype(np.int64)
+                        vir_orb = np.argmax(
+                            walker_vir & (vir_pos == vir_rank[:, None]),
+                            axis=1,
+                        ).astype(np.int64)
+
+                        walker = np.arange(n_walker, dtype=np.int64)
+                        occ_word = occ_orb >> 6
+                        occ_bit = (occ_orb & 63).astype(np.uint64)
+                        vir_word = vir_orb >> 6
+                        vir_bit = (vir_orb & 63).astype(np.uint64)
+                        trial[walker, spin, occ_word] &= ~(
+                            np.uint64(1) << occ_bit
+                        )
+                        trial[walker, spin, vir_word] |= (
+                            np.uint64(1) << vir_bit
+                        )
+                        active[:] = True
         elif self.proposal == "ham":
             with timer("sample"):
                 kets, _, ket_index = libdet.unique_dets(state.dets)
@@ -348,7 +413,7 @@ class MCSampler:
                     ).astype(np.int64)
                     counts = np.stack((counts, blur_counts))
 
-            with timer("graph"):
+            with timer("conns"):
                 sample = hamiltonian.sample_conns(
                     kets,
                     np.ascontiguousarray(counts),
@@ -389,16 +454,48 @@ class MCSampler:
                         rdtype(1.0),
                     )
 
-            with timer("graph"):
-                log_q = self._ham_log_ratio(
-                    hamiltonian,
-                    kets,
-                    ket_index,
-                    trial,
-                    active,
-                    sample,
-                    eps,
-                )
+            with timer("conns"):
+                log_q = np.zeros(n_walker, dtype=rdtype)
+
+                if active.any():
+                    tiny = rdtype(precision.tiny("calc"))
+                    source_weight = precision.asarray(
+                        np.asarray(sample.weight),
+                        "calc",
+                        "real",
+                        host=True,
+                    )
+                    bras, _, bra_index = libdet.unique_dets(trial[active])
+                    bra_weight = np.empty(bras.shape[0], dtype=rdtype)
+
+                    # Current proposal kets already carry their degree.
+                    _, first, lookup = libdet.unique_dets(
+                        np.concatenate([kets, bras], axis=0)
+                    )
+                    bra_first = first[lookup[kets.shape[0] :]]
+                    known = bra_first < kets.shape[0]
+
+                    if known.any():
+                        bra_weight[known] = source_weight[bra_first[known]]
+
+                    if (~known).any():
+                        weight, _ = hamiltonian.degrees(
+                            np.ascontiguousarray(bras[~known]),
+                            eps,
+                        )
+                        bra_weight[~known] = precision.asarray(
+                            weight,
+                            "calc",
+                            "real",
+                            host=True,
+                        )
+
+                    source = source_weight[ket_index[active]]
+                    target = bra_weight[bra_index]
+                    log_q[active] = (
+                        np.log(np.maximum(source, tiny))
+                        - np.log(np.maximum(target, tiny))
+                    )
         else:
             raise ValueError("proposal must be 'ham' or 'single'")
 
@@ -416,7 +513,7 @@ class MCSampler:
                     minlength=blur_kets.shape[0],
                 ).astype(np.int64)
 
-            with timer("graph"):
+            with timer("conns"):
                 sample = hamiltonian.sample_conns(
                     blur_kets,
                     np.ascontiguousarray(counts),
@@ -532,18 +629,18 @@ class MCSampler:
         stream: int,
         rng: np.random.Generator,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Assign sampled connections to selected determinant rows."""
+        """Assign sampled bra connections to selected kets."""
         out = np.ascontiguousarray(dets.copy())
         changed = np.zeros(dets.shape[0], dtype=bool)
         n_ket = int(sample.n_kets)
-        ptr = np.asarray(sample.ptr, dtype=np.int64)
-        col = np.asarray(sample.col, dtype=np.int64)
+        ket_ptr = np.asarray(sample.ket_ptr, dtype=np.int64)
+        bra_idx = np.asarray(sample.bra_idx, dtype=np.int64)
         count = np.asarray(sample.count, dtype=np.int64)
         pool = np.asarray(sample.dets, dtype=np.uint64)
 
         for i in np.unique(index[selected]):
             block = int(stream) * n_ket + int(i)
-            records = np.arange(ptr[block], ptr[block + 1])
+            records = np.arange(ket_ptr[block], ket_ptr[block + 1])
             if records.size == 0:
                 continue
             draw = np.repeat(records, count[records])
@@ -554,132 +651,10 @@ class MCSampler:
                 )
 
             rng.shuffle(draw)
-            out[rows] = pool[col[draw]]
+            out[rows] = pool[bra_idx[draw]]
             changed[rows] = True
 
         return out, changed
-
-    @staticmethod
-    def _ham_log_ratio(
-        hamiltonian: Any,
-        kets: np.ndarray,
-        ket_index: np.ndarray,
-        trial: np.ndarray,
-        active: np.ndarray,
-        sample: Any,
-        eps: float,
-    ) -> np.ndarray:
-        """Return the heat-bath Hastings correction."""
-        rdtype = precision.dtype("calc", "real", host=True)
-        tiny = rdtype(precision.tiny("calc"))
-        log_q = np.zeros(trial.shape[0], dtype=rdtype)
-
-        if not active.any():
-            return log_q
-
-        source_weight = precision.asarray(
-            np.asarray(sample.weight),
-            "calc",
-            "real",
-            host=True,
-        )
-        bras, _, bra_index = libdet.unique_dets(trial[active])
-        bra_weight = np.empty(bras.shape[0], dtype=rdtype)
-
-        # Current rows already have their degree from the proposal scan.
-        _, first, lookup = libdet.unique_dets(
-            np.concatenate([kets, bras], axis=0)
-        )
-        bra_first = first[lookup[kets.shape[0] :]]
-        known = bra_first < kets.shape[0]
-        if known.any():
-            bra_weight[known] = source_weight[bra_first[known]]
-
-        if (~known).any():
-            weight, _ = hamiltonian.degrees(
-                np.ascontiguousarray(bras[~known]),
-                eps,
-            )
-            bra_weight[~known] = precision.asarray(
-                weight,
-                "calc",
-                "real",
-                host=True,
-            )
-
-        source = source_weight[ket_index[active]]
-        target = bra_weight[bra_index]
-        log_q[active] = (
-            np.log(np.maximum(source, tiny))
-            - np.log(np.maximum(target, tiny))
-        )
-        return log_q
-
-    @staticmethod
-    def _single_proposal(
-        hamiltonian: Any,
-        dets: np.ndarray,
-        rng: np.random.Generator,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Draw a uniform single excitation in a fixed number sector."""
-        n_walker = int(dets.shape[0])
-        rdtype = precision.dtype("calc", "real", host=True)
-
-        trial = np.ascontiguousarray(dets.copy())
-        log_q = np.zeros(n_walker, dtype=rdtype)
-        active = np.zeros(n_walker, dtype=bool)
-        if n_walker == 0:
-            return trial, log_q, active
-
-        norb = int(hamiltonian.norb)
-        orbitals = np.arange(norb, dtype=np.int64)
-        word = orbitals >> 6
-        bit = (orbitals & 63).astype(np.uint64)
-        occ = ((dets[:, :, word] >> bit) & np.uint64(1)).astype(bool)
-        n_occ = occ.sum(axis=2)
-
-        if not np.all(n_occ == n_occ[0]):
-            raise ValueError(
-                "single proposal requires a fixed particle-number sector"
-            )
-
-        n_alpha = int(n_occ[0, 0])
-        n_beta = int(n_occ[0, 1])
-        n_move_a = n_alpha * (norb - n_alpha)
-        n_move_b = n_beta * (norb - n_beta)
-        n_move = n_move_a + n_move_b
-        if n_move <= 0:
-            return trial, log_q, active
-
-        move = rng.integers(n_move, size=n_walker, dtype=np.int64)
-        spin = np.where(move < n_move_a, 0, 1).astype(np.int64)
-        move_spin = np.where(spin == 0, move, move - n_move_a)
-        n_vir = np.where(spin == 0, norb - n_alpha, norb - n_beta)
-        occ_rank = move_spin // n_vir
-        vir_rank = move_spin % n_vir
-
-        walker_occ = occ[np.arange(n_walker), spin]
-        walker_vir = ~walker_occ
-        occ_pos = np.cumsum(walker_occ, axis=1) - 1
-        vir_pos = np.cumsum(walker_vir, axis=1) - 1
-        occ_orb = np.argmax(
-            walker_occ & (occ_pos == occ_rank[:, None]),
-            axis=1,
-        ).astype(np.int64)
-        vir_orb = np.argmax(
-            walker_vir & (vir_pos == vir_rank[:, None]),
-            axis=1,
-        ).astype(np.int64)
-
-        row = np.arange(n_walker, dtype=np.int64)
-        occ_word = occ_orb >> 6
-        occ_bit = (occ_orb & 63).astype(np.uint64)
-        vir_word = vir_orb >> 6
-        vir_bit = (vir_orb & 63).astype(np.uint64)
-        trial[row, spin, occ_word] &= ~(np.uint64(1) << occ_bit)
-        trial[row, spin, vir_word] |= np.uint64(1) << vir_bit
-        active[:] = True
-        return trial, log_q, active
 
     @staticmethod
     def _eval_logabs(theta: Any, model: Any, dets: np.ndarray) -> np.ndarray:

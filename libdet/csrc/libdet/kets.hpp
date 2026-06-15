@@ -10,7 +10,6 @@
 #include <ankerl/unordered_dense.h>
 
 #include <libdet/det.hpp>
-#include <libdet/integrals.hpp>
 #include <libdet/slater.hpp>
 
 namespace libdet {
@@ -142,14 +141,7 @@ private:
     std::vector<KeyId> items_;
 };
 
-struct HalfSingle {
-    i32 spin = -1;
-    int i = 0;
-    int a = 0;
-    double sign = 1.0;
-};
-
-struct HalfDouble {
+struct SpinExcitation {
     i32 spin = -1;
     int i = 0;
     int j = 0;
@@ -340,7 +332,7 @@ private:
     }
 };
 
-struct BraWork {
+struct BraScratch {
     void ensure_seen(std::size_t na, std::size_t nb) {
         if (seen_a.size() < na) {
             seen_a.assign(na, 0u);
@@ -397,10 +389,10 @@ struct BraWork {
     std::vector<double> cross_sign;
     u32 cross_stamp = 1u;
 
-    std::vector<HalfSingle> alpha_single;
-    std::vector<HalfSingle> beta_single;
-    std::vector<HalfDouble> alpha_double;
-    std::vector<HalfDouble> beta_double;
+    std::vector<SpinExcitation> alpha_single;
+    std::vector<SpinExcitation> beta_single;
+    std::vector<SpinExcitation> alpha_double;
+    std::vector<SpinExcitation> beta_double;
 };
 
 inline void find_single(
@@ -410,7 +402,7 @@ inline void find_single(
     std::vector<int>& occ,
     std::vector<u32>& seen,
     u32 stamp,
-    std::vector<HalfSingle>& out
+    std::vector<SpinExcitation>& out
 ) {
     out.clear();
 
@@ -425,14 +417,16 @@ inline void find_single(
 
             if (seen[pos] == stamp) continue;
 
-            const HalfExcitation ex = diff_half(bra_spin, set.get(item.id));
+            const SpinDiff ex = spin_diff(bra_spin, set.get(item.id));
 
             if (ex.deg == 1) {
                 seen[pos] = stamp;
-                out.push_back(HalfSingle{
+                out.push_back(SpinExcitation{
                     item.id,
                     ex.occ[0],
+                    0,
                     ex.vir[0],
+                    0,
                     ex.sign
                 });
             }
@@ -447,7 +441,7 @@ inline void find_double(
     std::vector<int>& occ,
     std::vector<u32>& seen,
     u32 stamp,
-    std::vector<HalfDouble>& out
+    std::vector<SpinExcitation>& out
 ) {
     out.clear();
 
@@ -463,11 +457,11 @@ inline void find_double(
 
                 if (seen[pos] == stamp) continue;
 
-                const HalfExcitation ex = diff_half(bra_spin, set.get(item.id));
+                const SpinDiff ex = spin_diff(bra_spin, set.get(item.id));
 
                 if (ex.deg == 2) {
                     seen[pos] = stamp;
-                    out.push_back(HalfDouble{
+                    out.push_back(SpinExcitation{
                         item.id,
                         ex.occ[0],
                         ex.occ[1],
@@ -504,11 +498,11 @@ inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
  * differently in matrix and projection kernels.
  */
 template <class Emit>
-inline void scan_kets(
+inline void visit_kets(
     const RHFIntegrals& ints,
     const KetSpace& kets,
     DetRef bra,
-    BraWork& work,
+    BraScratch& work,
     Emit&& emit
 ) {
     work.ensure_seen(kets.alpha.size(), kets.beta.size());

@@ -1,110 +1,86 @@
-# DetNQS
+# detnqs
 
-DetNQS is a lightweight determinant-space neural quantum state library for
-quantum chemistry.
+`detnqs` is the JAX variational layer of the project. It defines neural
+wavefunctions, variational states, sampling, natural-gradient optimizers, and
+the optimization loop. Determinant Hamiltonian operations are provided by
+[`libdet`](../libdet/README.md).
 
-The goal is a small, explicit, high-performance research code:
+## Components
 
-- `libdet` owns determinant Hamiltonian physics.
-- `detnqs.model` owns neural wavefunction ansatzes.
-- `detnqs.vstate` owns variational estimators and dynamic physical state.
-- `detnqs.sampler` owns Markov-chain dynamics.
-- `detnqs.optimizer` owns SR and minSR geometry.
-- `detnqs.driver` owns optimizer state and the training loop.
-- `detnqs.utils` owns shape and precision policy.
+- `detnqs.model`: `RBM`, `Backflow`, and `RBackflow` wavefunctions.
+- `detnqs.vstate`: exact, selected-space, and Monte Carlo estimators.
+- `detnqs.sampler`: Enhanced Markov chains.
+- `detnqs.optimizer`: SR, minSR, and PSR.
+- `detnqs.driver`: the minimal `VMC` optimization loop.
+- `detnqs.utils`: shared batching and numerical precision policy.
 
-## Determinants
-
-A determinant batch is always
-
-```text
-dets: uint64 array, shape = (N, 2, nword)
-```
-
-axis 1 stores alpha and beta bitstrings.
-
-`dets` has no left/right role.  
-`bras` and `kets` mean the two axes of `H[bras, kets]`.
-
-## Wavefunction convention
-
-A model returns one of:
+The main data flow is:
 
 ```text
-real           : log|psi|
-complex        : log|psi| + i phase
-(sign, logabs) : signed real wavefunction
+model + Hamiltonian
+        |
+        v
+variational state -> loss, gradient, statistics, geometry
+        |
+        v
+optimizer -> parameter update
 ```
 
-Autodiff acts on a real coordinate:
+The variational state owns physical state and estimators. The driver owns only
+optimizer state and iteration.
 
-```text
-real        -> log|psi|
-complex     -> [log|psi|, phase]
-signed real -> logabs
-```
+## Variational States
 
-`model.cotangent(logpsi, dlogpsi)` maps a cotangent with respect to
-`logpsi` into the coordinate used by autodiff.
-
-## Energy and geometry
-
-The variational energy is
-
-```text
-E = <psi|H|psi> / <psi|psi>
-```
-
-For Monte Carlo,
-
-```text
-E_loc(D) = sum_D' H[D,D'] psi(D') / psi(D)
-```
-
-SR and minSR use the centered weighted Jacobian
-
-```text
-O = sqrt(w) * (J - <J>_w)
-S = O† O
-K = O O†
-```
-
-SR solves
-
-```text
-(S + shift I) delta = grad
-```
-
-minSR solves
-
-```text
-(K + shift I) a = b
-delta = O† a
-```
-
-## State contract
-
-All variational states implement
+All states expose the same optimization contract:
 
 ```python
-state, loss, grad, stats, geom = state.expect_and_grad(geometry=True)
+state, loss, grad, stats, geometry = state.expect_and_grad(
+    geometry=True,
+)
 ```
 
-The returned `state` contains any advanced sampler state.  
+The available state types differ only in how the determinant distribution is
+represented:
 
-## Shape and precision
+- `ExactState`: complete fixed determinant space.
+- `SelectedState`: explicit determinant space that can be enlarged.
+- `MCState`: samples determinants with `MCSampler`.
 
-`utils.batch` centralizes chunking and bucket padding.
+## Minimal Workflow
 
-- `apply`, `jvp`, `vjp`: streaming over the leading axis.
-- `bucket`: fixed-shape padding for non-streaming full-batch kernels.
+Given a `libdet.Hamiltonian` named `ham`:
 
-`utils.precision` centralizes dtype policy.
+```python
+import jax
+import optax
 
-- `model`: neural-network forward and autodiff
-- `calc`: energy and host reductions
-- `sr`: SR/minSR linear algebra
+from detnqs.driver import VMC
+from detnqs.model import RBM
+from detnqs.optimizer import sr
+from detnqs.vstate import ExactState
 
-JAX x64 is enabled by default because determinants use `uint64`.
+model = RBM(norb=ham.norb, alpha=1)
+state = ExactState.init(
+    model=model,
+    hamiltonian=ham,
+    n_alpha=n_alpha,
+    n_beta=n_beta,
+    key=jax.random.key(0),
+)
 
-## Future direction
+optimizer = optax.chain(
+    sr(shift=1.0e-3),
+    optax.scale(-1.0e-2),
+)
+vmc = VMC.init(state, optimizer)
+stats = vmc.step()
+```
+
+Use `geometry=False` with ordinary Optax optimizers that do not require SR
+geometry. Complete workflows are in [`examples`](../examples).
+
+## Conventions
+
+Models return a logarithmic wavefunction representation. Determinants use the
+`uint64` layout defined by `libdet`, and JAX 64-bit mode is enabled because
+occupation strings are stored as `uint64`.

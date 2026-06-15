@@ -19,6 +19,9 @@ if(DETNQS_BUILD_LIBDET)
   find_package(nanobind CONFIG REQUIRED)
 
   nanobind_add_module(_libdet_cpp MODULE
+    libdet/csrc/connections.cpp
+    libdet/csrc/external.cpp
+    libdet/csrc/hamiltonian.cpp
     libdet/python/module.cpp
   )
 

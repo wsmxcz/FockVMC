@@ -64,7 +64,7 @@ def davidson_primme(
         v0 = np.asarray(guess, dtype=np.float64).reshape(-1).copy()
         v0 /= np.linalg.norm(v0)
 
-    t_graph = time.perf_counter()
+    t_conns = time.perf_counter()
 
     if mode == "sparse":
         A = ham.matrix(dets)
@@ -84,7 +84,7 @@ def davidson_primme(
     else:
         raise ValueError("mode must be 'sparse' or 'matvec'")
 
-    t_graph = time.perf_counter() - t_graph
+    t_conns = time.perf_counter() - t_conns
 
     # Diagonal inverse preconditioner.
     def precond(x):
@@ -138,8 +138,8 @@ def davidson_primme(
         coeffs /= np.linalg.norm(coeffs)
         energy = float(w[0])
 
-    t_other = time.perf_counter() - t0 - t_graph - t_solve
-    return energy, coeffs, hdiag, t_graph, t_solve, t_other
+    t_other = time.perf_counter() - t0 - t_conns - t_solve
+    return energy, coeffs, hdiag, t_conns, t_solve, t_other
 
 
 def hci_solve(
@@ -159,7 +159,7 @@ def hci_solve(
 
     header = (
         f"{'Iter':>4} | {'Ndet':>8} | {'Screen':>10} | "
-        f"{'Graph':>10} | {'Solve':>10} | {'Other':>10} | {'Energy':>16}"
+        f"{'Conns':>11} | {'Solve':>10} | {'Other':>10} | {'Energy':>16}"
     )
     print(header)
     print("-" * len(header))
@@ -179,7 +179,7 @@ def hci_solve(
         guess = np.zeros(len(dets), dtype=np.float64)
         guess[:n_old] = coeffs
 
-        energy, coeffs, diags, t_graph, t_solve, t_other = davidson_primme(
+        energy, coeffs, diags, t_conns, t_solve, t_other = davidson_primme(
             ham,
             dets,
             guess,
@@ -188,7 +188,7 @@ def hci_solve(
 
         print(
             f"{it + 1:4d} | {len(dets):8d} | {t_screen:10.4f} | "
-            f"{t_graph:10.4f} | {t_solve:10.4f} | {t_other:10.4f} | "
+            f"{t_conns:11.4f} | {t_solve:10.4f} | {t_other:10.4f} | "
             f"{energy:16.10f}"
         )
 
@@ -202,7 +202,7 @@ def semi_pt2(
     ham,
     state: State,
     *,
-    eps1: float = 1e-6,
+    eps1: float = 1e-4,
     eps2: float = 1e-6,
     counts: int = 16,
     n_rep: int = 4,
@@ -294,14 +294,14 @@ state = hci_solve(
     mol.nelec,
     eps=1e-4,
     max_cycle=10,
-    davidson_mode="sparse",
+    davidson_mode="matvec",
 )
 
 e2_total, e2_det, e2_stoch, err = semi_pt2(
     ham,
     state,
     eps1=1e-6,
-    eps2=1e-6,
+    eps2=1e-12,
     counts=16,
     n_rep=4,
     seed=0,

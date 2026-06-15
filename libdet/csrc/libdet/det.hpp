@@ -4,12 +4,287 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <span>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
-#include <libdet/bit.hpp>
-
 namespace libdet {
+
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+using i32 = std::int32_t;
+using i64 = std::int64_t;
+
+[[nodiscard]] inline i32 to_i32(std::size_t n) {
+    if (n > static_cast<std::size_t>(std::numeric_limits<i32>::max())) {
+        throw std::overflow_error("index overflow");
+    }
+    return static_cast<i32>(n);
+}
+
+namespace bits {
+
+[[nodiscard]] inline constexpr u32 words_for(int norb) noexcept {
+    return norb <= 0 ? 0u : static_cast<u32>((norb + 63) >> 6);
+}
+
+[[nodiscard]] inline bool equal(
+    std::span<const u64> a,
+    std::span<const u64> b
+) noexcept {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+}
+
+[[nodiscard]] inline bool test(std::span<const u64> x, int p) noexcept {
+    return (
+        x[static_cast<std::size_t>(p >> 6)]
+        >> static_cast<unsigned>(p & 63)
+    ) & u64{1};
+}
+
+inline void set(std::span<u64> x, int p) noexcept {
+    x[static_cast<std::size_t>(p >> 6)] |= (
+        u64{1} << static_cast<unsigned>(p & 63)
+    );
+}
+
+inline void clear(std::span<u64> x, int p) noexcept {
+    x[static_cast<std::size_t>(p >> 6)] &= ~(
+        u64{1} << static_cast<unsigned>(p & 63)
+    );
+}
+
+[[nodiscard]] inline int popcount(std::span<const u64> x) noexcept {
+    int out = 0;
+    for (u64 word : x) out += static_cast<int>(std::popcount(word));
+    return out;
+}
+
+[[nodiscard]] inline int popcount_xor(
+    std::span<const u64> a,
+    std::span<const u64> b
+) noexcept {
+    int out = 0;
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        out += static_cast<int>(std::popcount(a[i] ^ b[i]));
+    }
+
+    return out;
+}
+
+[[nodiscard]] inline int popcount_between_word(
+    u64 occ,
+    int i,
+    int a
+) noexcept {
+    if (i == a) return 0;
+
+    const int lo = std::min(i, a) + 1;
+    const int hi = std::max(i, a);
+    if (lo >= hi) return 0;
+
+    const u64 lo_mask = ~u64{0} << static_cast<unsigned>(lo);
+    const u64 hi_mask = hi >= 64
+        ? ~u64{0}
+        : ((u64{1} << static_cast<unsigned>(hi)) - 1u);
+
+    return static_cast<int>(std::popcount(occ & lo_mask & hi_mask));
+}
+
+[[nodiscard]] inline int popcount_between(
+    std::span<const u64> occ,
+    int i,
+    int a
+) noexcept {
+    if (occ.size() == 1) return popcount_between_word(occ[0], i, a);
+    if (i == a) return 0;
+
+    const int lo = std::min(i, a) + 1;
+    const int hi = std::max(i, a);
+    if (lo >= hi) return 0;
+
+    const int w0 = lo >> 6;
+    const int w1 = (hi - 1) >> 6;
+    const unsigned b0 = static_cast<unsigned>(lo & 63);
+    const unsigned b1 = static_cast<unsigned>((hi - 1) & 63);
+
+    if (w0 == w1) {
+        const u64 lo_mask = ~u64{0} << b0;
+        const u64 hi_mask = b1 == 63
+            ? ~u64{0}
+            : ((u64{1} << (b1 + 1u)) - 1u);
+        return static_cast<int>(
+            std::popcount(
+                occ[static_cast<std::size_t>(w0)] & lo_mask & hi_mask
+            )
+        );
+    }
+
+    int out = static_cast<int>(
+        std::popcount(
+            occ[static_cast<std::size_t>(w0)] & (~u64{0} << b0)
+        )
+    );
+
+    for (int w = w0 + 1; w < w1; ++w) {
+        out += static_cast<int>(
+            std::popcount(occ[static_cast<std::size_t>(w)])
+        );
+    }
+
+    const u64 hi_mask = b1 == 63
+        ? ~u64{0}
+        : ((u64{1} << (b1 + 1u)) - 1u);
+    out += static_cast<int>(
+        std::popcount(
+            occ[static_cast<std::size_t>(w1)] & hi_mask
+        )
+    );
+
+    return out;
+}
+
+[[nodiscard]] inline bool parity_between(
+    std::span<const u64> occ,
+    int i,
+    int a
+) noexcept {
+    return (popcount_between(occ, i, a) & 1) != 0;
+}
+
+inline void fill_prefix(
+    std::span<const u64> occ,
+    int norb,
+    std::vector<int>& prefix
+) {
+    prefix.assign(static_cast<std::size_t>(norb + 1), 0);
+    int count = 0;
+
+    for (int p = 0; p < norb; ++p) {
+        prefix[static_cast<std::size_t>(p)] = count;
+        if (test(occ, p)) ++count;
+    }
+
+    prefix[static_cast<std::size_t>(norb)] = count;
+}
+
+[[nodiscard]] inline int count_between(
+    std::span<const int> prefix,
+    int i,
+    int a
+) noexcept {
+    if (i == a) return 0;
+
+    const int lo = std::min(i, a) + 1;
+    const int hi = std::max(i, a);
+    if (lo >= hi) return 0;
+
+    return prefix[static_cast<std::size_t>(hi)]
+        - prefix[static_cast<std::size_t>(lo)];
+}
+
+[[nodiscard]] inline bool parity_between(
+    std::span<const int> prefix,
+    int i,
+    int a
+) noexcept {
+    return (count_between(prefix, i, a) & 1) != 0;
+}
+
+template <class F>
+inline void each_set_word(u64 word, F&& visit) {
+    while (word != 0u) {
+        const unsigned bit = std::countr_zero(word);
+        visit(static_cast<int>(bit));
+        word &= word - 1u;
+    }
+}
+
+template <class F>
+inline void each_set(std::span<const u64> words, F&& visit) {
+    if (words.size() == 1) {
+        each_set_word(words[0], std::forward<F>(visit));
+        return;
+    }
+
+    for (std::size_t w = 0; w < words.size(); ++w) {
+        u64 word = words[w];
+
+        while (word != 0u) {
+            const unsigned bit = std::countr_zero(word);
+            visit(static_cast<int>((w << 6) + bit));
+            word &= word - 1u;
+        }
+    }
+}
+
+template <class F>
+inline void each_clear(
+    std::span<const u64> occ,
+    int norb,
+    F&& visit
+) {
+    if (occ.size() == 1) {
+        const u64 valid = norb >= 64
+            ? ~u64{0}
+            : ((u64{1} << static_cast<unsigned>(norb)) - 1u);
+        u64 word = (~occ[0]) & valid;
+
+        while (word != 0u) {
+            const unsigned bit = std::countr_zero(word);
+            visit(static_cast<int>(bit));
+            word &= word - 1u;
+        }
+        return;
+    }
+
+    for (std::size_t w = 0; w < occ.size(); ++w) {
+        const int base = static_cast<int>(w << 6);
+        const int rem = norb - base;
+        if (rem <= 0) break;
+
+        const u64 valid = rem >= 64
+            ? ~u64{0}
+            : ((u64{1} << static_cast<unsigned>(rem)) - 1u);
+        u64 word = (~occ[w]) & valid;
+
+        while (word != 0u) {
+            const unsigned bit = std::countr_zero(word);
+            visit(base + static_cast<int>(bit));
+            word &= word - 1u;
+        }
+    }
+}
+
+inline void set_list(std::span<const u64> words, std::vector<int>& out) {
+    out.clear();
+    out.reserve(static_cast<std::size_t>(popcount(words)));
+    each_set(words, [&](int p) { out.push_back(p); });
+}
+
+[[nodiscard]] inline std::vector<int> set_list(
+    std::span<const u64> words
+) {
+    std::vector<int> out;
+    set_list(words, out);
+    return out;
+}
+
+inline void clear_list(
+    std::span<const u64> words,
+    int norb,
+    std::vector<int>& out
+) {
+    out.clear();
+    out.reserve(static_cast<std::size_t>(norb - popcount(words)));
+    each_clear(words, norb, [&](int p) { out.push_back(p); });
+}
+
+} // namespace bits
 
 [[nodiscard]] inline constexpr std::size_t det_size(u32 nword) noexcept {
     return 2u * static_cast<std::size_t>(nword);
@@ -47,13 +322,7 @@ private:
 
 class DetScratch {
 public:
-    DetScratch() = default;
     explicit DetScratch(u32 nword) : words_(det_size(nword), 0u), nword_(nword) {}
-
-    void resize(u32 nword) {
-        nword_ = nword;
-        words_.assign(det_size(nword), 0u);
-    }
 
     void load(DetRef det) {
         std::copy(det.alpha().begin(), det.alpha().end(), words_.begin());
@@ -117,16 +386,6 @@ struct DetBatchView {
 inline void append_det(std::vector<u64>& out, DetRef det) {
     out.insert(out.end(), det.alpha().begin(), det.alpha().end());
     out.insert(out.end(), det.beta().begin(), det.beta().end());
-}
-
-[[nodiscard]] inline std::size_t append_det_index(
-    std::vector<u64>& out,
-    u32 nword,
-    DetRef det
-) {
-    const std::size_t idx = out.size() / det_size(nword);
-    append_det(out, det);
-    return idx;
 }
 
 inline void copy_batch(std::vector<u64>& dst, DetBatchView src) {
@@ -202,7 +461,7 @@ struct DetHash {
 };
 
 [[nodiscard]] inline u64 det_fingerprint(DetRef det, u64 seed = 0) noexcept {
-    u64 h = splitmix64(seed ^ 0x726f776c6f63616cULL);
+    u64 h = splitmix64(seed ^ 0x6465746b65747331ULL);
 
     if (det.nword() == 1) {
         h = splitmix64(h ^ det.alpha()[0]);
@@ -325,7 +584,7 @@ namespace detail {
 
 } // namespace detail
 
-struct Excitation {
+struct DetDiff {
     int deg = 0;
     int na = 0;
     int nb = 0;
@@ -338,26 +597,19 @@ struct Excitation {
     double sign = 1.0;
 };
 
-struct HalfExcitation {
+struct SpinDiff {
     int deg = 0;
     std::array<int, 2> occ{0, 0};
     std::array<int, 2> vir{0, 0};
     double sign = 1.0;
 };
 
-/*
- * Determinant-local occupation cache.
- *
- * DetScratch is used by excitation-driven scanners to apply i -> a and
- * ij -> ab replacements without allocating a new determinant.
- */
 struct DetOcc {
-    explicit DetOcc(u32 nword = 0, int norb = 0) : det(nword) {
-        resize(nword, norb);
+    explicit DetOcc(int norb = 0) {
+        resize(norb);
     }
 
-    void resize(u32 nword, int norb) {
-        det.resize(nword);
+    void resize(int norb) {
         occ_a.clear();
         occ_b.clear();
         vir_a.clear();
@@ -365,8 +617,6 @@ struct DetOcc {
         pref_a.assign(static_cast<std::size_t>(norb + 1), 0);
         pref_b.assign(static_cast<std::size_t>(norb + 1), 0);
     }
-
-    DetScratch det;
 
     std::vector<int> occ_a;
     std::vector<int> occ_b;
@@ -378,8 +628,6 @@ struct DetOcc {
 };
 
 inline void fill_occ(DetRef det, int norb, DetOcc& work) {
-    work.det.load(det);
-
     bits::set_list(det.alpha(), work.occ_a);
     bits::set_list(det.beta(), work.occ_b);
 
@@ -390,8 +638,8 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     bits::fill_prefix(det.beta(), norb, work.pref_b);
 }
 
-[[nodiscard]] inline Excitation diff(DetRef bra, DetRef ket) noexcept {
-    Excitation ex;
+[[nodiscard]] inline DetDiff det_diff(DetRef bra, DetRef ket) noexcept {
+    DetDiff ex;
 
     const int dx_a = bits::popcount_xor(bra.alpha(), ket.alpha());
     const int dx_b = bits::popcount_xor(bra.beta(), ket.beta());
@@ -467,11 +715,11 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     return ex;
 }
 
-[[nodiscard]] inline HalfExcitation diff_half(
+[[nodiscard]] inline SpinDiff spin_diff(
     std::span<const u64> src,
     std::span<const u64> dst
 ) noexcept {
-    HalfExcitation ex;
+    SpinDiff ex;
 
     if (src.size() == 1) {
         const u64 gone0 = src[0] & ~dst[0];
@@ -547,5 +795,119 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
 
     return ex;
 }
+
+class DetIndex {
+public:
+    explicit DetIndex(DetBatchView dets) : dets_(dets) {
+        std::size_t capacity = 8;
+        while (capacity < dets.n_dets * 2u + 1u) capacity <<= 1u;
+
+        slots_.assign(capacity, -1);
+        mask_ = capacity - 1u;
+
+        for (std::size_t idet = 0; idet < dets.n_dets; ++idet) {
+            insert(static_cast<i32>(idet));
+        }
+    }
+
+    [[nodiscard]] i32 find(DetRef det) const noexcept {
+        std::size_t slot = DetHash{}(det) & mask_;
+
+        for (;;) {
+            const i32 idx = slots_[slot];
+            if (idx < 0) return -1;
+            if (det_equal(dets_[static_cast<std::size_t>(idx)], det)) {
+                return idx;
+            }
+            slot = (slot + 1u) & mask_;
+        }
+    }
+
+private:
+    DetBatchView dets_;
+    std::vector<i32> slots_;
+    std::size_t mask_ = 0;
+
+    void insert(i32 idx) {
+        std::size_t slot = DetHash{}(
+            dets_[static_cast<std::size_t>(idx)]
+        ) & mask_;
+
+        while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
+        slots_[slot] = idx;
+    }
+};
+
+class DetPool {
+public:
+    explicit DetPool(u32 nword = 0) : nword_(nword) {
+        rehash(8);
+    }
+
+    explicit DetPool(DetBatchView dets) : nword_(dets.nword) {
+        copy_batch(words_, dets);
+        rehash(std::max<std::size_t>(8, dets.n_dets * 2u + 1u));
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return nword_ == 0 ? 0u : words_.size() / det_size(nword_);
+    }
+
+    [[nodiscard]] DetRef get(std::size_t idx) const noexcept {
+        return det_at(words_, nword_, idx);
+    }
+
+    [[nodiscard]] std::vector<u64>& words() noexcept {
+        return words_;
+    }
+
+    [[nodiscard]] const std::vector<u64>& words() const noexcept {
+        return words_;
+    }
+
+    [[nodiscard]] i32 find_or_add(DetRef det) {
+        if ((size() + 1u) * 2u >= slots_.size()) {
+            rehash(slots_.size() * 2u);
+        }
+
+        std::size_t slot = DetHash{}(det) & mask_;
+
+        for (;;) {
+            const i32 idx = slots_[slot];
+
+            if (idx < 0) {
+                const i32 fresh = to_i32(size());
+                append_det(words_, det);
+                slots_[slot] = fresh;
+                return fresh;
+            }
+
+            if (det_equal(get(static_cast<std::size_t>(idx)), det)) {
+                return idx;
+            }
+            slot = (slot + 1u) & mask_;
+        }
+    }
+
+private:
+    u32 nword_ = 0;
+    std::vector<u64> words_;
+    std::vector<i32> slots_;
+    std::size_t mask_ = 0;
+
+    void rehash(std::size_t capacity) {
+        std::size_t size = 8;
+        while (size < capacity) size <<= 1u;
+
+        slots_.assign(size, -1);
+        mask_ = size - 1u;
+
+        for (std::size_t idet = 0; idet < this->size(); ++idet) {
+            std::size_t slot = DetHash{}(get(idet)) & mask_;
+            while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
+            slots_[slot] = static_cast<i32>(idet);
+        }
+    }
+};
 
 } // namespace libdet

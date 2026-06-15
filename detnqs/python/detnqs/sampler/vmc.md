@@ -247,7 +247,7 @@ For this reason, it is useful to separate three statistical layers:
 2. the observation kernel that produces the configurations entering the estimator;
 3. the estimator for the local energy or other observables at each observed configuration.
 
-The third layer matters because local energy evaluation can itself be expensive or stochastic. If the Hamiltonian-connected row is not summed exactly, write the internal estimator as
+The third layer matters because local energy evaluation can itself be expensive or stochastic. If the bra connections of a ket are not summed exactly, write the internal estimator as
 
 $$
 \widehat E_{\mathrm{loc}}(y,\xi),
@@ -274,7 +274,7 @@ $$
 {\sum_{k=1}^N\omega(y_k)}.
 $$
 
-This expression separates configuration-sampling error from Hamiltonian-row estimation error. It also separates statistical variance from computational cost. A broader reference law or an observation kernel may improve support or reduce tail pathologies, but it may also increase the number of wave-function amplitudes or Hamiltonian-connected configurations that need to be evaluated.
+This expression separates configuration-sampling error from Hamiltonian-connection estimation error. It also separates statistical variance from computational cost. A broader reference law or an observation kernel may improve support or reduce tail pathologies, but it may also increase the number of wave-function amplitudes or Hamiltonian-connected configurations that need to be evaluated.
 
 ## 6. Validation Criteria and Scope
 
@@ -302,7 +302,7 @@ Validation is therefore more informative when it reports several diagnostics rat
 - number of unique observed configurations;
 - stability of energy, force, and metric estimates under changes of reference law;
 - number of wave-function evaluations;
-- cost of Hamiltonian-row or local-energy evaluation.
+- cost of Hamiltonian-connection or local-energy evaluation.
 
 These diagnostics distinguish different failure modes. Support mismatch is a correctness issue. Heavy-tailed weights are a stability issue. Slow mixing is a Markov-chain efficiency issue. Expensive local-energy evaluation is a cost issue. They interact in practice, but they are conceptually different and are best examined separately.
 

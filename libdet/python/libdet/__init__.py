@@ -9,7 +9,6 @@ from scipy.sparse import csr_matrix
 from ._libdet_cpp import Conns
 from ._libdet_cpp import ConnSamples
 from ._libdet_cpp import Hamiltonian as _RawHamiltonian
-from ._libdet_cpp import Matrix
 from ._libdet_cpp import Projection
 from ._libdet_cpp import ProjectSamples
 
@@ -17,7 +16,6 @@ __all__ = [
     "Conns",
     "ConnSamples",
     "Hamiltonian",
-    "Matrix",
     "Projection",
     "ProjectSamples",
     "to_dets",
@@ -65,7 +63,7 @@ def unique_dets(dets: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 @dataclass(frozen=True, slots=True)
 class Hamiltonian:
-    """Python wrapper for row-local determinant Hamiltonian primitives."""
+    """Determinant Hamiltonian primitives."""
 
     _raw: _RawHamiltonian
     _ecore: float = 0.0
@@ -136,14 +134,15 @@ class Hamiltonian:
 
         exclude_arr = None if exclude is None else to_dets(exclude)
 
-        out = self._raw.expand(
-            ket_arr,
-            float(eps),
-            coeff_arr,
-            exclude_arr,
+        return np.asarray(
+            self._raw.expand(
+                ket_arr,
+                float(eps),
+                coeff_arr,
+                exclude_arr,
+            ),
+            dtype=np.uint64,
         )
-
-        return np.array(out.dets, dtype=np.uint64, copy=True)
 
     def project(
         self,
@@ -201,7 +200,7 @@ class Hamiltonian:
         sample_eps: float = 0.0,
         seed: int = 0,
     ) -> Conns:
-        """Return exact rows and optional sampled weak connections."""
+        """Return exact and optionally sampled bra connections for each ket."""
         return self._raw.conns(
             to_dets(kets),
             float(eps),
@@ -215,7 +214,7 @@ class Hamiltonian:
         kets: Any,
         eps: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return row absolute weights and connection counts."""
+        """Return absolute coupling weights and bra counts for each ket."""
         weight, nconn = self._raw.degrees(to_dets(kets), float(eps))
         return (
             np.asarray(weight, dtype=np.float64),
@@ -226,27 +225,13 @@ class Hamiltonian:
         self,
         bras: Any,
         kets: Any | None = None,
-        *,
-        raw: bool = False,
-    ) -> Matrix | csr_matrix:
-        """Return exact sparse H[bras, kets].
-
-        When raw=True, return the internal Matrix object.
-        Otherwise return a scipy.sparse.csr_matrix.
-        """
+    ) -> csr_matrix:
+        """Return exact sparse H[bras, kets]."""
         bras_arr = to_dets(bras)
         kets_arr = bras_arr if kets is None else to_dets(kets)
 
-        out = self._raw.matrix(bras_arr, kets_arr)
-
-        if raw:
-            return out
-
-        indptr = np.array(out.indptr, dtype=np.int32, copy=True)
-        indices = np.array(out.indices, dtype=np.int32, copy=True)
-        data = np.array(out.data, dtype=np.float64, copy=True)
-
-        return csr_matrix((data, indices, indptr), shape=tuple(out.shape))
+        indptr, indices, data, shape = self._raw.matrix(bras_arr, kets_arr)
+        return csr_matrix((data, indices, indptr), shape=tuple(shape))
 
     def matvec(
         self,
@@ -296,7 +281,7 @@ class Hamiltonian:
         eps2: float = 0.0,
         seed: int = 0,
     ) -> ConnSamples:
-        """Sample row connections in ``eps2 <= |H| < eps1``.
+        """Sample bra connections in ``eps2 <= |H| < eps1``.
 
         ``counts`` has shape ``(N,)`` or ``(S, N)`` for independent streams.
         """

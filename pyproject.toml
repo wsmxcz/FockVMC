@@ -83,3 +83,7 @@ sdist.exclude = [
 
 [tool.scikit-build.cmake.define]
 DETNQS_BUILD_LIBDET = "ON"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

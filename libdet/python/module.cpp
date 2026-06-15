@@ -125,6 +125,28 @@ auto own_2d(std::vector<T>&& values, std::size_t nrow, std::size_t ncol) {
     );
 }
 
+auto own_dets(
+    std::vector<std::uint64_t>&& words,
+    std::size_t n_dets,
+    libdet::u32 nword
+) {
+    auto* heap = new std::vector<std::uint64_t>(std::move(words));
+
+    nb::capsule owner(heap, [](void* ptr) noexcept {
+        delete static_cast<std::vector<std::uint64_t>*>(ptr);
+    });
+
+    return nb::ndarray<
+        std::uint64_t,
+        nb::numpy,
+        nb::shape<-1, 2, -1>
+    >(
+        heap->data(),
+        {n_dets, std::size_t{2}, static_cast<std::size_t>(nword)},
+        owner
+    );
+}
+
 template <class T>
 auto view_1d(std::span<const T> values) {
     return nb::ndarray<
@@ -137,6 +159,11 @@ auto view_1d(std::span<const T> values) {
         values.data(),
         {values.size()}
     );
+}
+
+template <class T>
+auto view_1d(const std::vector<T>& values) {
+    return view_1d(std::span<const T>(values));
 }
 
 auto view_dets(
@@ -155,120 +182,120 @@ auto view_dets(
     );
 }
 
+auto view_dets(
+    const std::vector<std::uint64_t>& words,
+    std::size_t n_dets,
+    libdet::u32 nword
+) {
+    return view_dets(std::span<const std::uint64_t>(words), n_dets, nword);
+}
+
 } // anonymous namespace
 
 NB_MODULE(_libdet_cpp, m) {
-    m.doc() = "libdet row-local determinant Hamiltonian primitives";
-
-    nb::class_<libdet::Determinants>(m, "Determinants")
-        .def_prop_ro("dets", [](const libdet::Determinants& out) {
-            return view_dets(out.det_words(), out.n_dets(), out.nword());
-        }, nb::rv_policy::reference_internal);
+    m.doc() = "Determinant Hamiltonian primitives";
 
     nb::class_<libdet::Conns>(m, "Conns")
-        .def_prop_ro("n_kets", &libdet::Conns::n_kets)
+        .def_prop_ro("n_kets", [](const libdet::Conns& out) {
+            return out.n_kets;
+        })
         .def_prop_ro("dets", [](const libdet::Conns& out) {
-            return view_dets(out.det_words(), out.n_dets(), out.nword());
+            return view_dets(
+                out.det_words,
+                out.det_words.size() / libdet::det_size(out.nword),
+                out.nword
+            );
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("diag", [](const libdet::Conns& out) {
-            return view_1d(out.diag());
+            return view_1d(out.diag);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ptr", [](const libdet::Conns& out) {
-            return view_1d(out.ptr());
+        .def_prop_ro("ket_ptr", [](const libdet::Conns& out) {
+            return view_1d(out.ket_ptr);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("col", [](const libdet::Conns& out) {
-            return view_1d(out.col());
+        .def_prop_ro("bra_idx", [](const libdet::Conns& out) {
+            return view_1d(out.bra_idx);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("h", [](const libdet::Conns& out) {
-            return view_1d(out.h());
+            return view_1d(out.h);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("weight", [](const libdet::Conns& out) {
-            return view_1d(out.weight());
+            return view_1d(out.weight);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("sample_ptr", [](const libdet::Conns& out) {
-            return view_1d(out.sample_ptr());
+        .def_prop_ro("sample_ket_ptr", [](const libdet::Conns& out) {
+            return view_1d(out.sample_ket_ptr);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("sample_col", [](const libdet::Conns& out) {
-            return view_1d(out.sample_col());
+        .def_prop_ro("sample_bra_idx", [](const libdet::Conns& out) {
+            return view_1d(out.sample_bra_idx);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("sample_h", [](const libdet::Conns& out) {
-            return view_1d(out.sample_h());
+            return view_1d(out.sample_h);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("sample_count", [](const libdet::Conns& out) {
-            return view_1d(out.sample_count());
+            return view_1d(out.sample_count);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("sample_weight", [](const libdet::Conns& out) {
-            return view_1d(out.sample_weight());
-        }, nb::rv_policy::reference_internal);
-
-    nb::class_<libdet::Matrix>(m, "Matrix")
-        .def_prop_ro("shape", [](const libdet::Matrix& out) {
-            return nb::make_tuple(out.n_bra(), out.n_ket());
-        })
-        .def_prop_ro("diags", [](const libdet::Matrix& out) {
-            return view_1d(out.diags());
-        }, nb::rv_policy::reference_internal)
-        .def_prop_ro("indptr", [](const libdet::Matrix& out) {
-            return view_1d(out.indptr());
-        }, nb::rv_policy::reference_internal)
-        .def_prop_ro("indices", [](const libdet::Matrix& out) {
-            return view_1d(out.indices());
-        }, nb::rv_policy::reference_internal)
-        .def_prop_ro("data", [](const libdet::Matrix& out) {
-            return view_1d(out.data());
+            return view_1d(out.sample_weight);
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projection>(m, "Projection")
         .def_prop_ro("bras", [](const libdet::Projection& out) {
-            return view_dets(out.bra_words(), out.n_bras(), out.nword());
+            return view_dets(out.bra_words, out.hpsi.size(), out.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi", [](const libdet::Projection& out) {
-            return view_1d(out.hpsi());
+            return view_1d(out.hpsi);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("diags", [](const libdet::Projection& out) {
-            return view_1d(out.diags());
+            return view_1d(out.diags);
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::ConnSamples>(m, "ConnSamples")
-        .def_prop_ro("n_kets", &libdet::ConnSamples::n_kets)
-        .def_prop_ro("n_streams", &libdet::ConnSamples::n_streams)
+        .def_prop_ro("n_kets", [](const libdet::ConnSamples& out) {
+            return out.n_kets;
+        })
+        .def_prop_ro("n_streams", [](const libdet::ConnSamples& out) {
+            return out.n_streams;
+        })
         .def_prop_ro("dets", [](const libdet::ConnSamples& out) {
-            return view_dets(out.det_words(), out.n_dets(), out.nword());
+            return view_dets(
+                out.det_words,
+                out.det_words.size() / libdet::det_size(out.nword),
+                out.nword
+            );
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ptr", [](const libdet::ConnSamples& out) {
-            return view_1d(out.ptr());
+        .def_prop_ro("ket_ptr", [](const libdet::ConnSamples& out) {
+            return view_1d(out.ket_ptr);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("col", [](const libdet::ConnSamples& out) {
-            return view_1d(out.col());
+        .def_prop_ro("bra_idx", [](const libdet::ConnSamples& out) {
+            return view_1d(out.bra_idx);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("h", [](const libdet::ConnSamples& out) {
-            return view_1d(out.h());
+            return view_1d(out.h);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("count", [](const libdet::ConnSamples& out) {
-            return view_1d(out.count());
+            return view_1d(out.count);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("weight", [](const libdet::ConnSamples& out) {
-            return view_1d(out.weight());
+            return view_1d(out.weight);
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::ProjectSamples>(m, "ProjectSamples")
         .def_prop_ro("rep_ptr", [](const libdet::ProjectSamples& out) {
-            return view_1d(out.rep_ptr());
+            return view_1d(out.rep_ptr);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("bras", [](const libdet::ProjectSamples& out) {
-            return view_dets(out.bra_words(), out.n_samples(), out.nword());
+            return view_dets(out.bra_words, out.hpsi_a.size(), out.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("diags", [](const libdet::ProjectSamples& out) {
-            return view_1d(out.diags());
+            return view_1d(out.diags);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi_strong", [](const libdet::ProjectSamples& out) {
-            return view_1d(out.hpsi_strong());
+            return view_1d(out.hpsi_strong);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi_a", [](const libdet::ProjectSamples& out) {
-            return view_1d(out.hpsi_a());
+            return view_1d(out.hpsi_a);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi_b", [](const libdet::ProjectSamples& out) {
-            return view_1d(out.hpsi_b());
+            return view_1d(out.hpsi_b);
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Hamiltonian>(m, "Hamiltonian")
@@ -322,7 +349,7 @@ NB_MODULE(_libdet_cpp, m) {
                           nb::object exclude_obj) {
             const auto ket_view = to_det_view(kets);
             const auto coeff_view = optional_f64(coeffs_obj);
-            libdet::Determinants out;
+            std::vector<std::uint64_t> out;
 
             if (!exclude_obj.is_none()) {
                 const U64Array exclude_arr = nb::cast<U64Array>(exclude_obj);
@@ -333,7 +360,10 @@ NB_MODULE(_libdet_cpp, m) {
                     out = ham.expand(ket_view, eps, coeff_view, &exclude_view);
                 }
 
-                return out;
+                const libdet::u32 nword = ham.nword();
+                const std::size_t n_dets =
+                    out.size() / libdet::det_size(nword);
+                return own_dets(std::move(out), n_dets, nword);
             }
 
             {
@@ -341,7 +371,10 @@ NB_MODULE(_libdet_cpp, m) {
                 out = ham.expand(ket_view, eps, coeff_view, nullptr);
             }
 
-            return out;
+            const libdet::u32 nword = ham.nword();
+            const std::size_t n_dets =
+                out.size() / libdet::det_size(nword);
+            return own_dets(std::move(out), n_dets, nword);
         }, "kets"_a.noconvert(),
            "eps"_a,
            "coeffs"_a = nb::none(),
@@ -447,7 +480,12 @@ NB_MODULE(_libdet_cpp, m) {
                 out = ham.matrix(bra_view, ket_view);
             }
 
-            return out;
+            return nb::make_tuple(
+                own_1d(std::move(out.indptr)),
+                own_1d(std::move(out.indices)),
+                own_1d(std::move(out.data)),
+                nb::make_tuple(out.n_bra, out.n_ket)
+            );
         }, "bras"_a.noconvert(), "kets"_a.noconvert())
 
         .def("matvec", [](const libdet::Hamiltonian& ham,

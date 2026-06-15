@@ -1,145 +1,109 @@
 # libdet
 
-`libdet` is a small C++ kernel library with Python bindings for determinant-space quantum chemistry Hamiltonians.
+`libdet` is the determinant Hamiltonian backend used by DetNQS. It provides a
+small Python interface to screened Slater-Condon operations implemented in
+C++ with OpenMP.
 
-It provides row-local primitives for building methods around a common idea: a screened Hamiltonian graph over Slater determinants. The library focuses on fast, deterministic Hamiltonian operations; solver policy and scientific workflow remain in Python or downstream codes.
-
-`libdet` is suitable as a backend for Selected CI, Fock-space VMC, FCIQMC-style methods, deterministic PT2, and semi-stochastic PT2.
-
-## What it does
-
-Given a batch of determinants, `libdet` can evaluate diagonal and off-diagonal Hamiltonian elements, build exact sparse blocks, apply Hamiltonian matrix-vector products, generate screened connected determinants, and sample weak external connections.
-
-The central abstraction is the screened graph
-
-```text
-E_eps(i) = { (a, H_ai) : a != i, |H_ai| >= eps }
-```
-
-or, when coefficients are involved,
-
-```text
-E_eps(psi) = { (a, i, H_ai c_i) : |H_ai c_i| >= eps }
-```
-
-Most higher-level algorithms can be expressed as different ways of querying, reducing, or sampling this graph.
-
-## Non-goals
-
-`libdet` is not a solver framework. It intentionally does not manage:
-
-- CI selection policy;
-- walker populations;
-- neural-network or variational parameters;
-- MPI layout;
-- checkpointing;
-- convergence logic.
-
-Those decisions belong in downstream applications. `libdet` only supplies the Hamiltonian primitives.
+It does not define selection, optimization, Monte Carlo state, or solver
+policy. Those belong to the calling workflow.
 
 ## Determinants
 
-Determinants are stored as packed `uint64` spin strings:
+A determinant batch is a contiguous `uint64` array with shape:
 
-```python
-(N, 2, nword)
+```text
+(n_det, 2, nword)
 ```
 
-The second axis stores alpha words first and beta words second.
+The second axis contains the alpha and beta occupation strings. Use
+`libdet.to_dets` to normalize input arrays.
 
-```python
-import libdet
+Names follow Dirac notation:
 
-dets = libdet.to_dets(dets)
-```
+- `ket`: source determinant;
+- `bra`: destination determinant;
+- `det`: determinant without a directional role.
 
-## Basic use
+## Hamiltonian
+
+Construct an RHF spatial-orbital Hamiltonian from one- and two-electron
+integrals:
 
 ```python
 import libdet
 
 ham = libdet.Hamiltonian.rhf(h1, eri, ecore=0.0)
-
-diag = ham.diags(dets)
-H = ham.matrix(bras, kets)
-y = ham.matvec(bras, x, kets=kets)
-
-ext = ham.expand(kets, eps)
-
-proj_known = ham.project(bras, kets, coeffs)
-proj_ext = ham.project(None, kets, coeffs, eps=eps)
 ```
 
-If `kets` is omitted in finite-space operations, it defaults to `bras`.
-
-## Row queries
-
-The public row-query surface consists of three operations:
+### Explicit spaces
 
 ```python
-weight, nconn = ham.degrees(kets, eps)
+h = ham.hij(bra, ket)
+diags = ham.diags(dets)
+projection = ham.project(bras, kets, coeffs)
+matrix = ham.matrix(bras, kets)
+y = ham.matvec(bras, x, kets=kets)
+```
 
-sample = ham.sample_conns(
+These operations evaluate `H[bras, kets]` on supplied determinant spaces.
+Omitting `kets` from `matrix` or `matvec` uses the bra space for both axes.
+
+### Generated bras
+
+```python
+bras = ham.expand(kets, eps, coeffs=coeffs, exclude=kets)
+projection = ham.project(
+    None,
+    kets,
+    coeffs,
+    eps=eps,
+    exclude=kets,
+)
+```
+
+`expand` returns unique connected bras. Generated `project` also accumulates
+their projected amplitudes. Screening uses `|H_ai| >= eps`, or
+`|H_ai c_i| >= eps` when coefficients are supplied.
+
+### Connections
+
+```python
+weight, degree = ham.degrees(kets, eps)
+conns = ham.conns(kets, eps)
+```
+
+`degrees` returns the total absolute off-diagonal weight and number of
+screened connections for each ket. `conns` additionally returns the connected
+bras and matrix elements.
+
+### Sampling
+
+```python
+samples = ham.sample_conns(
     kets,
     counts,
-    eps1=np.inf,
-    eps2=eps,
+    eps1=eps1,
+    eps2=eps2,
     seed=seed,
 )
 
-graph = ham.conns(
+projection_samples = ham.sample_project(
     kets,
-    eps,
-    sample=n_sample,
-    sample_eps=weak_eps,
+    coeffs,
+    eps1,
+    eps2,
+    counts,
+    exclude=kets,
+    n_rep=2,
     seed=seed,
 )
 ```
 
-`degrees` returns row weights and connection counts without materializing
-destinations.
+Sampling covers `eps2 <= |H_ai| < eps1`, with coefficient scaling for
+`sample_project`. A fixed seed produces deterministic results.
 
-`sample_conns` performs categorical sampling in
-`eps2 <= |H_ai| < eps1`. `counts` has shape `(N,)` or `(S, N)`; streams
-share one candidate scan and use independent deterministic targets.
+## Execution
 
-`conns` returns exact CSR rows and can sample the weak window
-`sample_eps <= |H_ai| < eps` in the same determinant pool.
-
-Both result types store a global `dets` pool whose first `N` entries equal the
-input kets. All `col` arrays index this pool directly.
-
-`ConnSamples` stores stream-major CSR rows:
-
-```text
-dets, ptr, col, h, count, weight
-```
-
-`Conns` stores exact and sampled rows in the same pool:
-
-```text
-dets, diag, ptr, col, h, weight
-sample_ptr, sample_col, sample_h, sample_count, sample_weight
-```
-
-## Design principles
-
-`libdet` is designed to stay:
-
-- row-local;
-- deterministic unless sampling is requested;
-- solver-agnostic;
-- explicit about determinant and coefficient alignment;
-- small enough to audit.
-
-Internal acceleration structures, screening tables, finite-space indices, and scheduling details are backend-private. The public interface should remain centered on Hamiltonian semantics rather than implementation controls.
-
-## Direction
-
-Future backends or Hamiltonian types should preserve the same primitive model:
-
-```text
-determinant batches -> Hamiltonian rows -> screened graph -> reduction or sampling
-```
-
-Possible extensions include UHF/spin-orbital kernels, symmetry-resolved Hamiltonians, spin-adapted bases, periodic systems, relativistic spinors, and GPU backends.
+Ket-local connections are reused across repeated connection queries.
+Matrix-vector products also reuse prepared determinant spaces. Independent
+ket work is parallelized with OpenMP.

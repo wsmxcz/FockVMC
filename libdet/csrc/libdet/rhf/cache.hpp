@@ -8,10 +8,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include <libdet/bras.hpp>
-#include <libdet/kets.hpp>
+#include <libdet/rhf/graph.hpp>
+#include <libdet/spatial/space.hpp>
 
-namespace libdet {
+namespace libdet::rhf {
 
 struct KetConns {
     double cutoff = 0.0;
@@ -222,4 +222,4 @@ private:
     }
 };
 
-} // namespace libdet
+} // namespace libdet::rhf

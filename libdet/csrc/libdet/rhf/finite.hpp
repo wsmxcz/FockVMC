@@ -1,239 +1,188 @@
-#include <algorithm>
+#pragma once
+
 #include <cmath>
 #include <cstddef>
-#include <limits>
+#include <span>
 #include <stdexcept>
-#include <string>
 #include <utility>
+#include <vector>
 
-#include <libdet/hamiltonian.hpp>
+#include <libdet/rhf/slater.hpp>
+#include <libdet/spatial/space.hpp>
 
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
 
-namespace libdet {
+namespace libdet::rhf {
 
-Hamiltonian::Hamiltonian(RHFIntegrals ints)
-    : ints_(std::move(ints)),
-      nword_(bits::words_for(ints_.norb())),
-      ket_cache_(nword_) {}
+// Internal implementation header included by hamiltonian.hpp.
+struct Matrix {
+    std::size_t n_bra = 0;
+    std::size_t n_ket = 0;
+    std::vector<i32> indptr;
+    std::vector<i32> indices;
+    std::vector<double> data;
+};
 
-Hamiltonian::Hamiltonian(const Hamiltonian& other)
-    : ints_(other.ints_),
-      nword_(other.nword_),
-      ket_cache_(other.nword_) {}
-
-Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
-    if (this != &other) {
-        ints_ = other.ints_;
-        nword_ = other.nword_;
-        screen_.reset();
-        ket_cache_ = KetCache(nword_);
-        ket_space_cache_ = KetSpaceCache();
-    }
-
-    return *this;
+template <class Emit>
+inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
+    if (h != 0.0) emit(iket, h);
 }
 
-Hamiltonian::Hamiltonian(Hamiltonian&& other) noexcept
-    : ints_(std::move(other.ints_)),
-      nword_(other.nword_),
-      screen_(std::move(other.screen_)),
-      ket_cache_(other.nword_) {}
-
-Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
-    if (this != &other) {
-        ints_ = std::move(other.ints_);
-        nword_ = other.nword_;
-        screen_ = std::move(other.screen_);
-        ket_cache_ = KetCache(nword_);
-        ket_space_cache_ = KetSpaceCache();
-    }
-
-    return *this;
-}
-
-Hamiltonian Hamiltonian::make(
-    std::span<const double> h1,
-    int norb,
-    std::span<const double> eri,
-    double ecore
+// Visit off-diagonal RHF couplings from a bra into a finite ket space.
+template <class Emit>
+inline void visit_kets(
+    const RHFIntegrals& ints,
+    const KetSpace& kets,
+    DetRef bra,
+    BraScratch& work,
+    Emit&& emit
 ) {
-    return Hamiltonian(RHFIntegrals(norb, h1, eri, ecore));
-}
+    work.ensure_seen(kets.alpha.size(), kets.beta.size());
 
-int Hamiltonian::norb() const noexcept {
-    return ints_.norb();
-}
-
-u32 Hamiltonian::nword() const noexcept {
-    return nword_;
-}
-
-void Hamiltonian::check_one(DetRef det, const char* where) const {
-    if (det.nword() != nword_) {
-        throw std::invalid_argument(
-            std::string(where) + ": determinant nword mismatch"
-        );
-    }
-}
-
-void Hamiltonian::check_dets(DetBatchView dets, const char* where) const {
-    if (dets.nword != nword_) {
-        throw std::invalid_argument(
-            std::string(where) + ": determinant nword mismatch"
-        );
-    }
-}
-
-void Hamiltonian::check_eps(double eps) {
-    if (std::isnan(eps)) throw std::invalid_argument("eps must not be NaN");
-    if (eps < 0.0) throw std::invalid_argument("eps must be nonnegative");
-}
-
-void Hamiltonian::check_window_eps(double eps1, double eps2) {
-    check_eps(eps1);
-    check_eps(eps2);
-    if (eps2 > eps1) throw std::invalid_argument("eps2 must be <= eps1");
-}
-
-std::shared_ptr<const Screen> Hamiltonian::screen(double cutoff) const {
-    if (cutoff <= 0.0 || !std::isfinite(cutoff)) return {};
-
-    std::lock_guard<std::mutex> lock(screen_mutex_);
-
-    if (!screen_ || cutoff < screen_->cutoff()) {
-        screen_ = std::make_shared<Screen>(ints_, cutoff);
-    }
-
-    return screen_;
-}
-
-double Hamiltonian::max_abs(std::span<const double> values) noexcept {
-    double out = 0.0;
-    for (double value : values) out = std::max(out, std::abs(value));
-    return out;
-}
-
-double Hamiltonian::screen_cutoff(double eps, double max_scale) noexcept {
-    if (eps <= 0.0) return 0.0;
-    if (max_scale <= 0.0) return std::numeric_limits<double>::infinity();
-    return eps / max_scale;
-}
-
-AbsWindow Hamiltonian::abs_window(
-    double lo,
-    double hi,
-    double scale
-) noexcept {
-    if (scale <= 0.0) {
-        return {
-            std::numeric_limits<double>::infinity(),
-            std::numeric_limits<double>::infinity()
-        };
-    }
-
-    return {
-        lo <= 0.0 ? 0.0 : lo / scale,
-        std::isfinite(hi)
-            ? hi / scale
-            : std::numeric_limits<double>::infinity()
-    };
-}
-
-std::shared_ptr<const KetSpace> Hamiltonian::cached_ket_space(
-    DetBatchView kets
-) const {
-    {
-        std::lock_guard<std::mutex> lock(ket_space_cache_mutex_);
-        if (auto space = ket_space_cache_.find(kets)) return space;
-    }
-
-    auto fresh = std::make_shared<KetSpace>(kets);
-
-    std::lock_guard<std::mutex> lock(ket_space_cache_mutex_);
-    if (auto space = ket_space_cache_.find(kets)) return space;
-    ket_space_cache_.insert(kets, fresh);
-    return fresh;
-}
-
-std::vector<u64> Hamiltonian::merge_det_parts(
-    std::vector<std::vector<u64>>& parts
-) const {
-    std::size_t total = 0;
-
-    for (auto& part : parts) {
-        sort_unique_dets(part, nword_);
-        total += part.size();
-    }
-
-    std::vector<u64> out;
-    out.reserve(total);
-
-    for (auto& part : parts) {
-        out.insert(out.end(), part.begin(), part.end());
-    }
-
-    sort_unique_dets(out, nword_);
-    return out;
-}
-
-double Hamiltonian::hij(DetRef bra, DetRef ket) const {
-    check_one(bra, "hij(bra)");
-    check_one(ket, "hij(ket)");
-
-    const DetDiff ex = det_diff(bra, ket);
-
-    if (ex.deg > 2) return 0.0;
-    if (ex.deg == 0) return Slater::diag(ints_, bra);
-
-    if (ex.deg == 1) {
-        return ex.na == 1
-            ? ex.sign * Slater::single_a(
-                ints_,
-                bra,
-                ex.occ_a[0],
-                ex.vir_a[0]
-            )
-            : ex.sign * Slater::single_b(
-                ints_,
-                bra,
-                ex.occ_b[0],
-                ex.vir_b[0]
-            );
-    }
-
-    if (ex.na == 2) {
-        return ex.sign * Slater::double_aa(
-            ints_,
-            ex.occ_a[0],
-            ex.occ_a[1],
-            ex.vir_a[0],
-            ex.vir_a[1]
-        );
-    }
-
-    if (ex.nb == 2) {
-        return ex.sign * Slater::double_bb(
-            ints_,
-            ex.occ_b[0],
-            ex.occ_b[1],
-            ex.vir_b[0],
-            ex.vir_b[1]
-        );
-    }
-
-    return ex.sign * Slater::double_ab(
-        ints_,
-        ex.occ_a[0],
-        ex.occ_b[0],
-        ex.vir_a[0],
-        ex.vir_b[0]
+    work.next_a();
+    find_single(
+        kets.alpha,
+        kets.alpha1,
+        bra.alpha(),
+        work.tmp_occ,
+        work.seen_a,
+        work.stamp_a,
+        work.alpha_single
     );
+
+    work.next_a();
+    find_double(
+        kets.alpha,
+        kets.alpha2,
+        bra.alpha(),
+        work.tmp_occ,
+        work.seen_a,
+        work.stamp_a,
+        work.alpha_double
+    );
+
+    work.next_b();
+    find_single(
+        kets.beta,
+        kets.beta1,
+        bra.beta(),
+        work.tmp_occ,
+        work.seen_b,
+        work.stamp_b,
+        work.beta_single
+    );
+
+    work.next_b();
+    find_double(
+        kets.beta,
+        kets.beta2,
+        bra.beta(),
+        work.tmp_occ,
+        work.seen_b,
+        work.stamp_b,
+        work.beta_double
+    );
+
+    const i32 bra_alpha = kets.alpha.find(bra.alpha());
+    const i32 bra_beta = kets.beta.find(bra.beta());
+
+    if (bra_beta >= 0) {
+        for (const auto& ex : work.alpha_single) {
+            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
+            if (iket >= 0) {
+                emit_nonzero(
+                    ex.sign * Slater::single_a(ints, bra, ex.i, ex.a),
+                    iket,
+                    emit
+                );
+            }
+        }
+
+        for (const auto& ex : work.alpha_double) {
+            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
+            if (iket >= 0) {
+                emit_nonzero(
+                    ex.sign
+                        * Slater::double_aa(
+                            ints,
+                            ex.i,
+                            ex.j,
+                            ex.a,
+                            ex.b
+                        ),
+                    iket,
+                    emit
+                );
+            }
+        }
+    }
+
+    if (bra_alpha >= 0) {
+        for (const auto& ex : work.beta_single) {
+            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
+            if (iket >= 0) {
+                emit_nonzero(
+                    ex.sign * Slater::single_b(ints, bra, ex.i, ex.a),
+                    iket,
+                    emit
+                );
+            }
+        }
+
+        for (const auto& ex : work.beta_double) {
+            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
+            if (iket >= 0) {
+                emit_nonzero(
+                    ex.sign
+                        * Slater::double_bb(
+                            ints,
+                            ex.i,
+                            ex.j,
+                            ex.a,
+                            ex.b
+                        ),
+                    iket,
+                    emit
+                );
+            }
+        }
+    }
+
+    // Mixed-spin doubles are intersections of alpha and beta singles.
+    work.ensure_cross(kets.beta.size());
+    work.next_cross();
+
+    for (const auto& ex : work.beta_single) {
+        const std::size_t beta_id = static_cast<std::size_t>(ex.spin);
+        work.cross_b[beta_id] = work.cross_stamp;
+        work.cross_i[beta_id] = ex.i;
+        work.cross_a[beta_id] = ex.a;
+        work.cross_sign[beta_id] = ex.sign;
+    }
+
+    for (const auto& ax : work.alpha_single) {
+        for (const SpinMate& mate : kets.alpha_mates(ax.spin)) {
+            const std::size_t beta_id = static_cast<std::size_t>(mate.spin);
+            if (work.cross_b[beta_id] != work.cross_stamp) continue;
+
+            const double h =
+                ax.sign
+                * work.cross_sign[beta_id]
+                * Slater::double_ab(
+                    ints,
+                    ax.i,
+                    work.cross_i[beta_id],
+                    ax.a,
+                    work.cross_a[beta_id]
+                );
+            emit_nonzero(h, mate.ket, emit);
+        }
+    }
 }
 
-std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
+inline std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
     check_dets(dets, "diags");
     std::vector<double> out(dets.n_dets, 0.0);
 
@@ -260,7 +209,7 @@ std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
     return out;
 }
 
-Projection Hamiltonian::project(
+inline Projection Hamiltonian::project(
     DetBatchView bras,
     DetBatchView kets,
     std::span<const double> coeffs,
@@ -268,7 +217,6 @@ Projection Hamiltonian::project(
 ) const {
     check_dets(bras, "project(bras)");
     check_dets(kets, "project(kets)");
-
     if (coeffs.size() != kets.n_dets) {
         throw std::invalid_argument("project: coeffs size must match kets");
     }
@@ -277,7 +225,10 @@ Projection Hamiltonian::project(
     return project_impl(bras, kets, coeffs, eps);
 }
 
-Matrix Hamiltonian::matrix(DetBatchView bras, DetBatchView kets) const {
+inline Matrix Hamiltonian::matrix(
+    DetBatchView bras,
+    DetBatchView kets
+) const {
     check_dets(bras, "matrix(bras)");
     check_dets(kets, "matrix(kets)");
 
@@ -288,7 +239,7 @@ Matrix Hamiltonian::matrix(DetBatchView bras, DetBatchView kets) const {
     return out;
 }
 
-void Hamiltonian::build_matrix(
+inline void Hamiltonian::build_matrix(
     Matrix& out,
     DetBatchView bras,
     DetBatchView kets
@@ -296,7 +247,6 @@ void Hamiltonian::build_matrix(
     const auto ket_space = cached_ket_space(kets);
     const std::size_t nbras = bras.n_dets;
     std::vector<double> hdiag(nbras, 0.0);
-
     out.indptr.assign(nbras + 1u, 0);
 
 #if defined(_OPENMP)
@@ -314,7 +264,6 @@ void Hamiltonian::build_matrix(
             visit_kets(ints_, *ket_space, bra, scratch, [&](i32, double) {
                 ++nnz;
             });
-
             hdiag[ibra] = diag;
             out.indptr[ibra + 1u] = nnz;
         }
@@ -322,14 +271,10 @@ void Hamiltonian::build_matrix(
 #pragma omp single
         {
             std::size_t nnz = 0;
-
             for (std::size_t ibra = 0; ibra < nbras; ++ibra) {
-                nnz += static_cast<std::size_t>(
-                    out.indptr[ibra + 1u]
-                );
+                nnz += static_cast<std::size_t>(out.indptr[ibra + 1u]);
                 out.indptr[ibra + 1u] = to_i32(nnz);
             }
-
             out.indices.resize(nnz);
             out.data.resize(nnz);
         }
@@ -338,16 +283,13 @@ void Hamiltonian::build_matrix(
         for (i64 ii = 0; ii < static_cast<i64>(nbras); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
-            std::size_t pos = static_cast<std::size_t>(
-                out.indptr[ibra]
-            );
+            std::size_t pos = static_cast<std::size_t>(out.indptr[ibra]);
             const double diag = hdiag[ibra];
             const i32 diag_idx = find_ket(*ket_space, bra);
 
             if (diag_idx >= 0 && diag != 0.0) {
                 out.indices[pos] = diag_idx;
-                out.data[pos] = diag;
-                ++pos;
+                out.data[pos++] = diag;
             }
 
             visit_kets(
@@ -357,24 +299,20 @@ void Hamiltonian::build_matrix(
                 scratch,
                 [&](i32 iket, double h) {
                     out.indices[pos] = iket;
-                    out.data[pos] = h;
-                    ++pos;
+                    out.data[pos++] = h;
                 }
             );
         }
     }
 #else
     BraScratch scratch;
-
     for (std::size_t ibra = 0; ibra < nbras; ++ibra) {
         const DetRef bra = bras[ibra];
         const double diag = Slater::diag(ints_, bra);
         i32 nnz = find_ket(*ket_space, bra) >= 0 && diag != 0.0 ? 1 : 0;
-
         visit_kets(ints_, *ket_space, bra, scratch, [&](i32, double) {
             ++nnz;
         });
-
         hdiag[ibra] = diag;
         out.indptr[ibra + 1u] = nnz;
     }
@@ -384,7 +322,6 @@ void Hamiltonian::build_matrix(
         nnz += static_cast<std::size_t>(out.indptr[ibra + 1u]);
         out.indptr[ibra + 1u] = to_i32(nnz);
     }
-
     out.indices.resize(nnz);
     out.data.resize(nnz);
 
@@ -396,8 +333,7 @@ void Hamiltonian::build_matrix(
 
         if (diag_idx >= 0 && diag != 0.0) {
             out.indices[pos] = diag_idx;
-            out.data[pos] = diag;
-            ++pos;
+            out.data[pos++] = diag;
         }
 
         visit_kets(
@@ -407,22 +343,20 @@ void Hamiltonian::build_matrix(
             scratch,
             [&](i32 iket, double h) {
                 out.indices[pos] = iket;
-                out.data[pos] = h;
-                ++pos;
+                out.data[pos++] = h;
             }
         );
     }
 #endif
 }
 
-std::vector<double> Hamiltonian::matvec(
+inline std::vector<double> Hamiltonian::matvec(
     DetBatchView bras,
     DetBatchView kets,
     std::span<const double> x
 ) const {
     check_dets(bras, "matvec(bras)");
     check_dets(kets, "matvec(kets)");
-
     if (x.size() != kets.n_dets) {
         throw std::invalid_argument("matvec: x size must match kets");
     }
@@ -445,7 +379,6 @@ std::vector<double> Hamiltonian::matvec(
 #endif
             const DetRef bra = bras[ibra];
             double value = 0.0;
-
             const i32 diag_idx = find_ket(*ket_space, bra);
             if (diag_idx >= 0) {
                 value += Slater::diag(ints_, bra)
@@ -461,15 +394,13 @@ std::vector<double> Hamiltonian::matvec(
                     value += h * x[static_cast<std::size_t>(iket)];
                 }
             );
-
             out[ibra] = value;
         }
     }
-
     return out;
 }
 
-std::vector<double> Hamiltonian::matmat(
+inline std::vector<double> Hamiltonian::matmat(
     DetBatchView bras,
     DetBatchView kets,
     std::span<const double> x,
@@ -477,7 +408,6 @@ std::vector<double> Hamiltonian::matmat(
 ) const {
     check_dets(bras, "matmat(bras)");
     check_dets(kets, "matmat(kets)");
-
     if (x.size() != kets.n_dets * nrhs) {
         throw std::invalid_argument("matmat: X size must be n_ket * n_rhs");
     }
@@ -500,13 +430,12 @@ std::vector<double> Hamiltonian::matmat(
 #endif
             const DetRef bra = bras[ibra];
             double* y = out.data() + ibra * nrhs;
-
             const i32 diag_idx = find_ket(*ket_space, bra);
+
             if (diag_idx >= 0) {
                 const double h = Slater::diag(ints_, bra);
                 const double* xrow =
                     x.data() + static_cast<std::size_t>(diag_idx) * nrhs;
-
                 for (std::size_t j = 0; j < nrhs; ++j) y[j] += h * xrow[j];
             }
 
@@ -518,7 +447,6 @@ std::vector<double> Hamiltonian::matmat(
                 [&](i32 iket, double h) {
                     const double* xrow =
                         x.data() + static_cast<std::size_t>(iket) * nrhs;
-
                     for (std::size_t j = 0; j < nrhs; ++j) {
                         y[j] += h * xrow[j];
                     }
@@ -526,11 +454,10 @@ std::vector<double> Hamiltonian::matmat(
             );
         }
     }
-
     return out;
 }
 
-Projection Hamiltonian::project_impl(
+inline Projection Hamiltonian::project_impl(
     DetBatchView bras,
     DetBatchView kets,
     std::span<const double> coeffs,
@@ -560,7 +487,6 @@ Projection Hamiltonian::project_impl(
             const DetRef bra = bras[ibra];
             const double diag = Slater::diag(ints_, bra);
             double value = 0.0;
-
             out.diags[ibra] = diag;
 
             const i32 diag_idx = find_ket(*ket_space, bra);
@@ -581,12 +507,10 @@ Projection Hamiltonian::project_impl(
                     if (std::abs(term) >= eps) value += term;
                 }
             );
-
             out.hpsi[ibra] = value;
         }
     }
-
     return out;
 }
 
-} // namespace libdet
+} // namespace libdet::rhf

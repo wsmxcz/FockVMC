@@ -9,10 +9,117 @@
 
 #include <ankerl/unordered_dense.h>
 
-#include <libdet/det.hpp>
-#include <libdet/slater.hpp>
+#include <libdet/spatial/determinant.hpp>
 
 namespace libdet {
+
+// Read-only lookup for an existing determinant batch.
+class DetIndex {
+public:
+    explicit DetIndex(DetBatchView dets) : dets_(dets) {
+        std::size_t capacity = 8;
+        while (capacity < dets.n_dets * 2u + 1u) capacity <<= 1u;
+
+        slots_.assign(capacity, -1);
+        mask_ = capacity - 1u;
+        for (std::size_t i = 0; i < dets.n_dets; ++i) {
+            insert(static_cast<i32>(i));
+        }
+    }
+
+    [[nodiscard]] i32 find(DetRef det) const noexcept {
+        std::size_t slot = DetHash{}(det) & mask_;
+        for (;;) {
+            const i32 idx = slots_[slot];
+            if (idx < 0) return -1;
+            if (det_equal(dets_[static_cast<std::size_t>(idx)], det)) {
+                return idx;
+            }
+            slot = (slot + 1u) & mask_;
+        }
+    }
+
+private:
+    DetBatchView dets_;
+    std::vector<i32> slots_;
+    std::size_t mask_ = 0;
+
+    void insert(i32 idx) {
+        std::size_t slot =
+            DetHash{}(dets_[static_cast<std::size_t>(idx)]) & mask_;
+        while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
+        slots_[slot] = idx;
+    }
+};
+
+// Owning determinant pool with stable integer indices.
+class DetPool {
+public:
+    explicit DetPool(u32 nword = 0) : nword_(nword) {
+        rehash(8);
+    }
+
+    explicit DetPool(DetBatchView dets) : nword_(dets.nword) {
+        copy_batch(words_, dets);
+        rehash(std::max<std::size_t>(8, dets.n_dets * 2u + 1u));
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return nword_ == 0 ? 0u : words_.size() / det_size(nword_);
+    }
+
+    [[nodiscard]] DetRef get(std::size_t idx) const noexcept {
+        return det_at(words_, nword_, idx);
+    }
+
+    [[nodiscard]] std::vector<u64>& words() noexcept {
+        return words_;
+    }
+
+    [[nodiscard]] const std::vector<u64>& words() const noexcept {
+        return words_;
+    }
+
+    [[nodiscard]] i32 find_or_add(DetRef det) {
+        if ((size() + 1u) * 2u >= slots_.size()) {
+            rehash(slots_.size() * 2u);
+        }
+
+        std::size_t slot = DetHash{}(det) & mask_;
+        for (;;) {
+            const i32 idx = slots_[slot];
+            if (idx < 0) {
+                const i32 fresh = to_i32(size());
+                append_det(words_, det);
+                slots_[slot] = fresh;
+                return fresh;
+            }
+            if (det_equal(get(static_cast<std::size_t>(idx)), det)) {
+                return idx;
+            }
+            slot = (slot + 1u) & mask_;
+        }
+    }
+
+private:
+    u32 nword_ = 0;
+    std::vector<u64> words_;
+    std::vector<i32> slots_;
+    std::size_t mask_ = 0;
+
+    void rehash(std::size_t capacity) {
+        std::size_t size = 8;
+        while (size < capacity) size <<= 1u;
+        slots_.assign(size, -1);
+        mask_ = size - 1u;
+
+        for (std::size_t i = 0; i < this->size(); ++i) {
+            std::size_t slot = DetHash{}(get(i)) & mask_;
+            while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
+            slots_[slot] = static_cast<i32>(i);
+        }
+    }
+};
 
 /*
  * Determinant-driven finite-space search.
@@ -483,163 +590,6 @@ inline void find_double(
     if (beta_id < 0) return -1;
 
     return kets.find_with_alpha(alpha_id, beta_id);
-}
-
-template <class Emit>
-inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
-    if (h != 0.0) emit(iket, h);
-}
-
-/*
- * Scan off-diagonal kets in a finite ket space connected to bra.
- *
- * The diagonal is intentionally not emitted. Callers handle it separately
- * because diagonal terms require ket-index lookup and may be treated
- * differently in matrix and projection kernels.
- */
-template <class Emit>
-inline void visit_kets(
-    const RHFIntegrals& ints,
-    const KetSpace& kets,
-    DetRef bra,
-    BraScratch& work,
-    Emit&& emit
-) {
-    work.ensure_seen(kets.alpha.size(), kets.beta.size());
-
-    work.next_a();
-    find_single(
-        kets.alpha,
-        kets.alpha1,
-        bra.alpha(),
-        work.tmp_occ,
-        work.seen_a,
-        work.stamp_a,
-        work.alpha_single
-    );
-
-    work.next_a();
-    find_double(
-        kets.alpha,
-        kets.alpha2,
-        bra.alpha(),
-        work.tmp_occ,
-        work.seen_a,
-        work.stamp_a,
-        work.alpha_double
-    );
-
-    work.next_b();
-    find_single(
-        kets.beta,
-        kets.beta1,
-        bra.beta(),
-        work.tmp_occ,
-        work.seen_b,
-        work.stamp_b,
-        work.beta_single
-    );
-
-    work.next_b();
-    find_double(
-        kets.beta,
-        kets.beta2,
-        bra.beta(),
-        work.tmp_occ,
-        work.seen_b,
-        work.stamp_b,
-        work.beta_double
-    );
-
-    const i32 bra_alpha = kets.alpha.find(bra.alpha());
-    const i32 bra_beta = kets.beta.find(bra.beta());
-
-    if (bra_beta >= 0) {
-        for (const auto& ex : work.alpha_single) {
-            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
-
-            if (iket >= 0) {
-                const double h =
-                    ex.sign * Slater::single_a(ints, bra, ex.i, ex.a);
-
-                emit_nonzero(h, iket, emit);
-            }
-        }
-
-        for (const auto& ex : work.alpha_double) {
-            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
-
-            if (iket >= 0) {
-                const double h =
-                    ex.sign
-                    * Slater::double_aa(ints, ex.i, ex.j, ex.a, ex.b);
-
-                emit_nonzero(h, iket, emit);
-            }
-        }
-    }
-
-    if (bra_alpha >= 0) {
-        for (const auto& ex : work.beta_single) {
-            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
-
-            if (iket >= 0) {
-                const double h =
-                    ex.sign * Slater::single_b(ints, bra, ex.i, ex.a);
-
-                emit_nonzero(h, iket, emit);
-            }
-        }
-
-        for (const auto& ex : work.beta_double) {
-            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
-
-            if (iket >= 0) {
-                const double h =
-                    ex.sign
-                    * Slater::double_bb(ints, ex.i, ex.j, ex.a, ex.b);
-
-                emit_nonzero(h, iket, emit);
-            }
-        }
-    }
-
-    /*
-     * Opposite-spin double excitation is the intersection of one alpha
-     * half-excitation and one beta half-excitation.
-     */
-    work.ensure_cross(kets.beta.size());
-    work.next_cross();
-
-    for (const auto& ex : work.beta_single) {
-        const std::size_t beta_id = static_cast<std::size_t>(ex.spin);
-
-        work.cross_b[beta_id] = work.cross_stamp;
-        work.cross_i[beta_id] = ex.i;
-        work.cross_a[beta_id] = ex.a;
-        work.cross_sign[beta_id] = ex.sign;
-    }
-
-    for (const auto& ax : work.alpha_single) {
-        for (const SpinMate& mate : kets.alpha_mates(ax.spin)) {
-            const std::size_t beta_id = static_cast<std::size_t>(mate.spin);
-
-            if (work.cross_b[beta_id] != work.cross_stamp) continue;
-
-            const double h =
-                ax.sign
-                * work.cross_sign[beta_id]
-                * Slater::double_ab(
-                    ints,
-                    ax.i,
-                    work.cross_i[beta_id],
-                    ax.a,
-                    work.cross_a[beta_id]
-                );
-
-            emit_nonzero(h, mate.ket, emit);
-        }
-    }
 }
 
 } // namespace libdet

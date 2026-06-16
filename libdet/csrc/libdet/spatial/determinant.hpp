@@ -357,6 +357,112 @@ private:
     u32 nword_ = 0;
 };
 
+enum class ExcitationKind : unsigned char {
+    alpha1,
+    beta1,
+    alpha2,
+    beta2,
+    mixed2,
+};
+
+struct Excitation {
+    ExcitationKind kind = ExcitationKind::alpha1;
+    int i = 0;
+    int j = 0;
+    int a = 0;
+    int b = 0;
+};
+
+[[nodiscard]] inline bool excitation_less(
+    Excitation lhs,
+    Excitation rhs
+) noexcept {
+    if (lhs.kind != rhs.kind) {
+        return static_cast<unsigned char>(lhs.kind)
+            < static_cast<unsigned char>(rhs.kind);
+    }
+    if (lhs.i != rhs.i) return lhs.i < rhs.i;
+    if (lhs.j != rhs.j) return lhs.j < rhs.j;
+    if (lhs.a != rhs.a) return lhs.a < rhs.a;
+    return lhs.b < rhs.b;
+}
+
+[[nodiscard]] inline Excitation alpha1(int i, int a) noexcept {
+    return Excitation{ExcitationKind::alpha1, i, 0, a, 0};
+}
+
+[[nodiscard]] inline Excitation beta1(int i, int a) noexcept {
+    return Excitation{ExcitationKind::beta1, i, 0, a, 0};
+}
+
+[[nodiscard]] inline Excitation alpha2(
+    int i,
+    int j,
+    int a,
+    int b
+) noexcept {
+    return Excitation{ExcitationKind::alpha2, i, j, a, b};
+}
+
+[[nodiscard]] inline Excitation beta2(
+    int i,
+    int j,
+    int a,
+    int b
+) noexcept {
+    return Excitation{ExcitationKind::beta2, i, j, a, b};
+}
+
+[[nodiscard]] inline Excitation mixed2(
+    int i,
+    int j,
+    int a,
+    int b
+) noexcept {
+    return Excitation{ExcitationKind::mixed2, i, j, a, b};
+}
+
+inline DetRef apply(
+    DetRef ket,
+    Excitation excitation,
+    DetScratch& scratch
+) {
+    scratch.load(ket);
+    auto alpha = scratch.alpha();
+    auto beta = scratch.beta();
+
+    switch (excitation.kind) {
+    case ExcitationKind::alpha1:
+        bits::clear(alpha, excitation.i);
+        bits::set(alpha, excitation.a);
+        break;
+    case ExcitationKind::beta1:
+        bits::clear(beta, excitation.i);
+        bits::set(beta, excitation.a);
+        break;
+    case ExcitationKind::alpha2:
+        bits::clear(alpha, excitation.i);
+        bits::clear(alpha, excitation.j);
+        bits::set(alpha, excitation.a);
+        bits::set(alpha, excitation.b);
+        break;
+    case ExcitationKind::beta2:
+        bits::clear(beta, excitation.i);
+        bits::clear(beta, excitation.j);
+        bits::set(beta, excitation.a);
+        bits::set(beta, excitation.b);
+        break;
+    case ExcitationKind::mixed2:
+        bits::clear(alpha, excitation.i);
+        bits::clear(beta, excitation.j);
+        bits::set(alpha, excitation.a);
+        bits::set(beta, excitation.b);
+        break;
+    }
+
+    return scratch.view();
+}
+
 struct DetBatchView {
     const u64* data = nullptr;
     std::size_t n_dets = 0;
@@ -795,119 +901,5 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
 
     return ex;
 }
-
-class DetIndex {
-public:
-    explicit DetIndex(DetBatchView dets) : dets_(dets) {
-        std::size_t capacity = 8;
-        while (capacity < dets.n_dets * 2u + 1u) capacity <<= 1u;
-
-        slots_.assign(capacity, -1);
-        mask_ = capacity - 1u;
-
-        for (std::size_t idet = 0; idet < dets.n_dets; ++idet) {
-            insert(static_cast<i32>(idet));
-        }
-    }
-
-    [[nodiscard]] i32 find(DetRef det) const noexcept {
-        std::size_t slot = DetHash{}(det) & mask_;
-
-        for (;;) {
-            const i32 idx = slots_[slot];
-            if (idx < 0) return -1;
-            if (det_equal(dets_[static_cast<std::size_t>(idx)], det)) {
-                return idx;
-            }
-            slot = (slot + 1u) & mask_;
-        }
-    }
-
-private:
-    DetBatchView dets_;
-    std::vector<i32> slots_;
-    std::size_t mask_ = 0;
-
-    void insert(i32 idx) {
-        std::size_t slot = DetHash{}(
-            dets_[static_cast<std::size_t>(idx)]
-        ) & mask_;
-
-        while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
-        slots_[slot] = idx;
-    }
-};
-
-class DetPool {
-public:
-    explicit DetPool(u32 nword = 0) : nword_(nword) {
-        rehash(8);
-    }
-
-    explicit DetPool(DetBatchView dets) : nword_(dets.nword) {
-        copy_batch(words_, dets);
-        rehash(std::max<std::size_t>(8, dets.n_dets * 2u + 1u));
-    }
-
-    [[nodiscard]] std::size_t size() const noexcept {
-        return nword_ == 0 ? 0u : words_.size() / det_size(nword_);
-    }
-
-    [[nodiscard]] DetRef get(std::size_t idx) const noexcept {
-        return det_at(words_, nword_, idx);
-    }
-
-    [[nodiscard]] std::vector<u64>& words() noexcept {
-        return words_;
-    }
-
-    [[nodiscard]] const std::vector<u64>& words() const noexcept {
-        return words_;
-    }
-
-    [[nodiscard]] i32 find_or_add(DetRef det) {
-        if ((size() + 1u) * 2u >= slots_.size()) {
-            rehash(slots_.size() * 2u);
-        }
-
-        std::size_t slot = DetHash{}(det) & mask_;
-
-        for (;;) {
-            const i32 idx = slots_[slot];
-
-            if (idx < 0) {
-                const i32 fresh = to_i32(size());
-                append_det(words_, det);
-                slots_[slot] = fresh;
-                return fresh;
-            }
-
-            if (det_equal(get(static_cast<std::size_t>(idx)), det)) {
-                return idx;
-            }
-            slot = (slot + 1u) & mask_;
-        }
-    }
-
-private:
-    u32 nword_ = 0;
-    std::vector<u64> words_;
-    std::vector<i32> slots_;
-    std::size_t mask_ = 0;
-
-    void rehash(std::size_t capacity) {
-        std::size_t size = 8;
-        while (size < capacity) size <<= 1u;
-
-        slots_.assign(size, -1);
-        mask_ = size - 1u;
-
-        for (std::size_t idet = 0; idet < this->size(); ++idet) {
-            std::size_t slot = DetHash{}(get(idet)) & mask_;
-            while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
-            slots_[slot] = static_cast<i32>(idet);
-        }
-    }
-};
 
 } // namespace libdet

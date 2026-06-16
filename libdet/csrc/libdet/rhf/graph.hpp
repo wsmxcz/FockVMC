@@ -9,10 +9,10 @@
 #include <utility>
 #include <vector>
 
-#include <libdet/det.hpp>
-#include <libdet/slater.hpp>
+#include <libdet/rhf/slater.hpp>
+#include <libdet/spatial/determinant.hpp>
 
-namespace libdet {
+namespace libdet::rhf {
 
 struct Candidate {
     int a = 0;
@@ -228,102 +228,14 @@ struct AbsWindow {
     double hi = std::numeric_limits<double>::infinity();
 };
 
-enum class ExcitationKind : unsigned char {
-    alpha1,
-    beta1,
-    alpha2,
-    beta2,
-    mixed2,
-};
-
-struct Excitation {
-    ExcitationKind kind = ExcitationKind::alpha1;
-    int i = 0;
-    int j = 0;
-    int a = 0;
-    int b = 0;
-};
-
 struct Coupling {
     Excitation excitation;
     double h = 0.0;
 };
 
-[[nodiscard]] inline bool excitation_less(
-    Excitation lhs,
-    Excitation rhs
-) noexcept {
-    if (lhs.kind != rhs.kind) {
-        return static_cast<unsigned char>(lhs.kind)
-            < static_cast<unsigned char>(rhs.kind);
-    }
-    if (lhs.i != rhs.i) return lhs.i < rhs.i;
-    if (lhs.j != rhs.j) return lhs.j < rhs.j;
-    if (lhs.a != rhs.a) return lhs.a < rhs.a;
-    return lhs.b < rhs.b;
-}
-
-[[nodiscard]] inline Excitation alpha1(int i, int a) noexcept {
-    return Excitation{ExcitationKind::alpha1, i, 0, a, 0};
-}
-
-[[nodiscard]] inline Excitation beta1(int i, int a) noexcept {
-    return Excitation{ExcitationKind::beta1, i, 0, a, 0};
-}
-
-[[nodiscard]] inline Excitation alpha2(int i, int j, int a, int b) noexcept {
-    return Excitation{ExcitationKind::alpha2, i, j, a, b};
-}
-
-[[nodiscard]] inline Excitation beta2(int i, int j, int a, int b) noexcept {
-    return Excitation{ExcitationKind::beta2, i, j, a, b};
-}
-
-[[nodiscard]] inline Excitation mixed2(int i, int j, int a, int b) noexcept {
-    return Excitation{ExcitationKind::mixed2, i, j, a, b};
-}
-
 [[nodiscard]] inline bool in_window(double h, AbsWindow win) noexcept {
     const double value = std::abs(h);
     return value > 0.0 && value >= win.lo && value < win.hi;
-}
-
-inline DetRef apply(DetRef ket, Excitation excitation, DetScratch& scratch) {
-    scratch.load(ket);
-
-    auto alpha = scratch.alpha();
-    auto beta = scratch.beta();
-
-    switch (excitation.kind) {
-    case ExcitationKind::alpha1:
-        bits::clear(alpha, excitation.i);
-        bits::set(alpha, excitation.a);
-        break;
-    case ExcitationKind::beta1:
-        bits::clear(beta, excitation.i);
-        bits::set(beta, excitation.a);
-        break;
-    case ExcitationKind::alpha2:
-        bits::clear(alpha, excitation.i);
-        bits::clear(alpha, excitation.j);
-        bits::set(alpha, excitation.a);
-        bits::set(alpha, excitation.b);
-        break;
-    case ExcitationKind::beta2:
-        bits::clear(beta, excitation.i);
-        bits::clear(beta, excitation.j);
-        bits::set(beta, excitation.a);
-        bits::set(beta, excitation.b);
-        break;
-    case ExcitationKind::mixed2:
-        bits::clear(alpha, excitation.i);
-        bits::clear(beta, excitation.j);
-        bits::set(alpha, excitation.a);
-        bits::set(beta, excitation.b);
-        break;
-    }
-
-    return scratch.view();
 }
 
 template <class Visit>
@@ -491,4 +403,4 @@ inline void visit_bras(
     );
 }
 
-} // namespace libdet
+} // namespace libdet::rhf

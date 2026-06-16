@@ -8,7 +8,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
-#include <libdet/hamiltonian.hpp>
+#include <libdet/rhf/hamiltonian.hpp>
 
 namespace nb = nanobind;
 using namespace nb::literals;

@@ -19,6 +19,26 @@ def normalize(w, mask=None) -> jax.Array:
     return w / jnp.maximum(jnp.sum(w), tiny)
 
 
+def masked_sum(x, mask, axis: int = 0):
+    """Sum a PyTree after zeroing inactive entries."""
+    mask = jnp.asarray(mask, dtype=bool)
+
+    def one(a):
+        a = jnp.asarray(a)
+        shape = [1] * a.ndim
+        shape[int(axis)] = mask.shape[0]
+        return jnp.sum(jnp.where(mask.reshape(shape), a, 0), axis=axis)
+
+    return jax.tree.map(one, x)
+
+
+def masked_logsumexp(x, mask, axis: int = -1) -> jax.Array:
+    """Log-sum-exp over active entries, returning -inf for empty rows."""
+    x = jnp.asarray(x)
+    mask = jnp.asarray(mask, dtype=bool)
+    return jax.nn.logsumexp(jnp.where(mask, x, -jnp.inf), axis=axis)
+
+
 def segment_logsumexp(row_ptr: np.ndarray, values: np.ndarray, n_row: int) -> np.ndarray:
     """CSR row-wise logsumexp on host."""
     row_ptr = np.asarray(row_ptr, dtype=np.int64)

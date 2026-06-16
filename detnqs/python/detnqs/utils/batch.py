@@ -52,6 +52,39 @@ def configure(*, chunk: int | None = 8192, bucket_min: int = 1024) -> None:
     jax.clear_caches()
 
 
+def bucket_size(n: int) -> int:
+    """Return the power-of-two bucket used for a true leading size."""
+    size = max(int(n), int(_CONFIG["bucket_min"]))
+    return 1 << (size - 1).bit_length()
+
+
+def chunks(tree: Tree, size: int | None = None):
+    """Yield padded leading-axis chunks and their true sizes."""
+    size = int(_CONFIG["chunk"] if size is None else size)
+    n = int(jax.tree.leaves(tree)[0].shape[0])
+
+    if n == 0:
+        yield pad(tree, size, axis=0), 0
+        return
+
+    for lo in range(0, n, size):
+        hi = min(lo + size, n)
+        block = jax.tree.map(lambda a: a[lo:hi], tree)
+        true_size = hi - lo
+
+        if true_size < size:
+            block = pad(block, size, axis=0)
+
+        yield block, true_size
+
+
+def mask(n: int, size: int | None = None) -> jax.Array:
+    """Return a leading-axis validity mask."""
+    n = int(n)
+    size = n if size is None else int(size)
+    return jnp.arange(size) < n
+
+
 def apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
     """Evaluate y_i = f_theta(x_i) over the leading axis."""
     chunk = _CONFIG["chunk"]
@@ -59,7 +92,7 @@ def apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
     if chunk is None:
         return _apply(fun, theta, x)
 
-    ys = [_trim(_apply(fun, theta, xb), n, axis=0) for xb, n in _chunks(x, chunk)]
+    ys = [trim(_apply(fun, theta, xb), n, axis=0) for xb, n in chunks(x, chunk)]
 
     if len(ys) == 1:
         return ys[0]
@@ -82,10 +115,10 @@ def jvp(
     ys = []
     dys = []
 
-    for xb, n in _chunks(x, chunk):
+    for xb, n in chunks(x, chunk):
         yb, dyb = _jvp(fun, theta, tangent, xb)
-        ys.append(_trim(yb, n, axis=0))
-        dys.append(_trim(dyb, n, axis=0))
+        ys.append(trim(yb, n, axis=0))
+        dys.append(trim(dyb, n, axis=0))
 
     if len(ys) == 1:
         return ys[0], dys[0]
@@ -109,7 +142,7 @@ def vjp(
 
     grad = jax.tree.map(jnp.zeros_like, theta)
 
-    for (xb, cb), _ in _chunks((x, cotangent), chunk):
+    for (xb, cb), _ in chunks((x, cotangent), chunk):
         grad = jax.tree.map(jnp.add, grad, _vjp(fun, theta, xb, cb))
 
     return jax.tree.map(jnp.conj, grad)
@@ -150,11 +183,10 @@ def bucket(
     if n is None:
         return _jit(fun, static_argnums)(*args)
 
-    size = max(n, int(_CONFIG["bucket_min"]))
-    size = 1 << (size - 1).bit_length()
+    size = bucket_size(n)
 
     padded = tuple(
-        arg if i in static_argnums or axis is None else _pad(arg, size, axis)
+        arg if i in static_argnums or axis is None else pad(arg, size, axis)
         for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True))
     )
 
@@ -165,32 +197,14 @@ def bucket(
 
     if isinstance(out_axes, tuple):
         return tuple(
-            y if axis is None else _trim(y, n, axis)
+            y if axis is None else trim(y, n, axis)
             for y, axis in zip(out, out_axes, strict=True)
         )
 
-    return _trim(out, n, out_axes)
+    return trim(out, n, out_axes)
 
 
-def _chunks(tree: Tree, size: int):
-    n = int(jax.tree.leaves(tree)[0].shape[0])
-
-    if n == 0:
-        yield _pad(tree, size, axis=0), 0
-        return
-
-    for lo in range(0, n, size):
-        hi = min(lo + size, n)
-        block = jax.tree.map(lambda a: a[lo:hi], tree)
-        true_size = hi - lo
-
-        if true_size < size:
-            block = _pad(block, size, axis=0)
-
-        yield block, true_size
-
-
-def _pad(tree: Tree, size: int, axis: int) -> Tree:
+def pad(tree: Tree, size: int, axis: int = 0) -> Tree:
     def pad_leaf(a):
         a = jnp.asarray(a)
         pad = int(size) - int(a.shape[axis])
@@ -205,7 +219,7 @@ def _pad(tree: Tree, size: int, axis: int) -> Tree:
     return jax.tree.map(pad_leaf, tree)
 
 
-def _trim(tree: Tree, size: int, axis: int) -> Tree:
+def trim(tree: Tree, size: int, axis: int = 0) -> Tree:
     def trim_leaf(a):
         slc = [slice(None)] * a.ndim
         slc[axis] = slice(0, int(size))

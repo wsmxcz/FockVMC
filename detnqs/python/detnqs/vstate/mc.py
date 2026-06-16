@@ -18,11 +18,12 @@ from ..sampler.mcmc import MCSampler
 from ..utils import precision
 from .base import VState
 
+
 @dataclass(slots=True)
 class MCState(VState):
     """Monte Carlo variational state.
 
-    Physical target:
+    Physical measure:
         pi_theta(x) proportional to |psi_theta(x)|^2.
 
     Markov reference:
@@ -31,22 +32,11 @@ class MCState(VState):
     Observation law:
         x ~ eta_alpha, y ~ B(y|x).
 
-    Hamiltonian blur:
-        The observed sample carries source mass s(x). For non-empty ket sets,
+    Hamiltonian Fock-VMC path:
+        proposal_eps == blur_eps == eloc_eps1.
 
-            s(x) = d_B(x).
-
-        The observed unnormalized density is
-
-            r_tilde(y)
-              = (1 - beta) d_B(y) |psi(y)|^alpha
-                + beta sum_x |H_yx| |psi(x)|^alpha.
-
-    Importance weight:
-        omega(y) = sample_mass(y) |psi_theta(y)|^2 / r_tilde(y).
-
-    The physical estimators remain Born-measure expectations; alpha and blur
-    only define the auxiliary observed law.
+    The same strong Hamiltonian connections define proposal, blur, and the
+    deterministic part of the local energy.
     """
 
     model: Model
@@ -78,6 +68,29 @@ class MCState(VState):
         eloc_eps2: float = 1.0e-6,
         eloc_sample: int = 256,
     ) -> MCState:
+        """Initialize a Monte Carlo variational state."""
+        eps = float(eloc_eps1)
+
+        if sampler.proposal not in {"ham", "single"}:
+            raise ValueError("sampler.proposal must be 'ham' or 'single'")
+
+        if sampler.blur_eps is None:
+            raise ValueError("sampler.blur_eps must be explicit")
+
+        if float(sampler.proposal_eps) != eps or float(sampler.blur_eps) != eps:
+            raise ValueError(
+                "Fock-VMC requires proposal_eps == blur_eps == eloc_eps1"
+            )
+
+        if not 0.0 <= float(sampler.blur) <= 1.0:
+            raise ValueError("sampler.blur must satisfy 0 <= blur <= 1")
+
+        if float(eloc_eps2) > eps:
+            raise ValueError("eloc_eps2 must not exceed eloc_eps1")
+
+        if int(eloc_sample) < 0:
+            raise ValueError("eloc_sample must be nonnegative")
+
         _, init_key, sample_key = jax.random.split(key, 3)
 
         params = model.init(
@@ -104,7 +117,7 @@ class MCState(VState):
             n_alpha=int(n_alpha),
             n_beta=int(n_beta),
             chain_init=chain_init,
-            eloc_eps1=float(eloc_eps1),
+            eloc_eps1=eps,
             eloc_eps2=float(eloc_eps2),
             eloc_sample=int(eloc_sample),
         )
@@ -120,14 +133,7 @@ class MCState(VState):
         return self._run(grad=True, geometry=geometry)
 
     def _run(self, *, grad: bool, geometry: bool):
-        """Run one VMC estimator pass.
-
-        The data flow is fixed:
-
-            chains -> observed dets -> unique kets
-            -> Hamiltonian bras -> unique model pool
-            -> weighted estimator.
-        """
+        """Run one VMC estimator pass."""
         timer = utils.Timer()
         sampler_state = self.sampler_state
 
@@ -166,27 +172,29 @@ class MCState(VState):
         timer.add("forward", sampler_stats.get("time_forward", 0.0))
 
         with timer("reduce"):
-            # count and mass are estimator-local; they never enter chain state.
             kets, _, sample_to_ket = libdet.unique_dets(samples)
             n_ket = int(kets.shape[0])
 
-            rdtype = precision.dtype("calc", "real", host=True)
             raw_mass = precision.asarray(
                 sample_mass,
                 "calc",
                 "real",
                 host=True,
             )
+
             mass = np.bincount(
                 sample_to_ket,
                 weights=raw_mass,
                 minlength=n_ket,
-            ).astype(rdtype, copy=False)
+            )
             mass2 = np.bincount(
                 sample_to_ket,
                 weights=raw_mass * raw_mass,
                 minlength=n_ket,
-            ).astype(rdtype, copy=False)
+            )
+
+            mass = precision.asarray(mass, "calc", "real", host=True)
+            mass2 = precision.asarray(mass2, "calc", "real", host=True)
 
             seed = 0
             if self.eloc_sample > 0:
@@ -195,40 +203,32 @@ class MCState(VState):
                 sampler_state = replace(sampler_state, key=key)
 
         with timer("conns"):
-            beta = float(np.clip(self.sampler.blur, 0.0, 1.0))
-            blur_eps = float(
-                self.sampler.proposal_eps
-                if self.sampler.blur_eps is None
-                else self.sampler.blur_eps
-            )
-            conn_eps = min(
-                float(self.eloc_eps1),
-                blur_eps if beta > 0.0 else float(self.eloc_eps1),
-            )
             conns = self.hamiltonian.conns(
                 kets,
-                conn_eps,
-                sample=max(0, int(self.eloc_sample)),
-                sample_eps=min(float(self.eloc_eps2), conn_eps),
+                float(self.eloc_eps1),
+                sample=int(self.eloc_sample),
+                sample_eps=float(self.eloc_eps2),
                 seed=seed,
             )
-            pool = np.ascontiguousarray(
+
+            det_pool = np.ascontiguousarray(
                 np.asarray(conns.dets, dtype=np.uint64)
             )
 
         with timer("forward"):
-            logpsi_pool_jax = utils.apply(
+            pool_logpsi_jax = utils.apply(
                 self.model.logpsi,
                 self.params,
-                pool,
+                det_pool,
             )
-            jax.block_until_ready(logpsi_pool_jax)
-            logpsi_pool = utils.host(logpsi_pool_jax)
+            jax.block_until_ready(pool_logpsi_jax)
+            pool_logpsi = utils.host(pool_logpsi_jax)
 
         with timer("reduce"):
-            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], logpsi_pool)
+            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], pool_logpsi)
+
             pool_logabs = precision.asarray(
-                np.asarray(to_logabs(logpsi_pool)).reshape(-1),
+                np.asarray(to_logabs(pool_logpsi)).reshape(-1),
                 "calc",
                 "real",
                 host=True,
@@ -238,12 +238,12 @@ class MCState(VState):
             lognu, eloc = self._local_estimate(
                 ket_logabs=ket_logabs,
                 pool_logabs=pool_logabs,
-                logpsi_pool=logpsi_pool,
+                pool_logpsi=pool_logpsi,
                 conns=conns,
-                blur_eps=blur_eps,
                 alpha=alpha,
-                n_sample=max(0, int(self.eloc_sample)),
+                n_sample=int(self.eloc_sample),
             )
+
             w, ess = self._weights(
                 mass=mass,
                 mass2=mass2,
@@ -260,7 +260,11 @@ class MCState(VState):
 
         if grad:
             with timer("backward"):
-                dlogpsi = rdtype(2.0) * w * residual
+                dlogpsi = precision.asarray(
+                    2.0 * w * residual,
+                    "calc",
+                    host=True,
+                )
                 cotangent = self.model.cotangent(ket_logpsi, dlogpsi)
 
                 gradient = utils.vjp(
@@ -271,7 +275,6 @@ class MCState(VState):
                         precision.asarray(
                             cotangent,
                             "model",
-                            "real",
                             host=True,
                         )
                     ),
@@ -279,7 +282,13 @@ class MCState(VState):
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    b_log = rdtype(2.0) * np.sqrt(w) * residual
+                    b_log = precision.asarray(
+                        2.0 * np.sqrt(w) * residual,
+                        "sr",
+                        "real",
+                        host=True,
+                    )
+
                     geom = Geometry(
                         theta=self.params,
                         coord=self.model.coord,
@@ -296,7 +305,6 @@ class MCState(VState):
                             precision.asarray(
                                 self.model.cotangent(ket_logpsi, b_log),
                                 "sr",
-                                "real",
                                 host=True,
                             )
                         ),
@@ -311,7 +319,22 @@ class MCState(VState):
         )
         new_state = replace(self, sampler_state=sampler_state)
 
+        n_forward = int(det_pool.shape[0])
+        n_strong = int(np.asarray(conns.bra_idx).size)
+        n_weak = int(np.asarray(conns.sample_bra_idx).size)
+        n_strong_h = int(np.asarray(conns.h).size)
+        n_weak_h = int(np.asarray(conns.sample_h).size)
+        n_forward_raw = n_ket + n_strong + n_weak
+        forward_frac = float(n_forward) / max(1, n_forward_raw)
+
         n_sample = int(samples.shape[0])
+        unique_frac = 1.0 - float(n_ket) / max(1, n_sample)
+
+        n_conn = (
+            float(sampler_stats.get("n_conn", 0.0))
+            + float(n_strong_h)
+        )
+
         stats = {
             "energy": energy,
             "variance": variance,
@@ -320,23 +343,11 @@ class MCState(VState):
             "ess_frac": float(ess / max(1, n_sample)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),
-            "repeat_frac": float(1.0 - n_ket / max(1, n_sample)),
-            "n_eval": float(pool.shape[0]),
-            "n_conn_eloc": float(np.asarray(conns.h).size),
-            "n_conn_weak": float(np.asarray(conns.sample_h).size),
-            "n_conn_proposal": float(
-                sampler_stats.get("n_conn_proposal", 0.0)
-            ),
-            "n_conn_blur": float(
-                sampler_stats.get("n_conn_blur", 0.0)
-                + (
-                    0
-                    if beta <= 0.0
-                    else np.count_nonzero(
-                        np.abs(np.asarray(conns.h)) >= blur_eps
-                    )
-                )
-            ),
+            "n_forward": float(det_pool.shape[0]),
+            "unique_frac": float(unique_frac),
+            "forward_frac": float(forward_frac),
+            "n_conn": n_conn,
+            "n_conn_weak": float(n_weak_h),
             "alpha": alpha,
         }
         stats.update(timer.stats())
@@ -348,18 +359,36 @@ class MCState(VState):
         *,
         ket_logabs: np.ndarray,
         pool_logabs: np.ndarray,
-        logpsi_pool: Any,
+        pool_logpsi: Any,
         conns: Any,
-        blur_eps: float,
         alpha: float,
         n_sample: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Evaluate the observation density and local energy."""
+        """Evaluate observation density and local energy."""
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
+
         alpha_r = rdtype(alpha)
-        beta = rdtype(np.clip(self.sampler.blur, 0.0, 1.0))
-        n_ket = ket_logabs.size
+        beta = rdtype(float(self.sampler.blur))
+        n_ket = int(ket_logabs.size)
+
+        ket_ptr = np.asarray(conns.ket_ptr, dtype=np.int64)
+        ket = np.repeat(
+            np.arange(n_ket, dtype=np.int64),
+            np.diff(ket_ptr),
+        )
+        bra = np.asarray(conns.bra_idx, dtype=np.int64)
+
+        h = precision.asarray(
+            np.asarray(conns.h),
+            "calc",
+            host=True,
+        )
+        diag = precision.asarray(
+            np.asarray(conns.diag),
+            "calc",
+            host=True,
+        )
 
         logrho = precision.asarray(
             alpha_r * ket_logabs,
@@ -368,27 +397,18 @@ class MCState(VState):
             host=True,
         )
 
-        ket_ptr = np.asarray(conns.ket_ptr, dtype=np.int64)
-        ket = np.repeat(
-            np.arange(n_ket, dtype=np.int64),
-            np.diff(ket_ptr),
-        )
-        bra = np.asarray(conns.bra_idx, dtype=np.int64)
-        h = precision.asarray(np.asarray(conns.h), "calc", host=True)
-        eloc = precision.asarray(
-            np.asarray(conns.diag).copy(),
-            "calc",
-            host=True,
-        )
+        eloc = diag.copy()
 
         if h.size:
-            bra_logpsi = jax.tree.map(lambda a: a[bra], logpsi_pool)
-            ket_logpsi = jax.tree.map(lambda a: a[ket], logpsi_pool)
+            bra_logpsi = jax.tree.map(lambda a: a[bra], pool_logpsi)
+            ket_logpsi = jax.tree.map(lambda a: a[ket], pool_logpsi)
+
             ratio = precision.asarray(
                 np.asarray(to_ratio(bra_logpsi, ket_logpsi)),
                 "calc",
                 host=True,
             )
+
             contribution = h * ratio
             eloc = eloc.astype(
                 np.result_type(eloc, contribution),
@@ -398,28 +418,21 @@ class MCState(VState):
 
         if beta <= 0.0:
             lognu = logrho
+
         else:
-            keep = np.abs(h) >= rdtype(blur_eps)
-            blur_ket = ket[keep]
-            blur_h = h[keep]
+            weight = precision.asarray(
+                np.asarray(conns.weight),
+                "calc",
+                "real",
+                host=True,
+            )
 
-            if keep.all():
-                degree = precision.asarray(
-                    np.asarray(conns.weight),
-                    "calc",
-                    "real",
-                    host=True,
-                )
-            else:
-                degree = np.zeros(n_ket, dtype=rdtype)
-                np.add.at(degree, blur_ket, np.abs(blur_h))
-
-            # Kets without blur bras retain the identity observation.
             stay_scale = np.where(
-                degree > 0.0,
-                (rdtype(1.0) - beta) * degree,
+                weight > 0.0,
+                (rdtype(1.0) - beta) * weight,
                 rdtype(1.0),
             )
+
             log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
             nonzero = stay_scale > 0.0
             log_stay[nonzero] = (
@@ -427,28 +440,16 @@ class MCState(VState):
                 + logrho[nonzero]
             )
 
-            if blur_h.size == 0:
-                lognu = log_stay
-            else:
-                bra_logabs = pool_logabs[bra[keep]]
-                abs_h = np.abs(blur_h)
-                valid = abs_h > 0.0
-                terms = np.full(blur_h.size, -np.inf, dtype=rdtype)
-                terms[valid] = (
-                    alpha_r * bra_logabs[valid]
-                    + np.log(np.maximum(abs_h[valid], tiny))
+            if h.size:
+                abs_h = np.abs(h)
+                terms = (
+                    alpha_r * pool_logabs[bra]
+                    + np.log(np.maximum(abs_h, tiny))
                 )
-                blur_count = np.bincount(
-                    blur_ket,
-                    minlength=n_ket,
-                ).astype(np.int64)
-                blur_ptr = np.concatenate(
-                    [np.zeros(1, dtype=np.int64), np.cumsum(blur_count)]
-                )
-                log_blur = np.log(beta) + utils.segment_logsumexp(
-                    blur_ptr,
-                    terms,
-                    n_ket,
+
+                log_blur = (
+                    np.log(beta)
+                    + utils.segment_logsumexp(ket_ptr, terms, n_ket)
                 )
                 lognu = precision.asarray(
                     np.logaddexp(log_stay, log_blur),
@@ -457,8 +458,11 @@ class MCState(VState):
                     host=True,
                 )
 
+            else:
+                lognu = log_stay
+
         sample_h = precision.asarray(
-            np.asarray(conns.sample_h),
+            np.asarray(conns.sample_h) if n_sample > 0 else np.empty(0),
             "calc",
             host=True,
         )
@@ -472,39 +476,40 @@ class MCState(VState):
                 np.arange(n_ket, dtype=np.int64),
                 np.diff(sample_ket_ptr),
             )
-            sample_bra = np.asarray(conns.sample_bra_idx, dtype=np.int64)
+            sample_bra = np.asarray(
+                conns.sample_bra_idx,
+                dtype=np.int64,
+            )
+
             ratio = precision.asarray(
                 np.asarray(
                     to_ratio(
-                        jax.tree.map(
-                            lambda a: a[sample_bra],
-                            logpsi_pool,
-                        ),
-                        jax.tree.map(
-                            lambda a: a[sample_ket],
-                            logpsi_pool,
-                        ),
+                        jax.tree.map(lambda a: a[sample_bra], pool_logpsi),
+                        jax.tree.map(lambda a: a[sample_ket], pool_logpsi),
                     )
                 ),
                 "calc",
                 host=True,
             )
+
             count = precision.asarray(
                 np.asarray(conns.sample_count),
                 "calc",
                 "real",
                 host=True,
             )
-            weight = precision.asarray(
+            sample_weight = precision.asarray(
                 np.asarray(conns.sample_weight),
                 "calc",
                 "real",
                 host=True,
             )
-            scale = count * weight[sample_ket] / np.maximum(
+
+            scale = count * sample_weight[sample_ket] / np.maximum(
                 rdtype(n_sample) * np.abs(sample_h),
-                rdtype(precision.tiny("calc")),
+                tiny,
             )
+
             contribution = scale * sample_h * ratio
             eloc = eloc.astype(
                 np.result_type(eloc, contribution),
@@ -522,16 +527,13 @@ class MCState(VState):
         ket_logabs: np.ndarray,
         lognu: np.ndarray,
     ) -> tuple[np.ndarray, float]:
-        """Normalize Born weights and compute the sample-level ESS.
-
-        u_i = |psi(D_i)|^2 / r_tilde(D_i),
-        w_i = mass_i u_i / sum_j mass_j u_j.
-        """
+        """Normalize Born weights and compute sample-level ESS."""
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
         logu = rdtype(2.0) * ket_logabs - lognu
         finite = np.isfinite(logu)
+
         if not finite.any():
             raise FloatingPointError("all importance weights are non-finite")
 
@@ -540,6 +542,7 @@ class MCState(VState):
 
         weighted_mass = mass * u
         norm = float(np.sum(weighted_mass))
+
         if not np.isfinite(norm) or norm <= 0.0:
             raise FloatingPointError("importance weights have zero total mass")
 
@@ -549,8 +552,10 @@ class MCState(VState):
             "real",
             host=True,
         )
+
         ess_denom = float(np.sum(mass2 * u * u))
         ess = float(norm * norm / max(ess_denom, float(tiny)))
+
         return w, ess
 
     def _auto_alpha(
@@ -562,17 +567,13 @@ class MCState(VState):
         energy: float,
         w: np.ndarray,
     ) -> Chains:
-        """Update alpha by KL moment projection.
-
-        The residual-tilted Born law is projected onto
-        ``eta_alpha proportional to |psi|^alpha`` by matching
-        ``E[log|psi|]``. Robbins-Monro averaging makes adaptation diminish.
-        """
+        """Update alpha by KL moment projection."""
         if self.sampler.alpha is not None:
             return sampler_state
 
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
+
         alpha = float(np.clip(float(sampler_state.alpha), 0.0, 2.0))
         alpha_step = int(sampler_state.alpha_step) + 1
 
@@ -597,6 +598,7 @@ class MCState(VState):
 
         valid = np.isfinite(ell) & np.isfinite(weight) & np.isfinite(resid)
         valid &= weight > 0.0
+
         if not valid.any():
             return replace(
                 sampler_state,
@@ -608,21 +610,22 @@ class MCState(VState):
         weight = weight[valid]
         resid = resid[valid]
 
-        target = weight * resid
-        target_norm = float(np.sum(target))
-        if not np.isfinite(target_norm) or target_norm <= float(tiny):
+        resid_weight = weight * resid
+        resid_norm = float(np.sum(resid_weight))
+
+        if not np.isfinite(resid_norm) or resid_norm <= float(tiny):
             return replace(
                 sampler_state,
                 alpha=alpha,
                 alpha_step=alpha_step,
             )
 
-        target_moment = float(np.dot(target, ell) / target_norm)
+        resid_moment = float(np.dot(resid_weight, ell) / resid_norm)
 
-        # eta_alpha / pi is proportional to exp((alpha - 2) log|psi|).
         log_ratio = (rdtype(alpha) - rdtype(2.0)) * ell
         reference = weight * np.exp(log_ratio - rdtype(np.max(log_ratio)))
         reference_norm = float(np.sum(reference))
+
         if not np.isfinite(reference_norm) or reference_norm <= float(tiny):
             return replace(
                 sampler_state,
@@ -637,6 +640,7 @@ class MCState(VState):
             np.dot(reference, (ell - rdtype(reference_moment)) ** 2)
             / reference_norm
         )
+
         if not np.isfinite(reference_var) or reference_var <= float(tiny):
             return replace(
                 sampler_state,
@@ -645,7 +649,7 @@ class MCState(VState):
             )
 
         alpha_hat = alpha + (
-            target_moment - reference_moment
+            resid_moment - reference_moment
         ) / reference_var
         alpha_hat = float(np.clip(alpha_hat, 0.0, 2.0))
 

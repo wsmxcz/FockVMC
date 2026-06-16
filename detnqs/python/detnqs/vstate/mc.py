@@ -13,8 +13,8 @@ from ..model.base import Model
 from ..model.base import to_logabs
 from ..model.base import to_ratio
 from ..optimizer import Geometry
+from ..sampler.mcmc import Chains
 from ..sampler.mcmc import MCSampler
-from ..sampler.mcmc import Walkers
 from ..utils import precision
 from .base import VState
 
@@ -53,11 +53,11 @@ class MCState(VState):
     params: Any
     hamiltonian: Any
     sampler: MCSampler
-    sampler_state: Walkers
+    sampler_state: Chains
 
     n_alpha: int
     n_beta: int
-    init_method: str | Any = "hf"
+    chain_init: str | Any = "hf"
 
     eloc_eps1: float = 1.0e-3
     eloc_eps2: float = 1.0e-6
@@ -73,7 +73,7 @@ class MCState(VState):
         n_alpha: int,
         n_beta: int,
         key: jax.Array,
-        init_method: str | Any = "hf",
+        chain_init: str | Any = "hf",
         eloc_eps1: float = 1.0e-3,
         eloc_eps2: float = 1.0e-6,
         eloc_sample: int = 256,
@@ -92,7 +92,7 @@ class MCState(VState):
             key=sample_key,
             n_alpha=int(n_alpha),
             n_beta=int(n_beta),
-            init_method=init_method,
+            chain_init=chain_init,
         )
 
         return cls(
@@ -103,7 +103,7 @@ class MCState(VState):
             sampler_state=sampler_state,
             n_alpha=int(n_alpha),
             n_beta=int(n_beta),
-            init_method=init_method,
+            chain_init=chain_init,
             eloc_eps1=float(eloc_eps1),
             eloc_eps2=float(eloc_eps2),
             eloc_sample=int(eloc_sample),
@@ -124,8 +124,8 @@ class MCState(VState):
 
         The data flow is fixed:
 
-            walkers -> observed samples -> unique kets
-            -> Hamiltonian connections -> unique model pool
+            chains -> observed dets -> unique kets
+            -> Hamiltonian bras -> unique model pool
             -> weighted estimator.
         """
         timer = utils.Timer()
@@ -140,7 +140,7 @@ class MCState(VState):
                     key=sampler_state.key,
                     n_alpha=int(self.n_alpha),
                     n_beta=int(self.n_beta),
-                    init_method=self.init_method,
+                    chain_init=self.chain_init,
                     alpha=(
                         float(sampler_state.alpha)
                         if self.sampler.alpha is None
@@ -177,10 +177,16 @@ class MCState(VState):
                 "real",
                 host=True,
             )
-            mass = np.zeros(n_ket, dtype=rdtype)
-            mass2 = np.zeros(n_ket, dtype=rdtype)
-            np.add.at(mass, sample_to_ket, raw_mass)
-            np.add.at(mass2, sample_to_ket, raw_mass * raw_mass)
+            mass = np.bincount(
+                sample_to_ket,
+                weights=raw_mass,
+                minlength=n_ket,
+            ).astype(rdtype, copy=False)
+            mass2 = np.bincount(
+                sample_to_ket,
+                weights=raw_mass * raw_mass,
+                minlength=n_ket,
+            ).astype(rdtype, copy=False)
 
             seed = 0
             if self.eloc_sample > 0:
@@ -221,24 +227,21 @@ class MCState(VState):
 
         with timer("reduce"):
             ket_logpsi = jax.tree.map(lambda a: a[:n_ket], logpsi_pool)
-            ket_logabs = precision.asarray(
-                np.asarray(to_logabs(ket_logpsi)).reshape(-1),
+            pool_logabs = precision.asarray(
+                np.asarray(to_logabs(logpsi_pool)).reshape(-1),
                 "calc",
                 "real",
                 host=True,
             )
+            ket_logabs = pool_logabs[:n_ket]
 
-            lognu = self._lognu(
+            lognu, eloc = self._local_estimate(
                 ket_logabs=ket_logabs,
+                pool_logabs=pool_logabs,
                 logpsi_pool=logpsi_pool,
                 conns=conns,
                 blur_eps=blur_eps,
                 alpha=alpha,
-            )
-            eloc = self._eloc(
-                conns=conns,
-                logpsi_pool=logpsi_pool,
-                n_ket=n_ket,
                 n_sample=max(0, int(self.eloc_sample)),
             )
             w, ess = self._weights(
@@ -317,6 +320,7 @@ class MCState(VState):
             "ess_frac": float(ess / max(1, n_sample)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),
+            "repeat_frac": float(1.0 - n_ket / max(1, n_sample)),
             "n_eval": float(pool.shape[0]),
             "n_conn_eloc": float(np.asarray(conns.h).size),
             "n_conn_weak": float(np.asarray(conns.sample_h).size),
@@ -339,140 +343,28 @@ class MCState(VState):
 
         return new_state, energy, gradient, stats, geom
 
-    def _lognu(
+    def _local_estimate(
         self,
         *,
         ket_logabs: np.ndarray,
+        pool_logabs: np.ndarray,
         logpsi_pool: Any,
         conns: Any,
         blur_eps: float,
         alpha: float,
-    ) -> np.ndarray:
-        """Return the unnormalized density of blurred observations.
-
-        r_tilde(y) =
-            (1-beta) d_B(y) |psi(y)|^alpha
-            + beta sum_x |H_yx| |psi(x)|^alpha.
-
-        Kets without blur connections use the identity observation.
-        """
+        n_sample: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate the observation density and local energy."""
         rdtype = precision.dtype("calc", "real", host=True)
         tiny = rdtype(precision.tiny("calc"))
         alpha_r = rdtype(alpha)
         beta = rdtype(np.clip(self.sampler.blur, 0.0, 1.0))
+        n_ket = ket_logabs.size
+
         logrho = precision.asarray(
             alpha_r * ket_logabs,
             "calc",
             "real",
-            host=True,
-        )
-
-        if beta <= 0.0:
-            return logrho
-
-        ket_ptr = np.asarray(conns.ket_ptr, dtype=np.int64)
-        ket = np.repeat(
-            np.arange(ket_logabs.shape[0], dtype=np.int64),
-            np.diff(ket_ptr),
-        )
-        bra = np.asarray(conns.bra_idx, dtype=np.int64)
-        h = precision.asarray(
-            np.asarray(conns.h),
-            "calc",
-            "real",
-            host=True,
-        )
-        keep_edge = np.abs(h) >= rdtype(blur_eps)
-        ket = ket[keep_edge]
-        bra = bra[keep_edge]
-        h = h[keep_edge]
-
-        if keep_edge.all():
-            degree = precision.asarray(
-                np.asarray(conns.weight),
-                "calc",
-                "real",
-                host=True,
-            )
-        else:
-            degree = np.zeros(ket_logabs.shape[0], dtype=rdtype)
-            np.add.at(degree, ket, np.abs(h))
-
-        # Kets without connections retain the identity observation.
-        stay_scale = np.where(
-            degree > 0.0,
-            (rdtype(1.0) - beta) * degree,
-            rdtype(1.0),
-        )
-        log_stay = np.full(ket_logabs.shape[0], -np.inf, dtype=rdtype)
-        keep = stay_scale > 0.0
-        log_stay[keep] = (
-            np.log(np.maximum(stay_scale[keep], tiny)) + logrho[keep]
-        )
-
-        if h.size == 0:
-            return log_stay
-
-        bra_logabs = precision.asarray(
-            np.asarray(
-                to_logabs(
-                    jax.tree.map(
-                        lambda a: a[bra],
-                        logpsi_pool,
-                    )
-                )
-            ).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
-        abs_h = np.abs(h)
-        valid = abs_h > 0.0
-        terms = np.full(h.size, -np.inf, dtype=rdtype)
-        terms[valid] = (
-            alpha_r * bra_logabs[valid]
-            + np.log(np.maximum(abs_h[valid], tiny))
-        )
-
-        ket_count = np.bincount(
-            ket,
-            minlength=ket_logabs.shape[0],
-        ).astype(np.int64)
-        ket_ptr = np.concatenate(
-            [np.zeros(1, dtype=np.int64), np.cumsum(ket_count)]
-        )
-        log_blur = np.log(beta) + utils.segment_logsumexp(
-            ket_ptr,
-            terms,
-            ket_logabs.shape[0],
-        )
-
-        return precision.asarray(
-            np.logaddexp(log_stay, log_blur),
-            "calc",
-            "real",
-            host=True,
-        )
-
-    def _eloc(
-        self,
-        *,
-        conns: Any,
-        logpsi_pool: Any,
-        n_ket: int,
-        n_sample: int,
-    ) -> np.ndarray:
-        """Evaluate the semi-stochastic local energy.
-
-        Exact connections are summed directly. A sampled weak connection adds
-
-            count * weight_i / (S |H_ia|)
-            * H_ia * psi(a) / psi(i).
-        """
-        rdtype = precision.dtype("calc", "real", host=True)
-        eloc = precision.asarray(
-            np.asarray(conns.diag).copy(),
-            "calc",
             host=True,
         )
 
@@ -483,15 +375,17 @@ class MCState(VState):
         )
         bra = np.asarray(conns.bra_idx, dtype=np.int64)
         h = precision.asarray(np.asarray(conns.h), "calc", host=True)
+        eloc = precision.asarray(
+            np.asarray(conns.diag).copy(),
+            "calc",
+            host=True,
+        )
 
         if h.size:
+            bra_logpsi = jax.tree.map(lambda a: a[bra], logpsi_pool)
+            ket_logpsi = jax.tree.map(lambda a: a[ket], logpsi_pool)
             ratio = precision.asarray(
-                np.asarray(
-                    to_ratio(
-                        jax.tree.map(lambda a: a[bra], logpsi_pool),
-                        jax.tree.map(lambda a: a[ket], logpsi_pool),
-                    )
-                ),
+                np.asarray(to_ratio(bra_logpsi, ket_logpsi)),
                 "calc",
                 host=True,
             )
@@ -502,12 +396,67 @@ class MCState(VState):
             )
             np.add.at(eloc, ket, contribution)
 
-        sample_ket_ptr = np.asarray(conns.sample_ket_ptr, dtype=np.int64)
-        sample_ket = np.repeat(
-            np.arange(n_ket, dtype=np.int64),
-            np.diff(sample_ket_ptr),
-        )
-        sample_bra = np.asarray(conns.sample_bra_idx, dtype=np.int64)
+        if beta <= 0.0:
+            lognu = logrho
+        else:
+            keep = np.abs(h) >= rdtype(blur_eps)
+            blur_ket = ket[keep]
+            blur_h = h[keep]
+
+            if keep.all():
+                degree = precision.asarray(
+                    np.asarray(conns.weight),
+                    "calc",
+                    "real",
+                    host=True,
+                )
+            else:
+                degree = np.zeros(n_ket, dtype=rdtype)
+                np.add.at(degree, blur_ket, np.abs(blur_h))
+
+            # Kets without blur bras retain the identity observation.
+            stay_scale = np.where(
+                degree > 0.0,
+                (rdtype(1.0) - beta) * degree,
+                rdtype(1.0),
+            )
+            log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
+            nonzero = stay_scale > 0.0
+            log_stay[nonzero] = (
+                np.log(np.maximum(stay_scale[nonzero], tiny))
+                + logrho[nonzero]
+            )
+
+            if blur_h.size == 0:
+                lognu = log_stay
+            else:
+                bra_logabs = pool_logabs[bra[keep]]
+                abs_h = np.abs(blur_h)
+                valid = abs_h > 0.0
+                terms = np.full(blur_h.size, -np.inf, dtype=rdtype)
+                terms[valid] = (
+                    alpha_r * bra_logabs[valid]
+                    + np.log(np.maximum(abs_h[valid], tiny))
+                )
+                blur_count = np.bincount(
+                    blur_ket,
+                    minlength=n_ket,
+                ).astype(np.int64)
+                blur_ptr = np.concatenate(
+                    [np.zeros(1, dtype=np.int64), np.cumsum(blur_count)]
+                )
+                log_blur = np.log(beta) + utils.segment_logsumexp(
+                    blur_ptr,
+                    terms,
+                    n_ket,
+                )
+                lognu = precision.asarray(
+                    np.logaddexp(log_stay, log_blur),
+                    "calc",
+                    "real",
+                    host=True,
+                )
+
         sample_h = precision.asarray(
             np.asarray(conns.sample_h),
             "calc",
@@ -515,6 +464,15 @@ class MCState(VState):
         )
 
         if sample_h.size and n_sample > 0:
+            sample_ket_ptr = np.asarray(
+                conns.sample_ket_ptr,
+                dtype=np.int64,
+            )
+            sample_ket = np.repeat(
+                np.arange(n_ket, dtype=np.int64),
+                np.diff(sample_ket_ptr),
+            )
+            sample_bra = np.asarray(conns.sample_bra_idx, dtype=np.int64)
             ratio = precision.asarray(
                 np.asarray(
                     to_ratio(
@@ -554,7 +512,7 @@ class MCState(VState):
             )
             np.add.at(eloc, sample_ket, contribution)
 
-        return precision.asarray(eloc, "calc", host=True)
+        return lognu, precision.asarray(eloc, "calc", host=True)
 
     def _weights(
         self,
@@ -598,12 +556,12 @@ class MCState(VState):
     def _auto_alpha(
         self,
         *,
-        sampler_state: Walkers,
+        sampler_state: Chains,
         ket_logabs: np.ndarray,
         eloc: np.ndarray,
         energy: float,
         w: np.ndarray,
-    ) -> Walkers:
+    ) -> Chains:
         """Update alpha by KL moment projection.
 
         The residual-tilted Born law is projected onto

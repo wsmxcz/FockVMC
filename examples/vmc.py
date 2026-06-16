@@ -19,30 +19,30 @@ import utils as run_utils
 
 
 dq_utils.batch.configure(chunk=8192)
-dq_utils.precision.configure("single")
+dq_utils.precision.configure("double")
 jax.config.update("jax_debug_nans", False)
 jax.config.update("jax_log_compiles", False)
 
 
 mol = gto.M(
-    # atom=
-    # '''
-    # N   0.53920000,  0.00000000,  0.0000000
-    # N   -0.539200000,  0.00000000,  0.0000000
-    # ''',
     atom=
     '''
-    O   0.00000000,  0.00000000,  0.00000000
-    H   0.75700000,  0.00000000,  0.58590000
-    H  -0.75700000,  0.00000000,  0.58590000
+    N   0.53920000,  0.00000000,  0.0000000
+    N   -0.539200000,  0.00000000,  0.0000000
     ''',
+    # atom=
+    # '''
+    # O   0.00000000,  0.00000000,  0.00000000
+    # H   0.75700000,  0.00000000,  0.58590000
+    # H  -0.75700000,  0.00000000,  0.58590000
+    # ''',
     # atom=
     # '''
     # Li   3.732, 0.25, 0.0
     # Li   2.0, 0.25, 0.0
     # O  2.866, -0.25, 0.0
     # ''',
-    basis="6-31g",
+    basis="sto-3g",
     unit="Angstrom",
     spin=0,
     verbose=0,
@@ -78,7 +78,7 @@ model = RBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 sampler = MCSampler(
     n_samples=4096,
     n_chains=4096,
-    thermal_steps=16,
+    thermal_steps=128,
     proposal="ham",
     blur=0.5,
 )
@@ -89,7 +89,7 @@ state = MCState.init(
     sampler=sampler,
     n_alpha=n_alpha,
     n_beta=n_beta,
-    init_method="hf",
+    chain_init="hf",
     key=jax.random.key(0),
     eloc_sample=1024
 )
@@ -118,7 +118,7 @@ line = run_utils.print_metrics(metrics)
 
 history = []
 total_times = defaultdict(float)
-steps = 500
+steps = 1000
 
 for step in range(steps):
     stats = dict(vmc.step())
@@ -139,4 +139,5 @@ run_utils.print_times(total_times)
 print(line)
 
 run_utils.plot_convergence(history, e_fci)
-plt.show()
+plt.savefig('convergence.pdf', dpi=300, bbox_inches='tight')
+plt.close()

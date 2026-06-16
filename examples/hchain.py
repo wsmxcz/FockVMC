@@ -91,7 +91,7 @@ state = MCState.init(
     sampler=sampler,
     n_alpha=n_alpha,
     n_beta=n_beta,
-    init_method="random",
+    chain_init="random",
     key=jax.random.key(0),
 )
 
@@ -139,4 +139,5 @@ run_utils.print_times(total_times)
 print(line)
 
 run_utils.plot_convergence(history, e_fci)
-plt.show()
+plt.savefig('convergence.pdf', dpi=300, bbox_inches='tight')
+plt.close()

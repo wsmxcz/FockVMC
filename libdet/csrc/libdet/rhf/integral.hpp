@@ -9,7 +9,7 @@
 namespace libdet::rhf {
 
 // Owned RHF spatial-orbital integrals in chemist notation.
-class RHFIntegrals {
+class Integral {
 public:
     enum class Layout : std::uint8_t {
         full,
@@ -17,7 +17,7 @@ public:
         pair_tri
     };
 
-    RHFIntegrals(
+    Integral(
         int norb,
         std::span<const double> h1,
         std::span<const double> eri,
@@ -29,13 +29,13 @@ public:
           ecore_(ecore) {
         if (norb_ < 0) {
             throw std::invalid_argument(
-                "RHFIntegrals: norb must be nonnegative"
+                "Integral: norb must be nonnegative"
             );
         }
 
         const std::size_t n = static_cast<std::size_t>(norb_);
         if (h1_.size() != n * n) {
-            throw std::invalid_argument("RHFIntegrals: h1 size mismatch");
+            throw std::invalid_argument("Integral: h1 size mismatch");
         }
 
         const std::size_t np = n * (n + 1u) / 2u;
@@ -47,7 +47,7 @@ public:
             layout_ = Layout::pair_tri;
         } else {
             throw std::invalid_argument(
-                "RHFIntegrals: unsupported ERI layout"
+                "Integral: unsupported ERI layout"
             );
         }
     }

@@ -43,8 +43,7 @@ def davidson_primme(
 ):
     t0 = time.perf_counter()
 
-    dets = libdet.to_dets(dets)
-    hdiag = np.asarray(ham.diags(dets), dtype=np.float64).reshape(-1)
+    hdiag = np.asarray(ham.diag(dets), dtype=np.float64).reshape(-1)
     n = hdiag.size
 
     if n == 1:
@@ -73,11 +72,11 @@ def davidson_primme(
 
         def matvec(x):
             x = np.asarray(x, dtype=np.float64).reshape(-1)
-            return np.asarray(ham.matvec(dets, x, kets=dets), dtype=np.float64)
+            return np.asarray(ham.matvec(dets, x, ket=dets), dtype=np.float64)
 
         def matmat(X):
             X = np.asarray(X, dtype=np.float64)
-            return np.asarray(ham.matvec(dets, X, kets=dets), dtype=np.float64)
+            return np.asarray(ham.matvec(dets, X, ket=dets), dtype=np.float64)
 
         A = LinearOperator((n, n), matvec=matvec, matmat=matmat, dtype=np.float64)
 
@@ -154,7 +153,7 @@ def hci_solve(
 
     dets = hf_det(int(ham.norb), nelec)[None]
     coeffs = np.array([1.0], dtype=np.float64)
-    diags = np.asarray(ham.diags(dets), dtype=np.float64).reshape(-1)
+    diags = np.asarray(ham.diag(dets), dtype=np.float64).reshape(-1)
     energy = float(diags[0])
 
     header = (
@@ -222,7 +221,7 @@ def semi_pt2(
     )
 
     hpsi = np.asarray(prj.hpsi, dtype=np.float64)
-    diags = np.asarray(prj.diags, dtype=np.float64)
+    diags = np.asarray(prj.diag, dtype=np.float64)
     e2_det = float(np.sum((hpsi * hpsi) / (energy - diags)))
 
     # Sample the weak window eps2 <= |H_ai c_i| < eps1.
@@ -238,7 +237,7 @@ def semi_pt2(
     )
 
     rep_ptr = np.asarray(sample.rep_ptr, dtype=np.int64)
-    diags = np.asarray(sample.diags, dtype=np.float64)
+    diags = np.asarray(sample.diag, dtype=np.float64)
     hpsi_strong = np.asarray(sample.hpsi_strong, dtype=np.float64)
     hpsi_a = np.asarray(sample.hpsi_a, dtype=np.float64)
     hpsi_b = np.asarray(sample.hpsi_b, dtype=np.float64)
@@ -294,7 +293,7 @@ state = hci_solve(
     mol.nelec,
     eps=1e-4,
     max_cycle=10,
-    davidson_mode="matvec",
+    davidson_mode="sparse",
 )
 
 e2_total, e2_det, e2_stoch, err = semi_pt2(

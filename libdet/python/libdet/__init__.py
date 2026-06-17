@@ -18,54 +18,14 @@ __all__ = [
     "Hamiltonian",
     "Projection",
     "ProjectSamples",
-    "to_dets",
-    "unique_dets",
 ]
-
-
-def to_dets(dets: Any) -> np.ndarray:
-    """Return a contiguous determinant batch with shape (N, 2, nword)."""
-    arr = np.asarray(dets, dtype=np.uint64)
-
-    if arr.ndim != 3 or arr.shape[1] != 2 or arr.shape[2] <= 0:
-        raise ValueError("determinants must have shape (N, 2, nword)")
-
-    return np.ascontiguousarray(arr)
-
-
-def unique_dets(dets: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return unique determinants, first positions, and inverse indices."""
-    dets = to_dets(dets)
-    n_dets = int(dets.shape[0])
-
-    if n_dets == 0:
-        empty = np.empty(0, dtype=np.int64)
-        return dets, empty, empty
-
-    flat = dets.reshape(n_dets, -1)
-    row = flat.view(
-        np.dtype((np.void, flat.dtype.itemsize * flat.shape[1]))
-    ).ravel()
-    _, first, inverse = np.unique(
-        row,
-        return_index=True,
-        return_inverse=True,
-    )
-
-    order = np.argsort(first, kind="stable")
-    first = first[order].astype(np.int64, copy=False)
-    remap = np.empty(order.size, dtype=np.int64)
-    remap[order] = np.arange(order.size, dtype=np.int64)
-    inverse = remap[inverse]
-
-    return np.ascontiguousarray(dets[first]), first, inverse
 
 
 @dataclass(frozen=True, slots=True)
 class Hamiltonian:
     """Determinant Hamiltonian primitives."""
 
-    _raw: _RawHamiltonian
+    _raw: Any
     _ecore: float = 0.0
 
     @classmethod
@@ -75,6 +35,30 @@ class Hamiltonian:
         eri_arr = np.ascontiguousarray(np.asarray(eri, dtype=np.float64).reshape(-1))
 
         raw = _RawHamiltonian.rhf(h1_arr, eri_arr, float(ecore))
+
+        return cls(raw, float(ecore))
+
+    @classmethod
+    def guga(
+        cls,
+        h1: Any,
+        eri: Any,
+        *,
+        n_alpha: int,
+        n_beta: int,
+        ecore: float = 0.0,
+    ) -> Hamiltonian:
+        """Build a GUGA CSF spin-adapted Hamiltonian."""
+        h1_arr = np.ascontiguousarray(np.asarray(h1, dtype=np.float64))
+        eri_arr = np.ascontiguousarray(np.asarray(eri, dtype=np.float64).reshape(-1))
+
+        raw = _RawHamiltonian.guga(
+            h1_arr,
+            eri_arr,
+            int(n_alpha),
+            int(n_beta),
+            float(ecore),
+        )
 
         return cls(raw, float(ecore))
 
@@ -95,59 +79,49 @@ class Hamiltonian:
 
     def hij(self, bra: Any, ket: Any) -> float:
         """Return H[bra, ket]. Each input must contain exactly one determinant."""
-        bra_arr = to_dets(bra)
-        ket_arr = to_dets(ket)
+        return float(self._raw.hij(bra, ket))
 
-        if bra_arr.shape[0] != 1 or ket_arr.shape[0] != 1:
-            raise ValueError("hij expects exactly one bra and one ket determinant")
-
-        return float(self._raw.hij(bra_arr, ket_arr))
-
-    def diags(self, dets: Any) -> np.ndarray:
+    def diag(self, x: Any) -> np.ndarray:
         """Return diagonal elements H[det, det] for a determinant batch."""
-        return np.asarray(self._raw.diags(to_dets(dets)), dtype=np.float64)
+        return np.asarray(self._raw.diag(x), dtype=np.float64)
 
     def expand(
         self,
-        kets: Any,
+        ket: Any,
         eps: float,
         *,
         coeffs: Any = None,
         exclude: Any = None,
     ) -> np.ndarray:
-        """Return unique screened bras connected from kets.
+        """Return unique screened bras connected from ket.
 
         With coeffs, screening uses |H_ai c_i| >= eps.
         Without coeffs, screening uses |H_ai| >= eps.
-        The exclude space defaults to kets in the C++ layer when omitted.
+        The exclude space defaults to ket in the C++ layer when omitted.
         """
-        ket_arr = to_dets(kets)
-
         coeff_arr = None
         if coeffs is not None:
             coeff_arr = np.ascontiguousarray(
                 np.asarray(coeffs, dtype=np.float64).reshape(-1)
             )
 
-            if coeff_arr.shape[0] != ket_arr.shape[0]:
+            if coeff_arr.shape[0] != ket.shape[0]:
                 raise ValueError("coeffs length must match number of kets")
-
-        exclude_arr = None if exclude is None else to_dets(exclude)
 
         return np.asarray(
             self._raw.expand(
-                ket_arr,
+                ket,
                 float(eps),
                 coeff_arr,
-                exclude_arr,
+                exclude,
             ),
             dtype=np.uint64,
         )
 
     def project(
         self,
-        bras: Any | None,
-        kets: Any,
+        bra: Any | None,
+        ket: Any,
         coeffs: Any,
         *,
         eps: float = 0.0,
@@ -155,37 +129,34 @@ class Hamiltonian:
     ) -> Projection:
         """Return projected amplitudes on known or generated bras.
 
-        If bras is given, compute H[bras, kets] @ coeffs.
-        If bras is None, generate connected external bras from kets and
+        If bra is given, compute H[bra, ket] @ coeffs.
+        If bra is None, generate connected external bras from ket and
         accumulate screened H_ai c_i contributions.
 
-        kets and coeffs are always aligned.
+        ket and coeffs are always aligned.
         """
-        kets_arr = to_dets(kets)
         coeff_arr = np.ascontiguousarray(
             np.asarray(coeffs, dtype=np.float64).reshape(-1)
         )
 
-        if coeff_arr.shape[0] != kets_arr.shape[0]:
-            raise ValueError("coeffs length must match number of kets")
+        if coeff_arr.shape[0] != ket.shape[0]:
+            raise ValueError("coeffs length must match number of ket")
 
-        exclude_arr = None if exclude is None else to_dets(exclude)
-
-        if bras is None:
+        if bra is None:
             return self._raw.project(
                 None,
-                kets_arr,
+                ket,
                 coeff_arr,
                 float(eps),
-                exclude_arr,
+                exclude,
             )
 
         if exclude is not None:
-            raise ValueError("exclude is only valid when bras is None")
+            raise ValueError("exclude is only valid when bra is None")
 
         return self._raw.project(
-            to_dets(bras),
-            kets_arr,
+            bra,
+            ket,
             coeff_arr,
             float(eps),
             None,
@@ -193,7 +164,7 @@ class Hamiltonian:
 
     def conns(
         self,
-        kets: Any,
+        ket: Any,
         eps: float,
         *,
         sample: int = 0,
@@ -202,7 +173,7 @@ class Hamiltonian:
     ) -> Conns:
         """Return exact and optionally sampled bra connections for each ket."""
         return self._raw.conns(
-            to_dets(kets),
+            ket,
             float(eps),
             int(sample),
             float(sample_eps),
@@ -211,11 +182,11 @@ class Hamiltonian:
 
     def degrees(
         self,
-        kets: Any,
+        ket: Any,
         eps: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return absolute coupling weights and bra counts for each ket."""
-        weight, nconn = self._raw.degrees(to_dets(kets), float(eps))
+        weight, nconn = self._raw.degrees(ket, float(eps))
         return (
             np.asarray(weight, dtype=np.float64),
             np.asarray(nconn, dtype=np.int64),
@@ -223,50 +194,48 @@ class Hamiltonian:
 
     def matrix(
         self,
-        bras: Any,
-        kets: Any | None = None,
+        bra: Any,
+        ket: Any | None = None,
     ) -> csr_matrix:
-        """Return exact sparse H[bras, kets]."""
-        bras_arr = to_dets(bras)
-        kets_arr = bras_arr if kets is None else to_dets(kets)
+        """Return exact sparse H[bra, ket]."""
+        ket = bra if ket is None else ket
 
-        indptr, indices, data, shape = self._raw.matrix(bras_arr, kets_arr)
+        indptr, indices, data, shape = self._raw.matrix(bra, ket)
         return csr_matrix((data, indices, indptr), shape=tuple(shape))
 
     def matvec(
         self,
-        bras: Any,
+        bra: Any,
         x: Any,
         *,
-        kets: Any | None = None,
+        ket: Any | None = None,
     ) -> np.ndarray:
-        """Return exact H[bras, kets] @ x.
+        """Return exact H[bra, ket] @ x.
 
-        kets defaults to bras. A 2D x is forwarded to the C++ matmat kernel.
+        ket defaults to bra. A 2D x is forwarded to the C++ matmat kernel.
         """
-        bras_arr = to_dets(bras)
-        kets_arr = bras_arr if kets is None else to_dets(kets)
+        ket = bra if ket is None else ket
         x_arr = np.asarray(x, dtype=np.float64)
 
         if x_arr.ndim == 1:
             x_vec = np.ascontiguousarray(x_arr)
 
-            if x_vec.shape[0] != kets_arr.shape[0]:
-                raise ValueError("x length must match number of kets")
+            if x_vec.shape[0] != ket.shape[0]:
+                raise ValueError("x length must match number of ket")
 
             return np.asarray(
-                self._raw.matvec(bras_arr, kets_arr, x_vec),
+                self._raw.matvec(bra, ket, x_vec),
                 dtype=np.float64,
             )
 
         if x_arr.ndim == 2:
             x_mat = np.ascontiguousarray(x_arr)
 
-            if x_mat.shape[0] != kets_arr.shape[0]:
+            if x_mat.shape[0] != ket.shape[0]:
                 raise ValueError("X must have shape (n_ket, n_rhs)")
 
             return np.asarray(
-                self._raw.matmat(bras_arr, kets_arr, x_mat),
+                self._raw.matmat(bra, ket, x_mat),
                 dtype=np.float64,
             )
 
@@ -274,7 +243,7 @@ class Hamiltonian:
 
     def sample_conns(
         self,
-        kets: Any,
+        ket: Any,
         counts: Any,
         *,
         eps1: float = 1.0e-6,
@@ -285,20 +254,19 @@ class Hamiltonian:
 
         ``counts`` has shape ``(N,)`` or ``(S, N)`` for independent streams.
         """
-        ket_arr = to_dets(kets)
         counts_arr = np.ascontiguousarray(
             np.asarray(counts, dtype=np.int64)
         )
 
         if counts_arr.ndim not in (1, 2):
             raise ValueError("counts must have shape (N,) or (S, N)")
-        if counts_arr.shape[-1] != ket_arr.shape[0]:
+        if counts_arr.shape[-1] != ket.shape[0]:
             raise ValueError("counts last dimension must match kets")
         if np.any(counts_arr < 0):
             raise ValueError("counts must be nonnegative")
 
         return self._raw.sample_conns(
-            ket_arr,
+            ket,
             counts_arr,
             float(eps1),
             float(eps2),
@@ -307,7 +275,7 @@ class Hamiltonian:
 
     def sample_project(
         self,
-        kets: Any,
+        ket: Any,
         coeffs: Any,
         eps1: float,
         eps2: float,
@@ -319,36 +287,33 @@ class Hamiltonian:
     ) -> ProjectSamples:
         """Return sampled projected amplitudes by replica.
 
-        kets and coeffs define the source wavefunction. The weak window is
-        eps2 <= |H_ai c_i| < eps1. A scalar counts broadcasts to all kets.
+        ket and coeffs define the source wavefunction. The weak window is
+        eps2 <= |H_ai c_i| < eps1. A scalar counts broadcasts to all ket.
         """
-        ket_arr = to_dets(kets)
         coeff_arr = np.ascontiguousarray(
             np.asarray(coeffs, dtype=np.float64).reshape(-1)
         )
 
-        if coeff_arr.shape[0] != ket_arr.shape[0]:
+        if coeff_arr.shape[0] != ket.shape[0]:
             raise ValueError("coeffs length must match number of kets")
 
         if np.isscalar(counts):
-            counts_arr = np.full(ket_arr.shape[0], int(counts), dtype=np.int64)
+            counts_arr = np.full(ket.shape[0], int(counts), dtype=np.int64)
         else:
             counts_arr = np.ascontiguousarray(
                 np.asarray(counts, dtype=np.int64).reshape(-1)
             )
 
-            if counts_arr.shape[0] != ket_arr.shape[0]:
+            if counts_arr.shape[0] != ket.shape[0]:
                 raise ValueError("counts length must match number of kets")
 
-        exclude_arr = None if exclude is None else to_dets(exclude)
-
         return self._raw.sample_project(
-            ket_arr,
+            ket,
             coeff_arr,
             float(eps1),
             float(eps2),
             counts_arr,
-            exclude_arr,
+            exclude,
             int(n_rep),
             int(seed),
         )

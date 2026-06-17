@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 from pyscf import ao2mo, fci, gto, scf
 
-from libdet import Hamiltonian
+from detnqs import hilbert, operator
 from detnqs.model import Backflow, RBM
 from detnqs.vstate import ExactState
 from detnqs.driver import VMC
@@ -40,7 +40,8 @@ n_alpha, n_beta = mol.nelec
 h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
 eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
 
-ham = Hamiltonian.rhf(h1e, eri, ecore=mol.energy_nuc())
+hi = hilbert.DetSpace(norb, n_alpha, n_beta)
+H = operator.Hamiltonian(hi, h1e, eri, ecore=mol.energy_nuc())
 
 solver = fci.direct_spin0.FCI(mol)
 e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
@@ -56,9 +57,7 @@ model = Backflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 
 state = ExactState.init(
     model=model,
-    hamiltonian=ham,
-    n_alpha=n_alpha,
-    n_beta=n_beta,
+    H=H,
     key=jax.random.key(0),
 )
 

@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include <libdet/rhf/slater.hpp>
+#include <libdet/rhf/element.hpp>
 #include <libdet/spatial/space.hpp>
 
 #if defined(_OPENMP)
@@ -30,10 +30,10 @@ inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
     if (h != 0.0) emit(iket, h);
 }
 
-// Visit off-diagonal RHF couplings from a bra into a finite ket space.
+// Visit off-diagonal RHF couplings from a bra into a known ket space.
 template <class Emit>
 inline void visit_kets(
-    const RHFIntegrals& ints,
+    const Integral& ints,
     const KetSpace& kets,
     DetRef bra,
     BraScratch& work,
@@ -93,7 +93,7 @@ inline void visit_kets(
             const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
             if (iket >= 0) {
                 emit_nonzero(
-                    ex.sign * Slater::single_a(ints, bra, ex.i, ex.a),
+                    ex.sign * single_alpha(ints, bra, ex.i, ex.a),
                     iket,
                     emit
                 );
@@ -105,7 +105,7 @@ inline void visit_kets(
             if (iket >= 0) {
                 emit_nonzero(
                     ex.sign
-                        * Slater::double_aa(
+                        * double_alpha(
                             ints,
                             ex.i,
                             ex.j,
@@ -124,7 +124,7 @@ inline void visit_kets(
             const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
             if (iket >= 0) {
                 emit_nonzero(
-                    ex.sign * Slater::single_b(ints, bra, ex.i, ex.a),
+                    ex.sign * single_beta(ints, bra, ex.i, ex.a),
                     iket,
                     emit
                 );
@@ -136,7 +136,7 @@ inline void visit_kets(
             if (iket >= 0) {
                 emit_nonzero(
                     ex.sign
-                        * Slater::double_bb(
+                        * double_beta(
                             ints,
                             ex.i,
                             ex.j,
@@ -170,7 +170,7 @@ inline void visit_kets(
             const double h =
                 ax.sign
                 * work.cross_sign[beta_id]
-                * Slater::double_ab(
+                * double_mixed(
                     ints,
                     ax.i,
                     work.cross_i[beta_id],
@@ -195,14 +195,14 @@ inline std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
         for (i64 ii = 0; ii < static_cast<i64>(dets.n_dets); ++ii) {
             const std::size_t idet = static_cast<std::size_t>(ii);
             fill_occ(dets[idet], ints_.norb(), scratch.occ);
-            out[idet] = Slater::diag(ints_, scratch.occ);
+            out[idet] = diag(ints_, scratch.occ);
         }
     }
 #else
     KetScratch scratch(ints_.norb());
     for (std::size_t idet = 0; idet < dets.n_dets; ++idet) {
         fill_occ(dets[idet], ints_.norb(), scratch.occ);
-        out[idet] = Slater::diag(ints_, scratch.occ);
+        out[idet] = diag(ints_, scratch.occ);
     }
 #endif
 
@@ -258,13 +258,13 @@ inline void Hamiltonian::build_matrix(
         for (i64 ii = 0; ii < static_cast<i64>(nbras); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
-            const double diag = Slater::diag(ints_, bra);
-            i32 nnz = find_ket(*ket_space, bra) >= 0 && diag != 0.0 ? 1 : 0;
+            const double h_bra_bra = diag(ints_, bra);
+            i32 nnz = find_ket(*ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
 
             visit_kets(ints_, *ket_space, bra, scratch, [&](i32, double) {
                 ++nnz;
             });
-            hdiag[ibra] = diag;
+            hdiag[ibra] = h_bra_bra;
             out.indptr[ibra + 1u] = nnz;
         }
 
@@ -308,12 +308,12 @@ inline void Hamiltonian::build_matrix(
     BraScratch scratch;
     for (std::size_t ibra = 0; ibra < nbras; ++ibra) {
         const DetRef bra = bras[ibra];
-        const double diag = Slater::diag(ints_, bra);
-        i32 nnz = find_ket(*ket_space, bra) >= 0 && diag != 0.0 ? 1 : 0;
+        const double h_bra_bra = diag(ints_, bra);
+        i32 nnz = find_ket(*ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
         visit_kets(ints_, *ket_space, bra, scratch, [&](i32, double) {
             ++nnz;
         });
-        hdiag[ibra] = diag;
+        hdiag[ibra] = h_bra_bra;
         out.indptr[ibra + 1u] = nnz;
     }
 
@@ -381,7 +381,7 @@ inline std::vector<double> Hamiltonian::matvec(
             double value = 0.0;
             const i32 diag_idx = find_ket(*ket_space, bra);
             if (diag_idx >= 0) {
-                value += Slater::diag(ints_, bra)
+                value += diag(ints_, bra)
                     * x[static_cast<std::size_t>(diag_idx)];
             }
 
@@ -433,7 +433,7 @@ inline std::vector<double> Hamiltonian::matmat(
             const i32 diag_idx = find_ket(*ket_space, bra);
 
             if (diag_idx >= 0) {
-                const double h = Slater::diag(ints_, bra);
+                const double h = diag(ints_, bra);
                 const double* xrow =
                     x.data() + static_cast<std::size_t>(diag_idx) * nrhs;
                 for (std::size_t j = 0; j < nrhs; ++j) y[j] += h * xrow[j];
@@ -485,14 +485,14 @@ inline Projection Hamiltonian::project_impl(
         for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
 #endif
             const DetRef bra = bras[ibra];
-            const double diag = Slater::diag(ints_, bra);
+            const double h_bra_bra = diag(ints_, bra);
             double value = 0.0;
-            out.diags[ibra] = diag;
+            out.diags[ibra] = h_bra_bra;
 
             const i32 diag_idx = find_ket(*ket_space, bra);
             if (diag_idx >= 0) {
                 const double term =
-                    diag * coeffs[static_cast<std::size_t>(diag_idx)];
+                    h_bra_bra * coeffs[static_cast<std::size_t>(diag_idx)];
                 if (std::abs(term) >= eps) value += term;
             }
 

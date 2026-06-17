@@ -494,9 +494,9 @@ inline void append_det(std::vector<u64>& out, DetRef det) {
     out.insert(out.end(), det.beta().begin(), det.beta().end());
 }
 
-inline void copy_batch(std::vector<u64>& dst, DetBatchView src) {
-    dst.resize(src.n_dets * det_size(src.nword));
-    if (!dst.empty()) std::copy_n(src.data, dst.size(), dst.data());
+inline void copy_batch(std::vector<u64>& words, DetBatchView dets) {
+    words.resize(dets.n_dets * det_size(dets.nword));
+    if (!words.empty()) std::copy_n(dets.data, words.size(), words.data());
 }
 
 [[nodiscard]] inline bool det_equal(DetRef a, DetRef b) noexcept {
@@ -762,8 +762,8 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     if (ex.deg > 2) return ex;
 
     auto fill_one = [](
-        std::span<const u64> src,
-        std::span<const u64> dst,
+        std::span<const u64> bra_bits,
+        std::span<const u64> ket_bits,
         std::array<int, 2>& occ,
         std::array<int, 2>& vir,
         int n
@@ -771,9 +771,9 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
         int io = 0;
         int iv = 0;
 
-        for (std::size_t w = 0; w < src.size(); ++w) {
-            u64 gone = src[w] & ~dst[w];
-            u64 come = dst[w] & ~src[w];
+        for (std::size_t w = 0; w < bra_bits.size(); ++w) {
+            u64 gone = bra_bits[w] & ~ket_bits[w];
+            u64 come = ket_bits[w] & ~bra_bits[w];
 
             while (gone != 0u && io < n) {
                 const unsigned b = std::countr_zero(gone);
@@ -822,14 +822,14 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
 }
 
 [[nodiscard]] inline SpinDiff spin_diff(
-    std::span<const u64> src,
-    std::span<const u64> dst
+    std::span<const u64> bra_bits,
+    std::span<const u64> ket_bits
 ) noexcept {
     SpinDiff ex;
 
-    if (src.size() == 1) {
-        const u64 gone0 = src[0] & ~dst[0];
-        const u64 come0 = dst[0] & ~src[0];
+    if (bra_bits.size() == 1) {
+        const u64 gone0 = bra_bits[0] & ~ket_bits[0];
+        const u64 come0 = ket_bits[0] & ~bra_bits[0];
 
         const int dx =
             static_cast<int>(std::popcount(gone0))
@@ -855,15 +855,21 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
         }
 
         if (ex.deg == 1) {
-            ex.sign = detail::sign_single(src, ex.occ[0], ex.vir[0]);
+            ex.sign = detail::sign_single(bra_bits, ex.occ[0], ex.vir[0]);
         } else if (ex.deg == 2) {
-            ex.sign = detail::sign_double(src, ex.occ[0], ex.occ[1], ex.vir[0], ex.vir[1]);
+            ex.sign = detail::sign_double(
+                bra_bits,
+                ex.occ[0],
+                ex.occ[1],
+                ex.vir[0],
+                ex.vir[1]
+            );
         }
 
         return ex;
     }
 
-    const int dx = bits::popcount_xor(src, dst);
+    const int dx = bits::popcount_xor(bra_bits, ket_bits);
 
     if (dx & 1) {
         ex.deg = 3;
@@ -876,9 +882,9 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     int io = 0;
     int iv = 0;
 
-    for (std::size_t w = 0; w < src.size(); ++w) {
-        u64 gone = src[w] & ~dst[w];
-        u64 come = dst[w] & ~src[w];
+    for (std::size_t w = 0; w < bra_bits.size(); ++w) {
+        u64 gone = bra_bits[w] & ~ket_bits[w];
+        u64 come = ket_bits[w] & ~bra_bits[w];
 
         while (gone != 0u && io < ex.deg) {
             const unsigned b = std::countr_zero(gone);
@@ -894,9 +900,15 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     }
 
     if (ex.deg == 1) {
-        ex.sign = detail::sign_single(src, ex.occ[0], ex.vir[0]);
+        ex.sign = detail::sign_single(bra_bits, ex.occ[0], ex.vir[0]);
     } else if (ex.deg == 2) {
-        ex.sign = detail::sign_double(src, ex.occ[0], ex.occ[1], ex.vir[0], ex.vir[1]);
+        ex.sign = detail::sign_double(
+            bra_bits,
+            ex.occ[0],
+            ex.occ[1],
+            ex.vir[0],
+            ex.vir[1]
+        );
     }
 
     return ex;

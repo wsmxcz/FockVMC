@@ -8,10 +8,14 @@
 #include <unordered_map>
 #include <vector>
 
-#include <libdet/rhf/graph.hpp>
 #include <libdet/spatial/space.hpp>
 
 namespace libdet::rhf {
+
+struct Coupling {
+    Excitation excitation;
+    double h = 0.0;
+};
 
 struct KetConns {
     double cutoff = 0.0;
@@ -120,10 +124,10 @@ public:
         }
 
         const std::size_t stride = det_size(nword_);
-        u64* dst = words_.data() + slot * stride;
+        u64* slot_words = words_.data() + slot * stride;
 
-        std::copy(ket.alpha().begin(), ket.alpha().end(), dst);
-        std::copy(ket.beta().begin(), ket.beta().end(), dst + nword_);
+        std::copy(ket.alpha().begin(), ket.alpha().end(), slot_words);
+        std::copy(ket.beta().begin(), ket.beta().end(), slot_words + nword_);
 
         entries_[slot].conns = std::move(conns);
         entries_[slot].fingerprint = fingerprint;

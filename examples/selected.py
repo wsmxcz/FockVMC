@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 from pyscf import ao2mo, fci, gto, scf
 
-from libdet import Hamiltonian
+from detnqs import hilbert, operator
 from detnqs.model import Backflow, RBM
 from detnqs.vstate import SelectedState
 from detnqs.vstate.selected import topk_selector
@@ -40,7 +40,8 @@ n_alpha, n_beta = mol.nelec
 h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
 eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
 
-ham = Hamiltonian.rhf(h1e, eri, ecore=mol.energy_nuc())
+hi = hilbert.DetSpace(norb, n_alpha, n_beta)
+H = operator.Hamiltonian(hi, h1e, eri, ecore=mol.energy_nuc())
 
 solver = fci.direct_spin0.FCI(mol)
 e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
@@ -54,19 +55,10 @@ print(f"S^2        : {s2:.6f}")
 model = Backflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 # model = RBM(norb=norb, alpha=1)
 
-nword = (norb + 63) // 64
-init_v = np.zeros((1, 2, nword), dtype=np.uint64)
-
-for i in range(n_alpha):
-    init_v[0, 0, i >> 6] |= np.uint64(1) << np.uint64(i & 63)
-
-for i in range(n_beta):
-    init_v[0, 1, i >> 6] |= np.uint64(1) << np.uint64(i & 63)
-
 state = SelectedState.init(
     model=model,
-    hamiltonian=ham,
-    init_v=init_v,
+    H=H,
+    init="hf",
     key=jax.random.key(0),
 )
 
@@ -77,7 +69,7 @@ metrics = {
     "energy": ("Energy", ".8f", 16),
     "error": ("|E-E0|", ".2e", 10),
     "variance": ("Var", ".2e", 10),
-    "n_v": ("N_v", "d", 8),
+    "n_basis": ("N_basis", "d", 8),
 }
 
 line = run_utils.print_metrics(metrics)
@@ -101,7 +93,7 @@ for outer in range(outer_steps):
 
     stats["outer"] = outer
     stats["error"] = abs(float(stats["energy"]) - float(e_fci))
-    stats["n_v"] = vmc.state.n_v
+    stats["n_basis"] = vmc.state.n_basis
 
     run_utils.print_metrics(metrics, stats)
     run_utils.print_times(times)

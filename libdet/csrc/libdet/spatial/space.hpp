@@ -122,9 +122,9 @@ private:
 };
 
 /*
- * Determinant-driven finite-space search.
+ * Determinant-driven search in a known determinant space.
  *
- * Given a bra and a finite ket space, find connected kets in that space.
+ * Given a bra and a known ket space, find connected kets in that space.
  *
  * Used by matrix, matvec, matmat, and project. This path does not generate
  * unrestricted external bras.

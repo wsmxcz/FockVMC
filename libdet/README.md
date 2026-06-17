@@ -15,8 +15,7 @@ A determinant batch is a contiguous `uint64` array with shape:
 (n_det, 2, nword)
 ```
 
-The second axis contains the alpha and beta occupation strings. Use
-`libdet.to_dets` to normalize input arrays.
+The second axis contains the alpha and beta occupation strings.
 
 Names follow Dirac notation:
 
@@ -39,25 +38,25 @@ ham = libdet.Hamiltonian.rhf(h1, eri, ecore=0.0)
 
 ```python
 h = ham.hij(bra, ket)
-diags = ham.diags(dets)
-projection = ham.project(bras, kets, coeffs)
-matrix = ham.matrix(bras, kets)
-y = ham.matvec(bras, x, kets=kets)
+diag = ham.diag(x)
+projection = ham.project(bra, ket, coeffs)
+matrix = ham.matrix(bra, ket)
+y = ham.matvec(bra, x, ket=ket)
 ```
 
-These operations evaluate `H[bras, kets]` on supplied determinant spaces.
-Omitting `kets` from `matrix` or `matvec` uses the bra space for both axes.
+These operations evaluate `H[bra, ket]` on supplied determinant spaces.
+Omitting `ket` from `matrix` or `matvec` uses the bra space for both axes.
 
-### Generated bras
+### Generated Bra
 
 ```python
-bras = ham.expand(kets, eps, coeffs=coeffs, exclude=kets)
+bra = ham.expand(ket, eps, coeffs=coeffs, exclude=ket)
 projection = ham.project(
     None,
-    kets,
+    ket,
     coeffs,
     eps=eps,
-    exclude=kets,
+    exclude=ket,
 )
 ```
 
@@ -68,8 +67,8 @@ their projected amplitudes. Screening uses `|H_ai| >= eps`, or
 ### Connections
 
 ```python
-weight, degree = ham.degrees(kets, eps)
-conns = ham.conns(kets, eps)
+weight, degree = ham.degrees(ket, eps)
+conns = ham.conns(ket, eps)
 ```
 
 `degrees` returns the total absolute off-diagonal weight and number of
@@ -80,7 +79,7 @@ bras and matrix elements.
 
 ```python
 samples = ham.sample_conns(
-    kets,
+    ket,
     counts,
     eps1=eps1,
     eps2=eps2,
@@ -88,12 +87,12 @@ samples = ham.sample_conns(
 )
 
 projection_samples = ham.sample_project(
-    kets,
+    ket,
     coeffs,
     eps1,
     eps2,
     counts,
-    exclude=kets,
+    exclude=ket,
     n_rep=2,
     seed=seed,
 )

@@ -7,10 +7,10 @@ import matplotlib.pyplot as plt
 
 from pyscf import ao2mo, fci, gto, scf
 
-from libdet import Hamiltonian
+from detnqs import hilbert, operator
 from detnqs.model import Backflow, RBackflow, RBM
 from detnqs.vstate import MCState
-from detnqs.sampler.mcmc import MCSampler
+from detnqs.sampler import HeatBath, MCSampler
 from detnqs.driver import VMC
 from detnqs.optimizer import psr, minsr
 from detnqs import utils as dq_utils
@@ -56,7 +56,8 @@ n_alpha, n_beta = mol.nelec
 h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
 eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
 
-ham = Hamiltonian.rhf(h1e, eri, ecore=mol.energy_nuc())
+hi = hilbert.DetSpace(norb, n_alpha, n_beta)
+H = operator.Hamiltonian(hi, h1e, eri, ecore=mol.energy_nuc())
 
 # e_fci = -109.099941428008 # N2_631g
 # e_fci = -87.892693 # Li2O_sto3g
@@ -76,21 +77,22 @@ model = RBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 # model = RBM(norb=norb, alpha=1)
 
 sampler = MCSampler(
-    n_samples=4096,
-    n_chains=4096,
+    n_samples=1024,
+    n_chains=1024,
     thermal_steps=128,
-    proposal="ham",
+    proposal=HeatBath(1e-3),
     blur=0.5,
+    blur_eps=1e-3,
 )
 
 state = MCState.init(
     model=model,
-    hamiltonian=ham,
+    H=H,
     sampler=sampler,
-    n_alpha=n_alpha,
-    n_beta=n_beta,
     chain_init="hf",
     key=jax.random.key(0),
+    eloc_eps1=1e-3,
+    eloc_eps2=1e-6,
     eloc_sample=1024
 )
 
@@ -107,18 +109,20 @@ metrics = {
     "energy": ("Energy", ".8f", 16),
     "error": ("|E-E0|", ".2e", 10),
     "variance": ("Var", ".2e", 10),
-    "accept": ("Acc", ".1%", 7),
-    "ess_frac": ("ESS", ".1%", 7),
-    "n_unique": ("N_u", ".0f", 7),
-    "n_eval": ("N_f", ".0f", 7),
-    "alpha": ("alpha", ".3f", 7),
+    "accept": ("Acc", ".1%", 8),
+    "ess_frac": ("ESS", ".1%", 8),
+    "n_unique": ("N_u", ".0f", 8),
+    "n_forward": ("N_f", ".0f", 8),
+    "unique_frac": ("R_u", ".1%", 8),
+    "forward_frac": ("R_f", ".1%", 8),
+    "alpha": ("alpha", ".3f", 8),
 }
 
 line = run_utils.print_metrics(metrics)
 
 history = []
 total_times = defaultdict(float)
-steps = 1000
+steps = 500
 
 for step in range(steps):
     stats = dict(vmc.step())

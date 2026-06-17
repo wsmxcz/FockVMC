@@ -7,8 +7,10 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
+#include <libdet/rhf/screen.hpp>
 #include <libdet/spatial/space.hpp>
 
 #if defined(_OPENMP)
@@ -17,7 +19,174 @@
 
 namespace libdet::rhf {
 
-// Internal implementation header included by hamiltonian.hpp.
+[[nodiscard]] inline bool in_window(double h, AbsWindow win) noexcept {
+    const double value = std::abs(h);
+    return value > 0.0 && value >= win.lo && value < win.hi;
+}
+
+template <class Visit>
+inline void visit_bras_prepared(
+    const Integral& ints,
+    const Screen* screen,
+    DetRef ket,
+    DetOcc& occ,
+    AbsWindow win,
+    Visit&& visit
+) {
+    if (win.hi <= win.lo) return;
+
+    for (int i : occ.occ_a) {
+        for (int a : occ.vir_a) {
+            const double h =
+                sign_single(occ.pref_a, i, a)
+                * single_alpha(ints, occ.occ_a, occ.occ_b, i, a);
+            if (in_window(h, win)) visit(alpha1(i, a), h);
+        }
+    }
+
+    for (int i : occ.occ_b) {
+        for (int a : occ.vir_b) {
+            const double h =
+                sign_single(occ.pref_b, i, a)
+                * single_beta(ints, occ.occ_a, occ.occ_b, i, a);
+            if (in_window(h, win)) visit(beta1(i, a), h);
+        }
+    }
+
+    if (screen == nullptr) {
+        for (std::size_t x = 0; x < occ.occ_a.size(); ++x) {
+            const int i = occ.occ_a[x];
+
+            for (std::size_t y = x + 1u; y < occ.occ_a.size(); ++y) {
+                const int j = occ.occ_a[y];
+
+                for (std::size_t pa = 0; pa < occ.vir_a.size(); ++pa) {
+                    const int a = occ.vir_a[pa];
+
+                    for (std::size_t pb = pa + 1u; pb < occ.vir_a.size(); ++pb) {
+                        const int b = occ.vir_a[pb];
+                        const double h =
+                            sign_double(occ.pref_a, i, j, a, b)
+                            * double_alpha(ints, i, j, a, b);
+                        if (in_window(h, win)) visit(alpha2(i, j, a, b), h);
+                    }
+                }
+            }
+        }
+
+        for (std::size_t x = 0; x < occ.occ_b.size(); ++x) {
+            const int i = occ.occ_b[x];
+
+            for (std::size_t y = x + 1u; y < occ.occ_b.size(); ++y) {
+                const int j = occ.occ_b[y];
+
+                for (std::size_t pa = 0; pa < occ.vir_b.size(); ++pa) {
+                    const int a = occ.vir_b[pa];
+
+                    for (std::size_t pb = pa + 1u; pb < occ.vir_b.size(); ++pb) {
+                        const int b = occ.vir_b[pb];
+                        const double h =
+                            sign_double(occ.pref_b, i, j, a, b)
+                            * double_beta(ints, i, j, a, b);
+                        if (in_window(h, win)) visit(beta2(i, j, a, b), h);
+                    }
+                }
+            }
+        }
+
+        for (int ia : occ.occ_a) {
+            for (int a : occ.vir_a) {
+                const double sign_a = sign_single(occ.pref_a, ia, a);
+
+                for (int ib : occ.occ_b) {
+                    for (int b : occ.vir_b) {
+                        const double h =
+                            sign_a
+                            * sign_single(occ.pref_b, ib, b)
+                            * double_mixed(ints, ia, ib, a, b);
+                        if (in_window(h, win)) visit(mixed2(ia, ib, a, b), h);
+                    }
+                }
+            }
+        }
+
+        return;
+    }
+
+    for (std::size_t x = 0; x < occ.occ_a.size(); ++x) {
+        const int i = occ.occ_a[x];
+
+        for (std::size_t y = x + 1u; y < occ.occ_a.size(); ++y) {
+            const int j = occ.occ_a[y];
+
+            for (const BraPair& c : screen->same(i, j, win.lo, win.hi)) {
+                if (bits::test(ket.alpha(), c.a) || bits::test(ket.alpha(), c.b)) {
+                    continue;
+                }
+
+                const double h =
+                    sign_double(occ.pref_a, i, j, c.a, c.b) * c.h;
+                if (in_window(h, win)) visit(alpha2(i, j, c.a, c.b), h);
+            }
+        }
+    }
+
+    for (std::size_t x = 0; x < occ.occ_b.size(); ++x) {
+        const int i = occ.occ_b[x];
+
+        for (std::size_t y = x + 1u; y < occ.occ_b.size(); ++y) {
+            const int j = occ.occ_b[y];
+
+            for (const BraPair& c : screen->same(i, j, win.lo, win.hi)) {
+                if (bits::test(ket.beta(), c.a) || bits::test(ket.beta(), c.b)) {
+                    continue;
+                }
+
+                const double h =
+                    sign_double(occ.pref_b, i, j, c.a, c.b) * c.h;
+                if (in_window(h, win)) visit(beta2(i, j, c.a, c.b), h);
+            }
+        }
+    }
+
+    for (int ia : occ.occ_a) {
+        for (int ib : occ.occ_b) {
+            for (const BraPair& c : screen->opposite(ia, ib, win.lo, win.hi)) {
+                if (bits::test(ket.alpha(), c.a) || bits::test(ket.beta(), c.b)) {
+                    continue;
+                }
+
+                const double h =
+                    sign_single(occ.pref_a, ia, c.a)
+                    * sign_single(occ.pref_b, ib, c.b)
+                    * c.h;
+                if (in_window(h, win)) visit(mixed2(ia, ib, c.a, c.b), h);
+            }
+        }
+    }
+}
+
+template <class Visit>
+inline void visit_bras(
+    const Integral& ints,
+    const Screen* screen,
+    DetRef ket,
+    KetScratch& scratch,
+    AbsWindow win,
+    Visit&& visit
+) {
+    fill_occ(ket, ints.norb(), scratch.occ);
+    visit_bras_prepared(
+        ints,
+        screen,
+        ket,
+        scratch.occ,
+        win,
+        std::forward<Visit>(visit)
+    );
+}
+
+// Excitation-driven connections generated from kets.
 struct Conns {
     u32 nword = 0;
     std::size_t n_kets = 0;
@@ -286,7 +455,7 @@ inline std::shared_ptr<const KetConns> Hamiltonian::build_ket_conns(
     auto conns = std::make_shared<KetConns>();
     conns->cutoff = eps;
     fill_occ(ket, ints_.norb(), scratch.occ);
-    conns->diag = Slater::diag(ints_, scratch.occ);
+    conns->diag = diag(ints_, scratch.occ);
 
     visit_bras_prepared(
         ints_,
@@ -388,11 +557,11 @@ inline Conns Hamiltonian::conns(
 #endif
                 const std::size_t iket = static_cast<std::size_t>(ii);
                 const DetRef ket = kets[iket];
-                const KetConns& src = *all[iket];
-                const std::size_t begin = src.count(eps);
-                const std::size_t end = src.count(sample_eps);
+                const KetConns& ket_conn = *all[iket];
+                const std::size_t begin = ket_conn.count(eps);
+                const std::size_t end = ket_conn.count(sample_eps);
                 const double weight =
-                    src.prefix_abs[end] - src.prefix_abs[begin];
+                    ket_conn.prefix_abs[end] - ket_conn.prefix_abs[begin];
                 weak_weight[iket] = weight;
                 if (!(weight > 0.0)) continue;
 
@@ -402,7 +571,7 @@ inline Conns Hamiltonian::conns(
                 double cdf = 0.0;
 
                 for (std::size_t k = begin; k < end; ++k) {
-                    const Coupling& coupling = src.couplings[k];
+                    const Coupling& coupling = ket_conn.couplings[k];
                     cdf += std::abs(coupling.h);
                     i64 count = 0;
                     while (
@@ -432,13 +601,13 @@ inline Conns Hamiltonian::conns(
     DetScratch bra_scratch(nword_);
     for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
         const DetRef ket = kets[iket];
-        const KetConns& src = *all[iket];
-        const std::size_t nconn = src.count(eps);
-        out.diag.push_back(src.diag);
-        out.weight.push_back(src.prefix_abs[nconn]);
+        const KetConns& ket_conn = *all[iket];
+        const std::size_t nconn = ket_conn.count(eps);
+        out.diag.push_back(ket_conn.diag);
+        out.weight.push_back(ket_conn.prefix_abs[nconn]);
 
         for (std::size_t k = 0; k < nconn; ++k) {
-            const Coupling& coupling = src.couplings[k];
+            const Coupling& coupling = ket_conn.couplings[k];
             const DetRef bra = apply(ket, coupling.excitation, bra_scratch);
             out.bra_idx.push_back(pool.find_or_add(bra));
             out.h.push_back(coupling.h);

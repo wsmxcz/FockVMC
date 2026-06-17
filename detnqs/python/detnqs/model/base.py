@@ -67,7 +67,7 @@ def to_ratio(num: LogPsi, den: LogPsi) -> Any:
 
 
 class Model(nn.Module):
-    """Base class for determinant-space neural quantum states.
+    """Base class for Fock-space neural quantum states.
 
     Raw model output:
         real:

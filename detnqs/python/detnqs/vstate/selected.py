@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import replace
-from typing import Any
-from typing import Callable
-from typing import Self
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Self
 
 import jax
-import jax.numpy as jnp
-import libdet
 import numpy as np
-from libdet import Hamiltonian
 from scipy.sparse import csr_matrix
 
 from .. import utils
@@ -22,59 +16,41 @@ from ..utils import precision
 
 @dataclass(frozen=True, slots=True)
 class SelectedState:
-    """Variational state on a selected determinant space V.
-
-    The Hamiltonian is projected to H[V, V]. The selected space can be evolved
-    by expanding connected external bras and then applying a user-provided
-    selector.
-
-    Estimator:
-        E_V = <psi_V|H[V,V]|psi_V> / <psi_V|psi_V>.
-
-    Variance:
-        var_V = ||H[V,V] psi_V - E_V psi_V||^2 / <psi_V|psi_V>.
-    """
+    """Variational state on a selected Fock subspace."""
 
     model: Model
     params: Any
-    hamiltonian: Hamiltonian
-    v_dets: np.ndarray
-    h_vv: csr_matrix
+    H: Any
+    basis: np.ndarray
+    hmat: csr_matrix
 
     @classmethod
     def init(
         cls,
         model: Model,
-        hamiltonian: Hamiltonian,
-        init_v: Any,
+        H: Any,
+        init: Any = "hf",
         *,
         key: jax.Array,
     ) -> Self:
-        """Initialize from a user-provided selected determinant space."""
-        v_dets = np.ascontiguousarray(libdet.to_dets(init_v))
+        """Initialize from a selected basis."""
+        basis = H.space.reference(1) if isinstance(init, str) and init == "hf" else H.space.asarray(init)
+        if basis.shape[0] == 0:
+            raise ValueError("selected basis must be non-empty")
 
-        if v_dets.shape[0] == 0:
-            raise ValueError("init_v must contain at least one determinant")
-
-        nword = int(v_dets.shape[2])
-
-        variables = model.init(
-            key,
-            jnp.zeros((1, 2, nword), dtype=jnp.uint64),
-        )
+        params = model.init(key, H.space.zeros(1))["params"]
 
         return cls(
             model=model,
-            params=variables["params"],
-            hamiltonian=hamiltonian,
-            v_dets=v_dets,
-            h_vv=hamiltonian.matrix(v_dets),
+            params=params,
+            H=H,
+            basis=basis,
+            hmat=H.matrix(basis),
         )
 
     @property
-    def n_v(self) -> int:
-        """Number of determinants in the selected space."""
-        return int(self.v_dets.shape[0])
+    def n_basis(self) -> int:
+        return int(self.basis.shape[0])
 
     def evolve(
         self,
@@ -82,39 +58,25 @@ class SelectedState:
         *,
         eps: float | None = None,
     ) -> Self:
-        """Update the selected space and rebuild H[V, V].
-
-        If eps is provided, the current selected space is first expanded by
-        screened connected bras. The selector then receives log|psi| and the
-        candidate determinant table, and returns the next V.
-        """
-        dets = self.v_dets
+        """Update the selected basis and rebuild H[basis, basis]."""
+        basis = self.basis
 
         if eps is not None:
-            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.v_dets)
+            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.basis)
             jax.block_until_ready(logpsi_jax)
 
             psi = np.asarray(to_psi(utils.host(logpsi_jax))).reshape(-1)
-            coeffs = np.abs(psi).astype(np.float64, copy=False)
+            coeff = np.abs(psi).astype(np.float64, copy=False)
 
-            norm = float(np.linalg.norm(coeffs))
+            norm = float(np.linalg.norm(coeff))
             if norm > 0.0:
-                coeffs = coeffs / norm
+                coeff = coeff / norm
 
-            cand_bras = self.hamiltonian.expand(
-                self.v_dets,
-                float(eps),
-                coeffs=coeffs,
-                exclude=self.v_dets,
-            )
+            bra = self.H.expand(self.basis, float(eps), coeffs=coeff, exclude=self.basis)
+            if bra.shape[0] > 0:
+                basis = np.ascontiguousarray(np.concatenate([self.basis, bra], axis=0))
 
-            cand_bras = libdet.to_dets(cand_bras)
-            if cand_bras.shape[0] > 0:
-                dets = np.ascontiguousarray(
-                    np.concatenate([self.v_dets, cand_bras], axis=0)
-                )
-
-        logabs_jax = utils.apply(self.model.logabs, self.params, dets)
+        logabs_jax = utils.apply(self.model.logabs, self.params, basis)
         jax.block_until_ready(logabs_jax)
 
         logabs = precision.asarray(
@@ -123,57 +85,38 @@ class SelectedState:
             "real",
             host=True,
         )
+        basis = self.H.space.asarray(selector(logabs, basis))
 
-        v_dets = np.ascontiguousarray(libdet.to_dets(selector(logabs, dets)))
+        if basis.shape[0] == 0:
+            raise ValueError("selector returned an empty basis")
 
-        if v_dets.shape[0] == 0:
-            raise ValueError("selector returned an empty determinant space")
-
-        return replace(
-            self,
-            v_dets=v_dets,
-            h_vv=self.hamiltonian.matrix(v_dets),
-        )
+        return replace(self, basis=basis, hmat=self.H.matrix(basis))
 
     def expect(self) -> tuple[Self, dict[str, float]]:
-        """Return projected energy statistics without a gradient."""
         new_state, _, _, stats, _ = self._run(grad=False, geometry=False)
         return new_state, stats
 
     def expect_and_grad(self, *, geometry: bool = False):
-        """Return energy, gradient, statistics, and optional geometry."""
         return self._run(grad=True, geometry=geometry)
 
     def replace(self, **updates: Any) -> Self:
-        """Return a copy with updated fields."""
         return replace(self, **updates)
 
     def _run(self, *, grad: bool, geometry: bool):
-        """Evaluate projected energy, optional gradient, and optional geometry."""
         timer = utils.Timer()
         rdtype = precision.dtype("calc", "real", host=True)
 
         with timer("forward"):
-            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.v_dets)
+            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.basis)
             jax.block_until_ready(logpsi_jax)
             logpsi_h = utils.host(logpsi_jax)
 
         with timer("reduce"):
-            psi = precision.asarray(
-                np.asarray(to_psi(logpsi_h)).reshape(-1),
-                "calc",
-                host=True,
-            )
-
-            hpsi = precision.asarray(
-                np.asarray(self.h_vv.dot(psi)).reshape(-1),
-                "calc",
-                host=True,
-            )
+            psi = precision.asarray(np.asarray(to_psi(logpsi_h)).reshape(-1), "calc", host=True)
+            hpsi = precision.asarray(np.asarray(self.hmat.dot(psi)).reshape(-1), "calc", host=True)
 
             norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
             energy = float((np.vdot(psi, hpsi) / norm).real)
-
             residual = hpsi - rdtype(energy) * psi
             variance = float((np.vdot(residual, residual) / norm).real)
 
@@ -189,7 +132,7 @@ class SelectedState:
                 gradient = utils.vjp(
                     self.model.coord,
                     self.params,
-                    self.v_dets,
+                    self.basis,
                     utils.device(precision.asarray(cot, "model", "real", host=True)),
                 )
                 jax.block_until_ready(gradient)
@@ -204,7 +147,7 @@ class SelectedState:
                     geom = Geometry(
                         theta=self.params,
                         coord=self.model.coord,
-                        x=self.v_dets,
+                        x=self.basis,
                         w=utils.device(w),
                         b=utils.device(
                             precision.asarray(
@@ -219,7 +162,7 @@ class SelectedState:
         stats = {
             "energy": float(energy),
             "variance": float(variance),
-            "n_v": float(self.n_v),
+            "n_basis": float(self.n_basis),
             "time_forward": 0.0,
             "time_reduce": 0.0,
             "time_backward": 0.0,
@@ -230,23 +173,20 @@ class SelectedState:
 
 
 def topk_selector(k: int) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    """Return a selector that keeps the k largest log-amplitude determinants."""
+    """Return a selector that keeps the k largest amplitudes."""
     k = int(k)
 
-    def select(logabs: np.ndarray, dets: np.ndarray) -> np.ndarray:
-        dets = libdet.to_dets(dets)
+    def select(logabs: np.ndarray, basis: np.ndarray) -> np.ndarray:
         logabs = np.asarray(logabs, dtype=np.float64).reshape(-1)
+        if basis.shape[0] != logabs.shape[0]:
+            raise ValueError("logabs length must match basis size")
 
-        if dets.shape[0] != logabs.shape[0]:
-            raise ValueError("logabs length must match number of determinants")
+        if basis.shape[0] == 0 or k <= 0:
+            return np.ascontiguousarray(basis[:0])
 
-        if dets.shape[0] == 0 or k <= 0:
-            return np.ascontiguousarray(dets[:0])
-
-        n = min(k, dets.shape[0])
-        idx = np.argpartition(logabs, -n)[-n:]
-        idx = idx[np.argsort(logabs[idx])[::-1]]
-
-        return np.ascontiguousarray(dets[idx])
+        n = min(k, basis.shape[0])
+        pick = np.argpartition(logabs, -n)[-n:]
+        pick = pick[np.argsort(logabs[pick])[::-1]]
+        return np.ascontiguousarray(basis[pick])
 
     return select

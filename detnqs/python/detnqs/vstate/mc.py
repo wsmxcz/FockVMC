@@ -5,7 +5,6 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import libdet
 import numpy as np
 
 from detnqs import utils
@@ -33,7 +32,7 @@ class MCState(VState):
         x ~ eta_alpha, y ~ B(y|x).
 
     Hamiltonian Fock-VMC path:
-        proposal_eps == blur_eps == eloc_eps1.
+        sampler.eps == blur_eps == eloc_eps1.
 
     The same strong Hamiltonian connections define proposal, blur, and the
     deterministic part of the local energy.
@@ -41,12 +40,10 @@ class MCState(VState):
 
     model: Model
     params: Any
-    hamiltonian: Any
+    H: Any
     sampler: MCSampler
     sampler_state: Chains
 
-    n_alpha: int
-    n_beta: int
     chain_init: str | Any = "hf"
 
     eloc_eps1: float = 1.0e-3
@@ -57,11 +54,9 @@ class MCState(VState):
     def init(
         cls,
         model: Model,
-        hamiltonian: Any,
+        H: Any,
         *,
         sampler: MCSampler,
-        n_alpha: int,
-        n_beta: int,
         key: jax.Array,
         chain_init: str | Any = "hf",
         eloc_eps1: float = 1.0e-3,
@@ -71,15 +66,10 @@ class MCState(VState):
         """Initialize a Monte Carlo variational state."""
         eps = float(eloc_eps1)
 
-        if sampler.proposal not in {"ham", "single"}:
-            raise ValueError("sampler.proposal must be 'ham' or 'single'")
-
-        if sampler.blur_eps is None:
-            raise ValueError("sampler.blur_eps must be explicit")
-
-        if float(sampler.proposal_eps) != eps or float(sampler.blur_eps) != eps:
+        blur_eps = sampler.eps if sampler.blur_eps is None else float(sampler.blur_eps)
+        if float(sampler.eps) != eps or float(blur_eps) != eps:
             raise ValueError(
-                "Fock-VMC requires proposal_eps == blur_eps == eloc_eps1"
+                "Fock-VMC requires sampler.eps == blur_eps == eloc_eps1"
             )
 
         if not 0.0 <= float(sampler.blur) <= 1.0:
@@ -93,29 +83,22 @@ class MCState(VState):
 
         _, init_key, sample_key = jax.random.split(key, 3)
 
-        params = model.init(
-            init_key,
-            jnp.zeros((1, 2, hamiltonian.nword), dtype=jnp.uint64),
-        )["params"]
+        params = model.init(init_key, H.space.zeros(1))["params"]
 
         sampler_state = sampler.init(
             params,
-            hamiltonian,
+            H,
             model,
             key=sample_key,
-            n_alpha=int(n_alpha),
-            n_beta=int(n_beta),
             chain_init=chain_init,
         )
 
         return cls(
             model=model,
             params=params,
-            hamiltonian=hamiltonian,
+            H=H,
             sampler=sampler,
             sampler_state=sampler_state,
-            n_alpha=int(n_alpha),
-            n_beta=int(n_beta),
             chain_init=chain_init,
             eloc_eps1=eps,
             eloc_eps2=float(eloc_eps2),
@@ -141,11 +124,9 @@ class MCState(VState):
             with timer("sample"):
                 sampler_state = self.sampler.init(
                     self.params,
-                    self.hamiltonian,
+                    self.H,
                     self.model,
                     key=sampler_state.key,
-                    n_alpha=int(self.n_alpha),
-                    n_beta=int(self.n_beta),
                     chain_init=self.chain_init,
                     alpha=(
                         float(sampler_state.alpha)
@@ -161,7 +142,7 @@ class MCState(VState):
 
         sampler_state, samples, sample_mass, sampler_stats = self.sampler.draw(
             self.params,
-            self.hamiltonian,
+            self.H,
             self.model,
             sampler_state,
         )
@@ -172,8 +153,8 @@ class MCState(VState):
         timer.add("forward", sampler_stats.get("time_forward", 0.0))
 
         with timer("reduce"):
-            kets, _, sample_to_ket = libdet.unique_dets(samples)
-            n_ket = int(kets.shape[0])
+            ket, _, sample_to_ket = self.H.space.unique(samples)
+            n_ket = int(ket.shape[0])
 
             raw_mass = precision.asarray(
                 sample_mass,
@@ -203,23 +184,21 @@ class MCState(VState):
                 sampler_state = replace(sampler_state, key=key)
 
         with timer("conns"):
-            conns = self.hamiltonian.conns(
-                kets,
+            conn = self.H.conns(
+                ket,
                 float(self.eloc_eps1),
                 sample=int(self.eloc_sample),
                 sample_eps=float(self.eloc_eps2),
                 seed=seed,
             )
 
-            det_pool = np.ascontiguousarray(
-                np.asarray(conns.dets, dtype=np.uint64)
-            )
+            pool = np.ascontiguousarray(np.asarray(conn.x, dtype=np.uint64))
 
         with timer("forward"):
             pool_logpsi_jax = utils.apply(
                 self.model.logpsi,
                 self.params,
-                det_pool,
+                pool,
             )
             jax.block_until_ready(pool_logpsi_jax)
             pool_logpsi = utils.host(pool_logpsi_jax)
@@ -239,7 +218,7 @@ class MCState(VState):
                 ket_logabs=ket_logabs,
                 pool_logabs=pool_logabs,
                 pool_logpsi=pool_logpsi,
-                conns=conns,
+                conn=conn,
                 alpha=alpha,
                 n_sample=int(self.eloc_sample),
             )
@@ -270,7 +249,7 @@ class MCState(VState):
                 gradient = utils.vjp(
                     self.model.coord,
                     self.params,
-                    kets,
+                    ket,
                     utils.device(
                         precision.asarray(
                             cotangent,
@@ -292,7 +271,7 @@ class MCState(VState):
                     geom = Geometry(
                         theta=self.params,
                         coord=self.model.coord,
-                        x=kets,
+                        x=ket,
                         w=utils.device(
                             precision.asarray(
                                 w,
@@ -319,11 +298,11 @@ class MCState(VState):
         )
         new_state = replace(self, sampler_state=sampler_state)
 
-        n_forward = int(det_pool.shape[0])
-        n_strong = int(np.asarray(conns.bra_idx).size)
-        n_weak = int(np.asarray(conns.sample_bra_idx).size)
-        n_strong_h = int(np.asarray(conns.h).size)
-        n_weak_h = int(np.asarray(conns.sample_h).size)
+        n_forward = int(pool.shape[0])
+        n_strong = int(np.asarray(conn.bra_idx).size)
+        n_weak = int(np.asarray(conn.sample_bra_idx).size)
+        n_strong_h = int(np.asarray(conn.h).size)
+        n_weak_h = int(np.asarray(conn.sample_h).size)
         n_forward_raw = n_ket + n_strong + n_weak
         forward_frac = float(n_forward) / max(1, n_forward_raw)
 
@@ -343,7 +322,7 @@ class MCState(VState):
             "ess_frac": float(ess / max(1, n_sample)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),
-            "n_forward": float(det_pool.shape[0]),
+            "n_forward": float(pool.shape[0]),
             "unique_frac": float(unique_frac),
             "forward_frac": float(forward_frac),
             "n_conn": n_conn,
@@ -360,7 +339,7 @@ class MCState(VState):
         ket_logabs: np.ndarray,
         pool_logabs: np.ndarray,
         pool_logpsi: Any,
-        conns: Any,
+        conn: Any,
         alpha: float,
         n_sample: int,
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -372,20 +351,20 @@ class MCState(VState):
         beta = rdtype(float(self.sampler.blur))
         n_ket = int(ket_logabs.size)
 
-        ket_ptr = np.asarray(conns.ket_ptr, dtype=np.int64)
-        ket = np.repeat(
+        ket_ptr = np.asarray(conn.ket_ptr, dtype=np.int64)
+        ket_idx = np.repeat(
             np.arange(n_ket, dtype=np.int64),
             np.diff(ket_ptr),
         )
-        bra = np.asarray(conns.bra_idx, dtype=np.int64)
+        bra_idx = np.asarray(conn.bra_idx, dtype=np.int64)
 
         h = precision.asarray(
-            np.asarray(conns.h),
+            np.asarray(conn.h),
             "calc",
             host=True,
         )
         diag = precision.asarray(
-            np.asarray(conns.diag),
+            np.asarray(conn.diag),
             "calc",
             host=True,
         )
@@ -400,8 +379,8 @@ class MCState(VState):
         eloc = diag.copy()
 
         if h.size:
-            bra_logpsi = jax.tree.map(lambda a: a[bra], pool_logpsi)
-            ket_logpsi = jax.tree.map(lambda a: a[ket], pool_logpsi)
+            bra_logpsi = jax.tree.map(lambda a: a[bra_idx], pool_logpsi)
+            ket_logpsi = jax.tree.map(lambda a: a[ket_idx], pool_logpsi)
 
             ratio = precision.asarray(
                 np.asarray(to_ratio(bra_logpsi, ket_logpsi)),
@@ -414,14 +393,14 @@ class MCState(VState):
                 np.result_type(eloc, contribution),
                 copy=False,
             )
-            np.add.at(eloc, ket, contribution)
+            np.add.at(eloc, ket_idx, contribution)
 
         if beta <= 0.0:
             lognu = logrho
 
         else:
             weight = precision.asarray(
-                np.asarray(conns.weight),
+                np.asarray(conn.weight),
                 "calc",
                 "real",
                 host=True,
@@ -443,7 +422,7 @@ class MCState(VState):
             if h.size:
                 abs_h = np.abs(h)
                 terms = (
-                    alpha_r * pool_logabs[bra]
+                    alpha_r * pool_logabs[bra_idx]
                     + np.log(np.maximum(abs_h, tiny))
                 )
 
@@ -462,30 +441,30 @@ class MCState(VState):
                 lognu = log_stay
 
         sample_h = precision.asarray(
-            np.asarray(conns.sample_h) if n_sample > 0 else np.empty(0),
+            np.asarray(conn.sample_h) if n_sample > 0 else np.empty(0),
             "calc",
             host=True,
         )
 
         if sample_h.size and n_sample > 0:
             sample_ket_ptr = np.asarray(
-                conns.sample_ket_ptr,
+                conn.sample_ket_ptr,
                 dtype=np.int64,
             )
-            sample_ket = np.repeat(
+            sample_ket_idx = np.repeat(
                 np.arange(n_ket, dtype=np.int64),
                 np.diff(sample_ket_ptr),
             )
-            sample_bra = np.asarray(
-                conns.sample_bra_idx,
+            sample_bra_idx = np.asarray(
+                conn.sample_bra_idx,
                 dtype=np.int64,
             )
 
             ratio = precision.asarray(
                 np.asarray(
                     to_ratio(
-                        jax.tree.map(lambda a: a[sample_bra], pool_logpsi),
-                        jax.tree.map(lambda a: a[sample_ket], pool_logpsi),
+                        jax.tree.map(lambda a: a[sample_bra_idx], pool_logpsi),
+                        jax.tree.map(lambda a: a[sample_ket_idx], pool_logpsi),
                     )
                 ),
                 "calc",
@@ -493,19 +472,19 @@ class MCState(VState):
             )
 
             count = precision.asarray(
-                np.asarray(conns.sample_count),
+                np.asarray(conn.sample_count),
                 "calc",
                 "real",
                 host=True,
             )
             sample_weight = precision.asarray(
-                np.asarray(conns.sample_weight),
+                np.asarray(conn.sample_weight),
                 "calc",
                 "real",
                 host=True,
             )
 
-            scale = count * sample_weight[sample_ket] / np.maximum(
+            scale = count * sample_weight[sample_ket_idx] / np.maximum(
                 rdtype(n_sample) * np.abs(sample_h),
                 tiny,
             )
@@ -515,7 +494,7 @@ class MCState(VState):
                 np.result_type(eloc, contribution),
                 copy=False,
             )
-            np.add.at(eloc, sample_ket, contribution)
+            np.add.at(eloc, sample_ket_idx, contribution)
 
         return lognu, precision.asarray(eloc, "calc", host=True)
 

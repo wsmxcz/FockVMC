@@ -13,8 +13,20 @@
 #include <vector>
 
 #include <libdet/rhf/cache.hpp>
+#include <libdet/rhf/screen.hpp>
 
 namespace libdet::rhf {
+
+struct KetScratch {
+    explicit KetScratch(int norb) : occ(norb) {}
+
+    DetOcc occ;
+};
+
+struct AbsWindow {
+    double lo = 0.0;
+    double hi = std::numeric_limits<double>::infinity();
+};
 
 struct Matrix;
 struct Conns;
@@ -113,9 +125,9 @@ public:
     ) const;
 
 private:
-    explicit Hamiltonian(RHFIntegrals ints);
+    explicit Hamiltonian(Integral ints);
 
-    RHFIntegrals ints_;
+    Integral ints_;
     u32 nword_ = 0;
 
     mutable std::mutex screen_mutex_;
@@ -175,11 +187,11 @@ private:
 } // namespace libdet::rhf
 
 #include <libdet/rhf/external.hpp>
-#include <libdet/rhf/finite.hpp>
+#include <libdet/rhf/internal.hpp>
 
 namespace libdet::rhf {
 
-inline Hamiltonian::Hamiltonian(RHFIntegrals ints)
+inline Hamiltonian::Hamiltonian(Integral ints)
     : ints_(std::move(ints)),
       nword_(bits::words_for(ints_.norb())),
       ket_cache_(nword_) {}
@@ -223,7 +235,7 @@ inline Hamiltonian Hamiltonian::make(
     std::span<const double> eri,
     double ecore
 ) {
-    return Hamiltonian(RHFIntegrals(norb, h1, eri, ecore));
+    return Hamiltonian(Integral(norb, h1, eri, ecore));
 }
 
 inline int Hamiltonian::norb() const noexcept {
@@ -336,17 +348,17 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
 
     const DetDiff ex = det_diff(bra, ket);
     if (ex.deg > 2) return 0.0;
-    if (ex.deg == 0) return Slater::diag(ints_, bra);
+    if (ex.deg == 0) return diag(ints_, bra);
 
     if (ex.deg == 1) {
         return ex.na == 1
-            ? ex.sign * Slater::single_a(
+            ? ex.sign * single_alpha(
                 ints_,
                 bra,
                 ex.occ_a[0],
                 ex.vir_a[0]
             )
-            : ex.sign * Slater::single_b(
+            : ex.sign * single_beta(
                 ints_,
                 bra,
                 ex.occ_b[0],
@@ -355,7 +367,7 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
     }
 
     if (ex.na == 2) {
-        return ex.sign * Slater::double_aa(
+        return ex.sign * double_alpha(
             ints_,
             ex.occ_a[0],
             ex.occ_a[1],
@@ -364,7 +376,7 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
         );
     }
     if (ex.nb == 2) {
-        return ex.sign * Slater::double_bb(
+        return ex.sign * double_beta(
             ints_,
             ex.occ_b[0],
             ex.occ_b[1],
@@ -373,7 +385,7 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
         );
     }
 
-    return ex.sign * Slater::double_ab(
+    return ex.sign * double_mixed(
         ints_,
         ex.occ_a[0],
         ex.occ_b[0],
@@ -388,7 +400,6 @@ namespace libdet {
 
 using rhf::ConnSamples;
 using rhf::Conns;
-using rhf::Hamiltonian;
 using rhf::Matrix;
 using rhf::Projection;
 using rhf::ProjectSamples;

@@ -8,7 +8,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
-#include <libdet/rhf/hamiltonian.hpp>
+#include <libdet/hamiltonian.hpp>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -199,7 +199,7 @@ NB_MODULE(_libdet_cpp, m) {
         .def_prop_ro("n_kets", [](const libdet::Conns& out) {
             return out.n_kets;
         })
-        .def_prop_ro("dets", [](const libdet::Conns& out) {
+        .def_prop_ro("x", [](const libdet::Conns& out) {
             return view_dets(
                 out.det_words,
                 out.det_words.size() / libdet::det_size(out.nword),
@@ -238,13 +238,13 @@ NB_MODULE(_libdet_cpp, m) {
         }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projection>(m, "Projection")
-        .def_prop_ro("bras", [](const libdet::Projection& out) {
+        .def_prop_ro("bra", [](const libdet::Projection& out) {
             return view_dets(out.bra_words, out.hpsi.size(), out.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi", [](const libdet::Projection& out) {
             return view_1d(out.hpsi);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diags", [](const libdet::Projection& out) {
+        .def_prop_ro("diag", [](const libdet::Projection& out) {
             return view_1d(out.diags);
         }, nb::rv_policy::reference_internal);
 
@@ -255,7 +255,7 @@ NB_MODULE(_libdet_cpp, m) {
         .def_prop_ro("n_streams", [](const libdet::ConnSamples& out) {
             return out.n_streams;
         })
-        .def_prop_ro("dets", [](const libdet::ConnSamples& out) {
+        .def_prop_ro("x", [](const libdet::ConnSamples& out) {
             return view_dets(
                 out.det_words,
                 out.det_words.size() / libdet::det_size(out.nword),
@@ -282,10 +282,10 @@ NB_MODULE(_libdet_cpp, m) {
         .def_prop_ro("rep_ptr", [](const libdet::ProjectSamples& out) {
             return view_1d(out.rep_ptr);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("bras", [](const libdet::ProjectSamples& out) {
+        .def_prop_ro("bra", [](const libdet::ProjectSamples& out) {
             return view_dets(out.bra_words, out.hpsi_a.size(), out.nword);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diags", [](const libdet::ProjectSamples& out) {
+        .def_prop_ro("diag", [](const libdet::ProjectSamples& out) {
             return view_1d(out.diags);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi_strong", [](const libdet::ProjectSamples& out) {
@@ -317,6 +317,39 @@ NB_MODULE(_libdet_cpp, m) {
             }();
         }, "h1"_a.noconvert(), "eri"_a.noconvert(), "ecore"_a = 0.0)
 
+        .def_static("guga", [](const F64Mat& h1,
+                               const F64Vec& eri,
+                               int n_alpha,
+                               int n_beta,
+                               double ecore) {
+            if (h1.shape(0) != h1.shape(1)) {
+                throw std::invalid_argument("Hamiltonian.guga: h1 must be square");
+            }
+
+            const int norb = static_cast<int>(h1.shape(0));
+            const auto h1_view = std::span<const double>(
+                h1.data(),
+                static_cast<std::size_t>(h1.shape(0) * h1.shape(1))
+            );
+            const auto eri_view = as_f64(eri);
+
+            return [&]() {
+                nb::gil_scoped_release release;
+                return libdet::Hamiltonian::guga(
+                    h1_view,
+                    norb,
+                    eri_view,
+                    n_alpha,
+                    n_beta,
+                    ecore
+                );
+            }();
+        }, "h1"_a.noconvert(),
+           "eri"_a.noconvert(),
+           "n_alpha"_a,
+           "n_beta"_a,
+           "ecore"_a = 0.0)
+
         .def_prop_ro("norb", &libdet::Hamiltonian::norb)
         .def_prop_ro("nword", &libdet::Hamiltonian::nword)
 
@@ -330,7 +363,7 @@ NB_MODULE(_libdet_cpp, m) {
             return ham.hij(bra_ref, ket_ref);
         }, "bra"_a.noconvert(), "ket"_a.noconvert())
 
-        .def("diags", [](const libdet::Hamiltonian& ham, const U64Array& dets) {
+        .def("diag", [](const libdet::Hamiltonian& ham, const U64Array& dets) {
             const auto det_view = to_det_view(dets);
             std::vector<double> out;
 
@@ -633,4 +666,5 @@ NB_MODULE(_libdet_cpp, m) {
            "exclude"_a = nb::none(),
            "n_rep"_a = libdet::i64{1},
            "seed"_a = std::uint64_t{0});
+
 }

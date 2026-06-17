@@ -158,11 +158,11 @@ inline ConnSamples Hamiltonian::sample_conns(
 #endif
             const std::size_t iket = static_cast<std::size_t>(ii);
             const DetRef ket = kets[iket];
-            const KetConns& src = *all[iket];
+            const KetConns& ket_conn = *all[iket];
             const std::size_t begin =
-                std::isfinite(eps1) ? src.count(eps1) : 0u;
-            const std::size_t end = src.count(eps2);
-            weight[iket] = src.prefix_abs[end] - src.prefix_abs[begin];
+                std::isfinite(eps1) ? ket_conn.count(eps1) : 0u;
+            const std::size_t end = ket_conn.count(eps2);
+            weight[iket] = ket_conn.prefix_abs[end] - ket_conn.prefix_abs[begin];
             if (!(weight[iket] > 0.0)) continue;
 
             std::fill(pos.begin(), pos.end(), 0u);
@@ -183,7 +183,7 @@ inline ConnSamples Hamiltonian::sample_conns(
 
             double cdf = 0.0;
             for (std::size_t k = begin; k < end; ++k) {
-                const Coupling& coupling = src.couplings[k];
+                const Coupling& coupling = ket_conn.couplings[k];
                 cdf += std::abs(coupling.h);
                 for (std::size_t stream = 0; stream < n_streams; ++stream) {
                     i64 count = 0;

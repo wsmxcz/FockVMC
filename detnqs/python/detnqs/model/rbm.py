@@ -15,7 +15,7 @@ class RBM(Model):
     """Complex RBM on spin-orbital occupation bitstrings.
 
     Input:
-        dets: uint64[N, 2, nword].
+        x: uint64[N, 2, nword].
 
     Output:
         complex log-amplitude with shape (N,).
@@ -30,7 +30,7 @@ class RBM(Model):
     dtype: Any | None = None
 
     @nn.compact
-    def __call__(self, dets: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array) -> jax.Array:
         dtype = precision.dtype("model", "complex") if self.dtype is None else self.dtype
 
         n_sorb = 2 * int(self.norb)
@@ -40,8 +40,8 @@ class RBM(Model):
         word = (orb >> jnp.uint32(6)).astype(jnp.int32)
         shift = (orb & jnp.uint32(63)).astype(jnp.uint64)
 
-        alpha_words = jnp.take(dets[:, 0], word, axis=1)
-        beta_words = jnp.take(dets[:, 1], word, axis=1)
+        alpha_words = jnp.take(x[:, 0], word, axis=1)
+        beta_words = jnp.take(x[:, 1], word, axis=1)
 
         alpha_occ = (alpha_words >> shift) & jnp.uint64(1)
         beta_occ = (beta_words >> shift) & jnp.uint64(1)
@@ -79,4 +79,4 @@ class RBM(Model):
         hidden = jnp.sum(s + jnp.log1p(jnp.exp(-2 * s)) - log2, axis=-1)
         visible = x @ visible_bias
 
-        return (visible + hidden).reshape((dets.shape[0],))
+        return (visible + hidden).reshape((x.shape[0],))

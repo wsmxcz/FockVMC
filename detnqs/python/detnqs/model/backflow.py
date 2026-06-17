@@ -46,11 +46,11 @@ class Backflow(Model):
     dtype: Any | None = None
 
     @nn.compact
-    def __call__(self, dets: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         dtype = precision.dtype("model", "real") if self.dtype is None else self.dtype
 
-        batch = dets.shape[0]
-        nword = dets.shape[2]
+        batch = x.shape[0]
+        nword = x.shape[2]
 
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -61,8 +61,8 @@ class Backflow(Model):
 
         shifts = jnp.arange(64, dtype=jnp.uint64)
 
-        alpha = (dets[:, 0, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
-        beta = (dets[:, 1, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
+        alpha = (x[:, 0, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
+        beta = (x[:, 1, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
 
         alpha = alpha.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
         beta = beta.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
@@ -150,11 +150,11 @@ class RBackflow(Model):
     dtype: Any | None = None
 
     @nn.compact
-    def __call__(self, dets: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         dtype = precision.dtype("model", "real") if self.dtype is None else self.dtype
 
-        batch = dets.shape[0]
-        nword = dets.shape[2]
+        batch = x.shape[0]
+        nword = x.shape[2]
 
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -166,8 +166,8 @@ class RBackflow(Model):
         n_pair = n_alpha
         shifts = jnp.arange(64, dtype=jnp.uint64)
 
-        alpha = (dets[:, 0, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
-        beta = (dets[:, 1, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
+        alpha = (x[:, 0, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
+        beta = (x[:, 1, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
 
         alpha = alpha.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
         beta = beta.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)

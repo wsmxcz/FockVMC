@@ -7,12 +7,12 @@ import numpy as np
 import primme
 from scipy.sparse.linalg import LinearOperator
 
-import libdet
+from detnqs import hilbert, operator
 from pyscf import ao2mo, gto, scf
 
 
 @dataclass(slots=True)
-class State:
+class HCIState:
     dets: np.ndarray
     coeffs: np.ndarray
     energy: float
@@ -20,19 +20,8 @@ class State:
     eps: float | None = None
 
 
-def hf_det(norb: int, nelec: tuple[int, int]) -> np.ndarray:
-    nword = (norb + 63) // 64
-    det = np.zeros((2, nword), dtype=np.uint64)
-
-    for spin, nocc in enumerate(nelec):
-        for p in range(nocc):
-            det[spin, p // 64] |= np.uint64(1) << np.uint64(p % 64)
-
-    return det
-
-
 def davidson_primme(
-    ham,
+    H: operator.Hamiltonian,
     dets: np.ndarray,
     guess: np.ndarray | None = None,
     *,
@@ -40,10 +29,11 @@ def davidson_primme(
     max_iter: int = 200,
     max_space: int = 64,
     mode: str = "sparse",
-):
+) -> tuple[float, np.ndarray, np.ndarray, float, float, float]:
+    """Solve the variational problem in a fixed determinant basis."""
     t0 = time.perf_counter()
 
-    hdiag = np.asarray(ham.diag(dets), dtype=np.float64).reshape(-1)
+    hdiag = np.asarray(H.diag(dets), dtype=np.float64).reshape(-1)
     n = hdiag.size
 
     if n == 1:
@@ -66,17 +56,17 @@ def davidson_primme(
     t_conns = time.perf_counter()
 
     if mode == "sparse":
-        A = ham.matrix(dets)
+        A = H.matrix(dets)
 
     elif mode == "matvec":
 
-        def matvec(x):
+        def matvec(x: np.ndarray) -> np.ndarray:
             x = np.asarray(x, dtype=np.float64).reshape(-1)
-            return np.asarray(ham.matvec(dets, x, ket=dets), dtype=np.float64)
+            return np.asarray(H.matvec(dets, x, ket=dets), dtype=np.float64)
 
-        def matmat(X):
+        def matmat(X: np.ndarray) -> np.ndarray:
             X = np.asarray(X, dtype=np.float64)
-            return np.asarray(ham.matvec(dets, X, ket=dets), dtype=np.float64)
+            return np.asarray(H.matvec(dets, X, ket=dets), dtype=np.float64)
 
         A = LinearOperator((n, n), matvec=matvec, matmat=matmat, dtype=np.float64)
 
@@ -142,18 +132,18 @@ def davidson_primme(
 
 
 def hci_solve(
-    ham,
-    nelec: tuple[int, int],
+    H: operator.Hamiltonian,
     *,
     eps: float = 1e-4,
     max_cycle: int = 10,
     davidson_mode: str = "sparse",
-) -> State:
+) -> HCIState:
+    """Grow a heat-bath selected determinant basis and diagonalize in it."""
     t_total = time.perf_counter()
 
-    dets = hf_det(int(ham.norb), nelec)[None]
+    dets = H.sector.reference(1)
     coeffs = np.array([1.0], dtype=np.float64)
-    diags = np.asarray(ham.diag(dets), dtype=np.float64).reshape(-1)
+    diags = np.asarray(H.diag(dets), dtype=np.float64).reshape(-1)
     energy = float(diags[0])
 
     header = (
@@ -164,8 +154,9 @@ def hci_solve(
     print("-" * len(header))
 
     for it in range(max_cycle):
+        # Select new external configurations above the cutoff.
         t_screen = time.perf_counter()
-        cand = ham.expand(dets, eps, coeffs=coeffs, exclude=dets)
+        cand = H.expand(dets, eps, scale=coeffs, exclude=dets)
         t_screen = time.perf_counter() - t_screen
 
         if cand.shape[0] == 0:
@@ -179,7 +170,7 @@ def hci_solve(
         guess[:n_old] = coeffs
 
         energy, coeffs, diags, t_conns, t_solve, t_other = davidson_primme(
-            ham,
+            H,
             dets,
             guess,
             mode=davidson_mode,
@@ -194,12 +185,18 @@ def hci_solve(
     print("-" * len(header))
     print(f"Total: {time.perf_counter() - t_total:.4f} s")
 
-    return State(dets=dets, coeffs=coeffs, energy=energy, diags=diags, eps=float(eps))
+    return HCIState(
+        dets=dets,
+        coeffs=coeffs,
+        energy=energy,
+        diags=diags,
+        eps=float(eps),
+    )
 
 
 def semi_pt2(
-    ham,
-    state: State,
+    H: operator.Hamiltonian,
+    state: HCIState,
     *,
     eps1: float = 1e-4,
     eps2: float = 1e-6,
@@ -211,8 +208,8 @@ def semi_pt2(
     coeffs = state.coeffs
     energy = state.energy
 
-    # Strong external amplitudes.
-    prj = ham.project(
+    # Deterministic contribution above the upper cutoff.
+    prj = H.project(
         None,
         dets,
         coeffs,
@@ -223,40 +220,37 @@ def semi_pt2(
     hpsi = np.asarray(prj.hpsi, dtype=np.float64)
     diags = np.asarray(prj.diag, dtype=np.float64)
     e2_det = float(np.sum((hpsi * hpsi) / (energy - diags)))
+    del prj, hpsi, diags
 
-    # Sample the weak window eps2 <= |H_ai c_i| < eps1.
-    sample = ham.sample_project(
-        dets,
-        coeffs,
-        eps1,
-        eps2,
-        counts,
-        exclude=dets,
-        n_rep=n_rep,
-        seed=seed,
-    )
-
-    rep_ptr = np.asarray(sample.rep_ptr, dtype=np.int64)
-    diags = np.asarray(sample.diag, dtype=np.float64)
-    hpsi_strong = np.asarray(sample.hpsi_strong, dtype=np.float64)
-    hpsi_a = np.asarray(sample.hpsi_a, dtype=np.float64)
-    hpsi_b = np.asarray(sample.hpsi_b, dtype=np.float64)
-
+    # Stochastic contribution inside the remaining cutoff window.
+    rng = np.random.default_rng(seed)
     corr = np.zeros(n_rep, dtype=np.float64)
+    counts_arr = np.full((2, len(dets)), counts, dtype=np.int64)
 
     for r in range(n_rep):
-        lo = int(rep_ptr[r])
-        hi = int(rep_ptr[r + 1])
+        weak = H.sample_project(
+            dets,
+            coeffs,
+            counts_arr,
+            eps1=eps1,
+            eps2=eps2,
+            exclude=dets,
+            seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
+        )
 
-        if hi == lo:
+        sample_bra = np.asarray(weak.bra, dtype=np.uint64)
+        weak_hpsi = np.asarray(weak.hpsi, dtype=np.float64)
+        if sample_bra.shape[0] == 0:
             continue
 
-        denom = energy - diags[lo:hi]
-        s = hpsi_strong[lo:hi]
-        wa = hpsi_a[lo:hi]
-        wb = hpsi_b[lo:hi]
+        strong = H.project(sample_bra, dets, coeffs, eps=eps1)
+        strong_pair = np.asarray(strong.hpsi, dtype=np.float64)
+        denom = energy - np.asarray(strong.diag, dtype=np.float64)
+        weak_a, weak_b = weak_hpsi
 
-        corr[r] = np.sum((s * (wa + wb) + wa * wb) / denom)
+        corr[r] = np.sum(
+            (strong_pair * (weak_a + weak_b) + weak_a * weak_b) / denom
+        )
 
     e2_stoch = float(np.mean(corr))
     err = 0.0 if n_rep == 1 else float(np.std(corr, ddof=1) / np.sqrt(n_rep))
@@ -264,43 +258,43 @@ def semi_pt2(
     return e2_det + e2_stoch, e2_det, e2_stoch, err
 
 
+# Build the problem and integral tensors.
 mol = gto.M(
     atom="""
     O   0.00000000,  0.00000000,  0.00000000
     H   0.75700000,  0.00000000,  0.58590000
     H  -0.75700000,  0.00000000,  0.58590000
     """,
-    # atom="""
-    # N    0.53920000,  0.00000000,  0.00000000
-    # N   -0.53920000,  0.00000000,  0.00000000
-    # """,
-    basis="cc-pvdz",
+    basis="sto-3g",
     unit="Angstrom",
     verbose=0,
 )
 
 mf = scf.RHF(mol).run()
 norb = mf.mo_coeff.shape[1]
+n_alpha, n_beta = mol.nelec
 
-# Canonical MO integrals.
 h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
 eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
 
-ham = libdet.Hamiltonian.rhf(h1e, eri, ecore=mol.energy_nuc())
+# Build the sector and Hamiltonian.
+sector = hilbert.SpinSector(norb, nelec = n_alpha + n_beta, spin=0)
+H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
+# Run the variational stage.
 state = hci_solve(
-    ham,
-    mol.nelec,
-    eps=1e-4,
+    H,
+    eps=1e-3,
     max_cycle=10,
     davidson_mode="sparse",
 )
 
+# Run the correction stage.
 e2_total, e2_det, e2_stoch, err = semi_pt2(
-    ham,
+    H,
     state,
     eps1=1e-6,
-    eps2=1e-12,
+    eps2=1e-6,
     counts=16,
     n_rep=4,
     seed=0,

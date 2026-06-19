@@ -1,29 +1,29 @@
 # DetNQS
 
-DetNQS is a compact experimental framework for Fock-space neural quantum
-states in quantum chemistry. It combines JAX variational models with
-OpenMP-parallel C++ Hamiltonian backends.
+DetNQS is an experimental library for Fock-space variational states, with a
+current focus on quantum-chemistry Hamiltonians.
 
-The repository supports three main workflows:
+The project combines a compact Python/JAX variational layer with a compiled
+Hamiltonian oracle for determinant and spin-adapted electronic structure
+workflows.
 
-- enhanced variational Monte Carlo with Markov chains;
-- exact and selected optimization;
-- heat-bath CI and perturbative estimation.
+## Scope
 
-## Structure
+Current strengths:
 
-- [`detnqs`](detnqs/README.md): Fock-space sectors, physical operators, models,
-  variational states, samplers, optimizers, and the VMC driver.
-- [`libdet`](libdet/README.md): screened Slater-Condon operations, connections,
-  sampling, sparse matrices, and matrix-vector products.
-- [`examples`](examples): executable research workflows.
-- [`tests`](tests): focused numerical and integration tests.
+- Determinant and spin-adapted Fock-space sectors.
+- Exact, selected-basis, and Monte Carlo variational states.
+- Backflow/RBM wavefunction models.
+- SR, minSR, and PSR optimizers through Optax.
+- Screened Hamiltonian expansion, projection, sampling, sparse matrices, and
+  matrix-vector products.
 
-`detnqs` owns Fock-space semantics and the variational algorithm. `libdet`
-owns high-performance Hamiltonian kernels. Solver and workflow policy remain
-outside `libdet`.
+Longer term, DetNQS is intended to grow toward a shared many-body operator
+core: graph, site, symmetry, and term definitions compiled to basis rules and
+operator primitives. The present code keeps that direction in mind while
+remaining specialized for quantum chemistry.
 
-## Installation
+## Install
 
 DetNQS requires Python 3.11 or later and a C++20 compiler.
 
@@ -31,47 +31,66 @@ DetNQS requires Python 3.11 or later and a C++20 compiler.
 pip install .
 ```
 
-For an editable development installation:
+For development:
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-This installs both Python packages, `detnqs` and `libdet`.
+## Minimal Workflow
 
-## Usage
+```python
+import jax
+import optax
 
-The examples are the primary usage reference:
+from detnqs import hilbert, operator
+from detnqs.driver import VMC
+from detnqs.model import Backflow
+from detnqs.optimizer import psr
+from detnqs.vstate import ExactState
 
-- `examples/exact.py`: exact-space optimization;
-- `examples/selected.py`: selected-space optimization;
-- `examples/vmc.py`: Monte Carlo optimization;
-- `examples/hci.py`: heat-bath CI and perturbative estimation;
-- `examples/hchain.py`: hydrogen-chain calculations.
+sector = hilbert.DetSector(norb, n_alpha, n_beta)
+H = operator.Hamiltonian(sector, h1, eri, ecore=ecore)
 
-Run them from the repository root:
+model = Backflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta)
+state = ExactState.init(model, H, key=jax.random.key(0))
 
-```bash
-python examples/exact.py
+optimizer = optax.chain(psr(shift=1e-3), optax.scale(-5e-2))
+vmc = VMC.init(state, optimizer)
+stats = vmc.step()
 ```
 
-Run the test suite with:
+See `examples/` for complete exact, selected-basis, Monte Carlo, and HCI-style
+workflows.
+
+## Project Map
+
+- `detnqs/`: Python package and public API.
+- `detnqs/operator/libdet/`: compiled Hamiltonian backend.
+- `examples/`: runnable research workflows.
+- `tests/`: public-contract and workflow checks.
+
+For module boundaries, see `detnqs/README.md`.
+
+## Testing
 
 ```bash
-pytest
+python -m pytest
 ```
 
 ## Citation
 
 ```bibtex
 @article{che2026detnqs,
-  title={A Deterministic Framework for Neural Network Quantum States in Quantum Chemistry},
-  author={Che, Zheng},
-  journal={arXiv preprint arXiv:2601.21310},
-  year={2026}
+  title = {A Deterministic Framework for Neural Network Quantum States in Quantum Chemistry},
+  author = {Che, Zheng},
+  journal = {Journal of Chemical Theory and Computation},
+  year = {2026},
+  doi = {10.1021/acs.jctc.6c00445},
+  url = {https://pubs.acs.org/doi/10.1021/acs.jctc.6c00445}
 }
 ```
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](LICENSE).
+Apache License 2.0. See `LICENSE`.

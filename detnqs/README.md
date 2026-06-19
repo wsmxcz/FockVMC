@@ -1,88 +1,54 @@
-# detnqs
+# detnqs Package
 
-`detnqs` is the JAX variational layer of the project. It defines Fock-space
-sectors, physical operators, neural wavefunctions, variational states,
-sampling, natural-gradient optimizers, and the optimization loop. Fast
-Hamiltonian kernels are provided by [`libdet`](../libdet/README.md).
+`detnqs` is the Python variational layer. It owns the public Fock-space API,
+model evaluation, estimators, optimizers, and the VMC loop. Compiled electronic
+Hamiltonian work is delegated to `detnqs.operator.libdet`.
 
-## Components
+## Module Boundaries
 
-- `detnqs.hilbert`: Fock-space sectors such as `DetSpace` and `CsfSpace`.
-- `detnqs.operator`: physical operators, primarily `H`.
-- `detnqs.model`: `RBM`, `Backflow`, and `RBackflow` wavefunctions.
-- `detnqs.vstate`: exact, selected-space, and Monte Carlo estimators.
-- `detnqs.sampler`: Metropolis chains and proposal rules.
-- `detnqs.optimizer`: SR, minSR, and PSR.
-- `detnqs.driver`: the minimal `VMC` optimization loop.
-- `detnqs.utils`: shared batching and numerical precision policy.
+- `hilbert`: sectors and the packed `x` configuration language.
+- `operator`: physical operators; `Hamiltonian` is the public operator-action
+  boundary.
+- `model`: Flax/JAX wavefunction models and log-amplitude conventions.
+- `vstate`: exact, selected-basis, and Monte Carlo estimators.
+- `sampler`: Metropolis chains used by `MCState`.
+- `optimizer`: Optax-compatible SR, minSR, and PSR transforms.
+- `driver`: the minimal `VMC` iteration loop.
+- `utils`: batching, precision, tree movement, timing, and numerical helpers.
 
-The main data flow is:
+## Data Flow
 
 ```text
-Space + Hamiltonian + model
+Sector + Hamiltonian + Model
         |
         v
-variational state -> loss, gradient, statistics, geometry
+VState.expect_and_grad()
         |
         v
-optimizer -> parameter update
+loss, gradient, statistics, geometry
+        |
+        v
+optimizer update
 ```
 
-The variational state owns physical state and estimators. The driver owns only
-optimizer state and iteration.
+The sector owns the basis representation. The Hamiltonian owns operator action.
+The model owns wavefunction evaluation. The variational state owns estimators
+and geometry construction. The driver owns iteration only.
 
-## Variational States
+## Public Conventions
 
-All states expose the same optimization contract:
+- `Sector` denotes a constrained Fock-space sector.
+- `x` denotes a batch of Fock-basis configurations.
+- `det` denotes determinant-specialized `x`.
+- `bra` and `ket` denote the axes of `H[bra, ket]`.
+- `h1`, `eri`, and `ecore` follow PySCF integral conventions.
+- Public symmetry names should be mathematical group names, for example `U1`
+  or `SU2`.
 
-```python
-state, loss, grad, stats, geometry = state.expect_and_grad(
-    geometry=True,
-)
-```
+Validation belongs at user-facing boundaries. Internal paths should assume the
+project representation and avoid repeated conversions.
 
-The available state types differ only in how the distribution over Fock
-configurations is represented:
+## Theory Notes
 
-- `ExactState`: complete finite sector.
-- `SelectedState`: explicit basis that can be enlarged.
-- `MCState`: samples configurations with `MCSampler`.
-
-## Minimal Workflow
-
-```python
-import jax
-import optax
-
-from detnqs import hilbert, operator
-from detnqs.driver import VMC
-from detnqs.model import RBM
-from detnqs.optimizer import sr
-from detnqs.vstate import ExactState
-
-space = hilbert.DetSpace(norb, n_alpha, n_beta)
-H = operator.Hamiltonian(space, h1, eri, ecore=ecore)
-
-model = RBM(norb=norb, alpha=1)
-state = ExactState.init(
-    model=model,
-    H=H,
-    key=jax.random.key(0),
-)
-
-optimizer = optax.chain(
-    sr(shift=1.0e-3),
-    optax.scale(-1.0e-2),
-)
-vmc = VMC.init(state, optimizer)
-stats = vmc.step()
-```
-
-Use `geometry=False` with ordinary Optax optimizers that do not require SR
-geometry. Complete workflows are in [`examples`](../examples).
-
-## Conventions
-
-Models return a logarithmic wavefunction representation. Spaces own
-the concrete `x` encoding. Current determinant and CSF sectors use the compact
-`uint64` occupation layout required by the `libdet` backend.
+- `optimizer/sr.md`: stochastic reconfiguration and sample-space SR.
+- `sampler/vmc.md`: Fock-space VMC measures, reweighting, and blurred sampling.

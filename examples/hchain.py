@@ -8,27 +8,41 @@ import matplotlib.pyplot as plt
 
 from pyscf import ao2mo, fci, gto, lo, scf
 
-from detnqs import hilbert, operator
-from detnqs.model import RBackflow
-from detnqs.vstate import MCState
-from detnqs.sampler import Local, MCSampler
-from detnqs.driver import VMC
-from detnqs.optimizer import psr
 from detnqs import utils as dq_utils
+from detnqs import hilbert, operator
+from detnqs.driver import VMC
+from detnqs.model import RBackflow
+from detnqs.optimizer import psr
+from detnqs.sampler import MCSampler
+from detnqs.vstate import MCState
 
 import utils as run_utils
 
 
+# numerical defaults.
 dq_utils.batch.configure(chunk=8192)
 dq_utils.precision.configure("single")
 jax.config.update("jax_debug_nans", False)
 jax.config.update("jax_log_compiles", False)
 
 
+# problem and integral tensors.
 mol = gto.M(
-    atom="; ".join(f"H 0 0 {i * 2.00}" for i in range(12)),
-    basis="sto-6g",
+    atom="""
+    H    3.23606798    0.00000000    0.00000000
+    H    2.61803399    1.90211303    0.00000000
+    H    1.00000000    3.07768354    0.00000000
+    H   -1.00000000    3.07768354    0.00000000
+    H   -2.61803399    1.90211303    0.00000000
+    H   -3.23606798    0.00000000    0.00000000
+    H   -2.61803399   -1.90211303    0.00000000
+    H   -1.00000000   -3.07768354    0.00000000
+    H    1.00000000   -3.07768354    0.00000000
+    H    2.61803399   -1.90211303    0.00000000
+    """,
+    basis="sto-3g",
     unit="Angstrom",
+    spin=0,
     verbose=0,
 )
 
@@ -44,13 +58,14 @@ assert np.allclose(C.T @ S @ C, np.eye(norb), atol=1e-10)
 h1e = np.asarray(C.T @ mf.get_hcore() @ C, dtype=np.float64)
 eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, C), norb), dtype=np.float64)
 
-h1e[np.abs(h1e) < 1e-6] = 0.0
-eri[np.abs(eri) < 1e-6] = 0.0
+h1e[np.abs(h1e) < 1e-8] = 0.0
+eri[np.abs(eri) < 1e-8] = 0.0
 
-hi = hilbert.DetSpace(norb, n_alpha, n_beta)
-H = operator.Hamiltonian(hi, h1e, eri, ecore=mol.energy_nuc())
+# ector and Hamiltonian.
+sector = hilbert.DetSector(norb, n_alpha, n_beta)
+H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
-# RHF reference expressed in the OAO basis.
+# reference matrix in the OAO basis.
 mo_oao = np.linalg.solve(C, mf.mo_coeff)
 assert np.allclose(mo_oao.T @ mo_oao, np.eye(norb), atol=1e-10)
 
@@ -66,10 +81,7 @@ print(f"SCF energy : {mf.e_tot:.12f}")
 print(f"FCI energy : {e_fci:.12f}")
 print(f"S^2        : {s2:.6f}")
 
-# e_fci = -7.66653 # H16_2.00A
-# e_fci = -14.46061 # H30_3.60Bohr
-# e_fci = -24.10276	# H50_3.60Bohr
-
+# variational state and optimizer.
 model = RBackflow(
     norb=norb,
     n_alpha=n_alpha,
@@ -82,9 +94,8 @@ sampler = MCSampler(
     n_samples=4096,
     n_chains=4096,
     thermal_steps=1024,
-    proposal=Local(),
-    alpha=2.0,
-    blur=0.0,
+    proposal="ham",
+    blur=0.5,
 )
 
 state = MCState.init(
@@ -93,6 +104,7 @@ state = MCState.init(
     sampler=sampler,
     chain_init="random",
     key=jax.random.key(0),
+    screen_eps=1e-3,
 )
 
 optimizer = optax.chain(
@@ -122,6 +134,7 @@ history = []
 total_times = defaultdict(float)
 steps = 1000
 
+# optimization loop.
 for step in range(steps):
     stats = dict(vmc.step())
     stats["step"] = step
@@ -141,5 +154,5 @@ run_utils.print_times(total_times)
 print(line)
 
 run_utils.plot_convergence(history, e_fci)
-plt.savefig('convergence_standard.pdf', dpi=300, bbox_inches='tight')
+plt.savefig("convergence_standard.pdf", dpi=300, bbox_inches="tight")
 plt.close()

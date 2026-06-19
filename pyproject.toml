@@ -54,8 +54,7 @@ cmake.version = ">=3.20"
 cmake.build-type = "Release"
 
 wheel.packages = [
-  "libdet/python/libdet",
-  "detnqs/python/detnqs",
+  "detnqs",
 ]
 
 sdist.include = [
@@ -63,11 +62,7 @@ sdist.include = [
   "README.md",
   "LICENSE",
 
-  "libdet/README.md",
-  "libdet/csrc/**",
-  "libdet/python/**",
-
-  "detnqs/python/**",
+  "detnqs/**",
 
   "examples/**",
   "tests/**",
@@ -80,9 +75,6 @@ sdist.exclude = [
   "build/**",
   "dist/**",
 ]
-
-[tool.scikit-build.cmake.define]
-DETNQS_BUILD_LIBDET = "ON"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

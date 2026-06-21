@@ -11,18 +11,13 @@
 #include <vector>
 
 #include <libdet/rhf/screen.hpp>
-#include <libdet/spatial/space.hpp>
+#include <libdet/rhf/det.hpp>
 
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
 
 namespace libdet::rhf {
-
-[[nodiscard]] inline bool in_window(double h, AbsWindow win) noexcept {
-    const double value = std::abs(h);
-    return value > 0.0 && value >= win.lo && value < win.hi;
-}
 
 template <class Visit>
 inline void visit_bras_prepared(
@@ -119,7 +114,7 @@ inline void visit_bras_prepared(
         for (std::size_t y = x + 1u; y < occ.occ_a.size(); ++y) {
             const int j = occ.occ_a[y];
 
-            for (const BraPair& c : screen->same(i, j, win.lo, win.hi)) {
+            for (const Pair& c : screen->same(i, j, win)) {
                 if (bits::test(ket.alpha(), c.a) || bits::test(ket.alpha(), c.b)) {
                     continue;
                 }
@@ -137,7 +132,7 @@ inline void visit_bras_prepared(
         for (std::size_t y = x + 1u; y < occ.occ_b.size(); ++y) {
             const int j = occ.occ_b[y];
 
-            for (const BraPair& c : screen->same(i, j, win.lo, win.hi)) {
+            for (const Pair& c : screen->same(i, j, win)) {
                 if (bits::test(ket.beta(), c.a) || bits::test(ket.beta(), c.b)) {
                     continue;
                 }
@@ -151,7 +146,7 @@ inline void visit_bras_prepared(
 
     for (int ia : occ.occ_a) {
         for (int ib : occ.occ_b) {
-            for (const BraPair& c : screen->opposite(ia, ib, win.lo, win.hi)) {
+            for (const Pair& c : screen->opposite(ia, ib, win)) {
                 if (bits::test(ket.alpha(), c.a) || bits::test(ket.beta(), c.b)) {
                     continue;
                 }
@@ -186,33 +181,6 @@ inline void visit_bras(
     );
 }
 
-struct Conns {
-    u32 nword = 0;
-    std::size_t n_kets = 0;
-    std::size_t n_streams = 1;
-    std::vector<u64> x_words;
-    std::vector<double> diag;
-    std::vector<i32> ptr;
-    std::vector<i32> bra;
-    std::vector<double> h;
-    std::vector<double> weight;
-};
-
-struct Projection {
-    u32 nword = 0;
-    std::vector<u64> bra_words;
-    std::vector<double> hpsi;
-    std::vector<double> diags;
-};
-
-struct Projections {
-    u32 nword = 0;
-    std::size_t n_streams = 0;
-    std::vector<u64> bra_words;
-    std::vector<double> hpsi;
-    std::vector<double> diags;
-};
-
 } // namespace libdet::rhf
 
 #include <libdet/rhf/sample.hpp>
@@ -221,8 +189,8 @@ namespace libdet::rhf {
 
 namespace detail {
 
-struct ProjectPart {
-    explicit ProjectPart(u32 nword) : bras(nword) {}
+struct ProjectBuffer {
+    explicit ProjectBuffer(u32 nword) : bras(nword) {}
 
     DetPool bras;
     std::vector<double> hpsi;
@@ -239,24 +207,6 @@ struct ProjectPart {
 };
 
 } // namespace detail
-
-inline std::vector<u64> Hamiltonian::merge_det_parts(
-    std::vector<std::vector<u64>>& parts
-) const {
-    std::size_t total = 0;
-    for (auto& part : parts) {
-        sort_unique_dets(part, nword_);
-        total += part.size();
-    }
-
-    std::vector<u64> out;
-    out.reserve(total);
-    for (auto& part : parts) {
-        out.insert(out.end(), part.begin(), part.end());
-    }
-    sort_unique_dets(out, nword_);
-    return out;
-}
 
 inline std::vector<u64> Hamiltonian::expand(
     DetBatchView kets,
@@ -306,11 +256,10 @@ inline std::vector<u64> Hamiltonian::expand(
             const double scale_i = scale.empty()
                 ? 1.0
                 : std::abs(scale[iket]);
-            const AbsWindow window = abs_window(
-                eps,
-                std::numeric_limits<double>::infinity(),
-                scale_i
-            );
+            const AbsWindow window{
+                scale_i <= 0.0 || eps <= 0.0 ? 0.0 : eps / scale_i,
+                scale_i <= 0.0 ? 0.0 : std::numeric_limits<double>::infinity()
+            };
 
             visit_bras(
                 ints_,
@@ -327,7 +276,17 @@ inline std::vector<u64> Hamiltonian::expand(
         }
     }
 
-    return merge_det_parts(local);
+    std::size_t total = 0;
+    for (auto& part : local) {
+        sort_unique_dets(part, nword_);
+        total += part.size();
+    }
+
+    std::vector<u64> words;
+    words.reserve(total);
+    for (auto& part : local) words.insert(words.end(), part.begin(), part.end());
+    sort_unique_dets(words, nword_);
+    return words;
 }
 
 inline Projection Hamiltonian::project(
@@ -355,7 +314,7 @@ inline Projection Hamiltonian::project(
     const int nthread = 1;
 #endif
 
-    std::vector<detail::ProjectPart> local;
+    std::vector<detail::ProjectBuffer> local;
     local.reserve(static_cast<std::size_t>(nthread));
     for (int t = 0; t < nthread; ++t) local.emplace_back(nword_);
 
@@ -378,11 +337,11 @@ inline Projection Hamiltonian::project(
         for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
 #endif
             const double scale_i = scale[iket];
-            const AbsWindow window = abs_window(
-                eps,
-                std::numeric_limits<double>::infinity(),
-                std::abs(scale_i)
-            );
+            const double abs_scale = std::abs(scale_i);
+            const AbsWindow window{
+                abs_scale <= 0.0 || eps <= 0.0 ? 0.0 : eps / abs_scale,
+                abs_scale <= 0.0 ? 0.0 : std::numeric_limits<double>::infinity()
+            };
 
             visit_bras(
                 ints_,
@@ -441,13 +400,13 @@ inline Projection Hamiltonian::project(
     return out;
 }
 
-inline std::shared_ptr<const KetConns> Hamiltonian::build_ket_conns(
+inline std::shared_ptr<const Conns> Hamiltonian::build_conns(
     DetRef ket,
     double eps,
-    KetScratch& scratch,
-    const Screen* screen_ptr
+    const Screen* screen_ptr,
+    KetScratch& scratch
 ) const {
-    auto conns = std::make_shared<KetConns>();
+    auto conns = std::make_shared<Conns>();
     conns->cutoff = eps;
     fill_occ(ket, ints_.norb(), scratch.occ);
     conns->diag = diag(ints_, scratch.occ);
@@ -457,26 +416,26 @@ inline std::shared_ptr<const KetConns> Hamiltonian::build_ket_conns(
         screen_ptr,
         ket,
         scratch.occ,
-        abs_window(eps, std::numeric_limits<double>::infinity(), 1.0),
+        AbsWindow{eps, std::numeric_limits<double>::infinity()},
         [&](Excitation excitation, double h) {
-            conns->couplings.push_back({excitation, h});
+            conns->add(excitation, h);
         }
     );
     conns->finish();
     return conns;
 }
 
-inline std::vector<std::shared_ptr<const KetConns>>
+inline std::vector<std::shared_ptr<const Conns>>
 Hamiltonian::ket_conns(DetBatchView kets, double eps) const {
     auto screen_ptr = screen(eps);
-    std::vector<std::shared_ptr<const KetConns>> out(kets.n_dets);
+    std::vector<std::shared_ptr<const Conns>> out(kets.n_dets);
     std::vector<std::size_t> misses;
     misses.reserve(kets.n_dets);
 
     {
-        std::lock_guard<std::mutex> lock(ket_cache_mutex_);
+        std::lock_guard<std::mutex> lock(conn_cache_mutex_);
         for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-            out[iket] = ket_cache_.find(kets[iket], eps);
+            out[iket] = conn_cache_.find(kets[iket], eps);
             if (!out[iket]) misses.push_back(iket);
         }
     }
@@ -490,11 +449,11 @@ Hamiltonian::ket_conns(DetBatchView kets, double eps) const {
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(misses.size()); ++ii) {
             const std::size_t iket = misses[static_cast<std::size_t>(ii)];
-            out[iket] = build_ket_conns(
+            out[iket] = build_conns(
                 kets[iket],
                 eps,
-                scratch,
-                screen_ptr.get()
+                screen_ptr.get(),
+                scratch
             );
         }
     }
@@ -502,20 +461,20 @@ Hamiltonian::ket_conns(DetBatchView kets, double eps) const {
     KetScratch scratch(ints_.norb());
     for (std::size_t iket : misses) {
         out[iket] =
-            build_ket_conns(kets[iket], eps, scratch, screen_ptr.get());
+            build_conns(kets[iket], eps, screen_ptr.get(), scratch);
     }
 #endif
 
     {
-        std::lock_guard<std::mutex> lock(ket_cache_mutex_);
+        std::lock_guard<std::mutex> lock(conn_cache_mutex_);
         for (std::size_t iket : misses) {
-            ket_cache_.insert(kets[iket], out[iket]);
+            conn_cache_.insert(kets[iket], out[iket]);
         }
     }
     return out;
 }
 
-inline Conns Hamiltonian::conn(
+inline ::libdet::Conns Hamiltonian::conn(
     DetBatchView kets,
     double eps,
     const DetBatchView* include
@@ -537,7 +496,7 @@ inline Conns Hamiltonian::conn(
 
     const auto all = ket_conns(kets, eps);
 
-    Conns out;
+    ::libdet::Conns out;
     out.nword = nword_;
     out.n_kets = kets.n_dets;
     out.diag.reserve(kets.n_dets);
@@ -549,25 +508,25 @@ inline Conns Hamiltonian::conn(
 
     for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
         const DetRef ket = kets[iket];
-        const KetConns& ket_conn = *all[iket];
+        const Conns& ket_conn = *all[iket];
         double weight = 0.0;
 
         out.diag.push_back(ket_conn.diag);
 
-        for (const Coupling& coupling : ket_conn.couplings) {
-            if (std::abs(coupling.h) < eps) continue;
-
-            const DetRef bra = apply(ket, coupling.excitation, bra_scratch);
+        const ConnWindow win = ket_conn.window(AbsWindow{eps, std::numeric_limits<double>::infinity()});
+        weight = win.weight;
+        for (std::size_t k = win.begin; k < win.end; ++k) {
+            const Conn& term = ket_conn.terms[k];
+            const DetRef bra = apply(ket, term.excitation, bra_scratch);
             out.bra.push_back(pool.find_or_add(bra));
-            out.h.push_back(coupling.h);
-            weight += std::abs(coupling.h);
+            out.h.push_back(term.h);
         }
 
         out.weight.push_back(weight);
         out.ptr.push_back(to_i32(out.bra.size()));
     }
 
-    out.x_words = std::move(pool.words());
+    out.bra_words = std::move(pool.words());
     return out;
 }
 

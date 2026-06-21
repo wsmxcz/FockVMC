@@ -1,283 +1,345 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
-#include <utility>
+#include <limits>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
-#include <libdet/guga/csf.hpp>
-#include <libdet/guga/integral.hpp>
+#include <libdet/guga/path.hpp>
+#include <libdet/integral.hpp>
 
 namespace libdet::guga {
 
-struct CfgChange {
-    std::vector<int> ket_orbs;
-    std::vector<int> bra_orbs;
-};
+struct Move {
+    unsigned char degree = 0;
+    std::array<unsigned char, 2> remove{0u, 0u};
+    std::array<unsigned char, 2> add{0u, 0u};
+    double ub = 0.0;
 
-struct BraCfg {
-    Cfg cfg;
-    CfgChange change;
-    double bound = 0.0;
-};
-
-class Screen {
-public:
-    explicit Screen(const Integral& ints)
-        : norb_(ints.norb()),
-          global_bound_(build_global_bound(ints)),
-          one_bound_(static_cast<std::size_t>(norb_ * norb_), 0.0),
-          two_bound_(
-              static_cast<std::size_t>(norb_ * norb_ * norb_ * norb_),
-              0.0
-          ) {
-        build_one_bounds(ints);
-        build_two_bounds(ints);
+    [[nodiscard]] static Move from(const OccMove& src) noexcept {
+        Move out;
+        out.degree = static_cast<unsigned char>(src.degree);
+        if (src.degree <= 0) return out;
+        out.remove[0] = static_cast<unsigned char>(src.remove[0]);
+        out.add[0] = static_cast<unsigned char>(src.add[0]);
+        if (src.degree == 2) {
+            out.remove[1] = static_cast<unsigned char>(src.remove[1]);
+            out.add[1] = static_cast<unsigned char>(src.add[1]);
+        } else {
+            out.remove[1] = out.remove[0];
+            out.add[1] = out.add[0];
+        }
+        return out;
     }
 
-    template <class Visit>
-    void visit_bra_cfgs(const Csf& ket, double cutoff, Visit&& visit) const {
-        std::vector<BraCfg> bras;
-        build_bra_cfgs(ket.cfg, bras);
-
-        for (const BraCfg& bra : bras) {
-            if (cutoff <= 0.0 || bra.bound >= cutoff) visit(bra);
+    [[nodiscard]] OccMove occ_move() const noexcept {
+        OccMove out;
+        out.degree = static_cast<int>(degree);
+        out.remove[0] = static_cast<int>(remove[0]);
+        out.remove[1] = static_cast<int>(remove[1]);
+        out.add[0] = static_cast<int>(add[0]);
+        out.add[1] = static_cast<int>(add[1]);
+        if (degree == 1u) {
+            out.remove[1] = -1;
+            out.add[1] = -1;
         }
+        return out;
+    }
+};
+
+// Occupation-level screen.  It gives safe bounds and cutoff-specific moves.
+class Screen {
+public:
+    Screen(const Integral& ints, double cutoff)
+        : ints_(&ints), norb_(ints.norb()), cutoff_(cutoff) {
+        if (std::isnan(cutoff_) || cutoff_ < 0.0) {
+            throw std::invalid_argument("guga::Screen: cutoff must be nonnegative");
+        }
+        build_moves();
+    }
+
+    [[nodiscard]] double cutoff() const noexcept { return cutoff_; }
+
+    [[nodiscard]] std::span<const Move> one(double lo) const noexcept {
+        return prefix(one_, std::max(lo, cutoff_));
+    }
+
+    [[nodiscard]] std::span<const Move> two(double lo) const noexcept {
+        return prefix(two_, std::max(lo, cutoff_));
+    }
+
+    [[nodiscard]] double same(Occ ket) const {
+        if (static_cast<int>(ket.size()) != norb_) return 0.0;
+
+        double out = 0.0;
+        for (int p = 0; p < norb_; ++p) {
+            if (nocc(ket, p) != 1) continue;
+            for (int q = p + 1; q < norb_; ++q) {
+                if (nocc(ket, q) != 1) continue;
+                out += std::abs(ints_->chem(p, q, q, p)) * two_bound(ket, p, q, q, p);
+            }
+        }
+        return pad(out);
+    }
+
+    [[nodiscard]] bool keep(Occ ket, Occ bra) const {
+        return bound(ket, bra) >= cutoff_;
+    }
+
+    [[nodiscard]] double bound(Occ ket, Occ bra) const {
+        if (ket.size() != bra.size() || static_cast<int>(ket.size()) != norb_) return 0.0;
+
+        const OccMove move = occ_move(bra, ket);
+        if (move.degree > 2) return 0.0;
+        if (move.degree == 0) return pad(diag_bound(ket) + same(ket));
+        return bound(ket, Move::from(move));
+    }
+
+    [[nodiscard]] double bound(Occ ket, const Move& move) const {
+        if (static_cast<int>(ket.size()) != norb_) return 0.0;
+        if (move.degree == 1u) return pad(one_bound(ket, move));
+        if (move.degree == 2u) return pad(two_move_bound(ket, move));
+        return 0.0;
     }
 
 private:
+    const Integral* ints_ = nullptr;
     int norb_ = 0;
-    double global_bound_ = 0.0;
-    std::vector<double> one_bound_;
-    std::vector<double> two_bound_;
+    double cutoff_ = 0.0;
+    std::vector<Move> one_;
+    std::vector<Move> two_;
 
-    [[nodiscard]] std::size_t one_index(int ket_orb, int bra_orb) const noexcept {
-        return static_cast<std::size_t>(ket_orb)
-            * static_cast<std::size_t>(norb_)
-            + static_cast<std::size_t>(bra_orb);
+    [[nodiscard]] static int nocc(Occ occ, int p) noexcept {
+        return static_cast<int>(occ[static_cast<std::size_t>(p)]);
     }
 
-    [[nodiscard]] std::size_t two_index(
-        int ket_a,
-        int ket_b,
-        int bra_a,
-        int bra_b
-    ) const noexcept {
-        return (
-            (
-                static_cast<std::size_t>(ket_a)
-                * static_cast<std::size_t>(norb_)
-                + static_cast<std::size_t>(ket_b)
-            ) * static_cast<std::size_t>(norb_)
-            + static_cast<std::size_t>(bra_a)
-        ) * static_cast<std::size_t>(norb_)
-        + static_cast<std::size_t>(bra_b);
+    [[nodiscard]] static double pad(double x) noexcept {
+        return x * (1.0 + 128.0 * std::numeric_limits<double>::epsilon());
     }
 
-    [[nodiscard]] static double build_global_bound(const Integral& ints) {
-        double bound = std::abs(ints.ecore());
-        const int norb = ints.norb();
+    [[nodiscard]] static std::span<const Move> prefix(
+        const std::vector<Move>& moves,
+        double lo
+    ) noexcept {
+        const auto it = std::partition_point(
+            moves.begin(),
+            moves.end(),
+            [lo](const Move& move) noexcept { return move.ub >= lo; }
+        );
+        return {moves.data(), static_cast<std::size_t>(it - moves.begin())};
+    }
 
-        for (int p = 0; p < norb; ++p) {
-            for (int q = 0; q < norb; ++q) bound += std::abs(ints.h1(p, q));
+    [[nodiscard]] static double one_coeff_bound(Occ occ, int p, int q) noexcept {
+        if (p == q) return static_cast<double>(nocc(occ, p));
+        return (nocc(occ, q) > 0 && nocc(occ, p) < 2) ? 2.0 : 0.0;
+    }
+
+    [[nodiscard]] static bool first_ok(Occ occ, int r, int s, int& nr, int& ns) noexcept {
+        nr = nocc(occ, r);
+        ns = nocc(occ, s);
+        if (r == s) return ns > 0;
+        if (ns <= 0 || nr >= 2) return false;
+        ++nr;
+        --ns;
+        return true;
+    }
+
+    [[nodiscard]] static int after_first(Occ occ, int x, int r, int s, int nr, int ns) noexcept {
+        if (x == r) return nr;
+        if (x == s) return ns;
+        return nocc(occ, x);
+    }
+
+    [[nodiscard]] static double two_bound(Occ occ, int p, int q, int r, int s) noexcept {
+        int nr = 0;
+        int ns = 0;
+        const double first = one_coeff_bound(occ, r, s);
+        double prod = 0.0;
+        if (first > 0.0 && first_ok(occ, r, s, nr, ns)) {
+            const int np = after_first(occ, p, r, s, nr, ns);
+            const int nq = after_first(occ, q, r, s, nr, ns);
+            prod = first
+                * (p == q ? static_cast<double>(nq) : (nq > 0 && np < 2 ? 2.0 : 0.0));
         }
 
-        for (int p = 0; p < norb; ++p) {
-            for (int q = 0; q < norb; ++q) {
-                for (int r = 0; r < norb; ++r) {
-                    for (int s = 0; s < norb; ++s) {
-                        bound += std::abs(ints.chem(p, q, r, s));
-                    }
-                }
-            }
-        }
-
-        return bound;
+        const double sub = (q == r) ? one_coeff_bound(occ, p, s) : 0.0;
+        return prod + sub;
     }
 
-    void build_one_bounds(const Integral& ints) {
-        for (int q = 0; q < norb_; ++q) {
-            for (int p = 0; p < norb_; ++p) {
-                double bound = std::abs(ints.h1(q, p)) + std::abs(ints.h1(p, q));
-
-                for (int t = 0; t < norb_; ++t) {
-                    bound += std::abs(ints.chem(q, p, t, t));
-                    bound += std::abs(ints.chem(q, t, t, p));
-                    bound += std::abs(ints.chem(p, q, t, t));
-                    bound += std::abs(ints.chem(p, t, t, q));
-                    bound += std::abs(ints.chem(t, t, q, p));
-                    bound += std::abs(ints.chem(t, q, p, t));
-                }
-
-                one_bound_[one_index(q, p)] = bound;
-            }
+    [[nodiscard]] double diag_bound(Occ ket) const {
+        double out = std::abs(ints_->ecore());
+        for (int p = 0; p < norb_; ++p) {
+            const int np = nocc(ket, p);
+            out += std::abs(ints_->h1(p, p)) * static_cast<double>(np);
+            out += 0.5 * std::abs(ints_->chem(p, p, p, p))
+                * static_cast<double>(np * (np - 1));
         }
-    }
 
-    void build_two_bounds(const Integral& ints) {
-        for (int q = 0; q < norb_; ++q) {
-            for (int s = 0; s < norb_; ++s) {
-                for (int p = 0; p < norb_; ++p) {
-                    for (int r = 0; r < norb_; ++r) {
-                        const int ket_orbs[2] = {q, s};
-                        const int bra_orbs[2] = {p, r};
-                        double bound = 0.0;
-
-                        for (int i : ket_orbs) {
-                            for (int j : ket_orbs) {
-                                for (int a : bra_orbs) {
-                                    for (int b : bra_orbs) {
-                                        bound += std::abs(ints.chem(i, a, j, b));
-                                        bound += std::abs(ints.chem(i, b, j, a));
-                                        bound += std::abs(ints.chem(a, i, b, j));
-                                        bound += std::abs(ints.chem(a, j, b, i));
-                                    }
-                                }
-                            }
-                        }
-
-                        two_bound_[two_index(q, s, p, r)] = bound;
-                    }
-                }
-            }
-        }
-    }
-
-    [[nodiscard]] static CfgChange change(const Cfg& bra_cfg, const Cfg& ket_cfg) {
-        CfgChange out;
-        for (std::size_t p = 0; p < ket_cfg.size(); ++p) {
-            const int diff =
-                static_cast<int>(bra_cfg[p]) - static_cast<int>(ket_cfg[p]);
-            for (int k = 0; k < -diff; ++k) {
-                out.ket_orbs.push_back(static_cast<int>(p));
-            }
-            for (int k = 0; k < diff; ++k) {
-                out.bra_orbs.push_back(static_cast<int>(p));
+        for (int p = 0; p < norb_; ++p) {
+            const int np = nocc(ket, p);
+            if (np == 0) continue;
+            for (int q = p + 1; q < norb_; ++q) {
+                const int nq = nocc(ket, q);
+                if (nq == 0) continue;
+                out += std::abs(ints_->chem(p, p, q, q)) * static_cast<double>(np * nq);
+                out += std::abs(ints_->chem(p, q, q, p)) * two_bound(ket, p, q, q, p);
             }
         }
         return out;
     }
 
-    [[nodiscard]] static double l1_bound(const Cfg& cfg) noexcept {
-        int singly = 0;
-        for (unsigned char occ : cfg) {
-            if (occ == 1) ++singly;
+    [[nodiscard]] static bool move_one_ok(Occ occ, int q, int p) noexcept {
+        if (p == q) return false;
+        return nocc(occ, q) > 0 && nocc(occ, p) < 2;
+    }
+
+    [[nodiscard]] static bool move_two_ok(Occ occ, const Move& move) noexcept {
+        int idx[4];
+        int val[4];
+        int n = 0;
+
+        auto pos = [&](int x) noexcept {
+            for (int i = 0; i < n; ++i) {
+                if (idx[i] == x) return i;
+            }
+            idx[n] = x;
+            val[n] = nocc(occ, x);
+            return n++;
+        };
+        auto remove = [&](int x) noexcept {
+            const int i = pos(x);
+            if (val[i] <= 0) return false;
+            --val[i];
+            return true;
+        };
+        auto add = [&](int x) noexcept {
+            const int i = pos(x);
+            if (val[i] >= 2) return false;
+            ++val[i];
+            return true;
+        };
+
+        return remove(static_cast<int>(move.remove[0]))
+            && remove(static_cast<int>(move.remove[1]))
+            && add(static_cast<int>(move.add[0]))
+            && add(static_cast<int>(move.add[1]));
+    }
+
+    [[nodiscard]] double one_bound(Occ ket, const Move& move) const {
+        const int p = static_cast<int>(move.add[0]);
+        const int q = static_cast<int>(move.remove[0]);
+        if (!move_one_ok(ket, q, p)) return 0.0;
+
+        double out = std::abs(ints_->h1(p, q)) * one_coeff_bound(ket, p, q);
+        out += std::abs(ints_->chem(p, p, p, q)) * two_bound(ket, p, p, p, q);
+        out += std::abs(ints_->chem(p, q, q, q)) * two_bound(ket, p, q, q, q);
+
+        for (int k = 0; k < norb_; ++k) {
+            if (k == p || k == q) continue;
+            out += std::abs(ints_->chem(p, q, k, k)) * two_bound(ket, p, q, k, k);
+            out += std::abs(ints_->chem(p, k, k, q)) * two_bound(ket, p, k, k, q);
         }
-        return std::pow(2.0, 0.5 * static_cast<double>(singly));
+        return out;
     }
 
-    [[nodiscard]] double bound(
-        const Cfg& ket_cfg,
-        const Cfg& bra_cfg,
-        const CfgChange& change
-    ) const noexcept {
-        const double coeff_bound = l1_bound(ket_cfg) * l1_bound(bra_cfg);
+    template <class Visit>
+    static void visit_pair(int a, int b, Visit&& visit) {
+        visit(a, b);
+        if (a != b) visit(b, a);
+    }
 
-        if (change.bra_orbs.empty()) return global_bound_;
+    [[nodiscard]] double two_move_bound(Occ ket, const Move& move) const {
+        if (!move_two_ok(ket, move)) return 0.0;
 
-        if (change.bra_orbs.size() == 1u) {
-            const int q = change.ket_orbs[0];
-            const int p = change.bra_orbs[0];
-            return 64.0 * coeff_bound * one_bound_[one_index(q, p)];
+        double out = 0.0;
+        visit_pair(static_cast<int>(move.add[0]), static_cast<int>(move.add[1]), [&](int p, int r) {
+            visit_pair(static_cast<int>(move.remove[0]), static_cast<int>(move.remove[1]), [&](int q, int s) {
+                out += 0.5 * std::abs(ints_->chem(p, q, r, s)) * two_bound(ket, p, q, r, s);
+            });
+        });
+        return out;
+    }
+
+    [[nodiscard]] static double c2_static(int q, int r) noexcept {
+        return q == r ? 6.0 : 4.0;
+    }
+
+    [[nodiscard]] double one_static(int p, int q) const {
+        double out = 2.0 * std::abs(ints_->h1(p, q));
+        out += c2_static(p, p) * std::abs(ints_->chem(p, p, p, q));
+        out += c2_static(q, q) * std::abs(ints_->chem(p, q, q, q));
+        for (int k = 0; k < norb_; ++k) {
+            if (k == p || k == q) continue;
+            out += c2_static(q, k) * std::abs(ints_->chem(p, q, k, k));
+            out += c2_static(k, k) * std::abs(ints_->chem(p, k, k, q));
         }
-
-        if (change.bra_orbs.size() == 2u) {
-            const int q = change.ket_orbs[0];
-            const int s = change.ket_orbs[1];
-            const int p = change.bra_orbs[0];
-            const int r = change.bra_orbs[1];
-            return 64.0 * coeff_bound * two_bound_[two_index(q, s, p, r)];
-        }
-
-        return 0.0;
+        return pad(out);
     }
 
-    [[nodiscard]] static bool move_one(
-        Cfg& cfg,
-        int ket_orb,
-        int bra_orb
-    ) noexcept {
-        if (ket_orb == bra_orb) return true;
-
-        auto& ket_occ = cfg[static_cast<std::size_t>(ket_orb)];
-        auto& bra_occ = cfg[static_cast<std::size_t>(bra_orb)];
-        if (ket_occ == 0 || bra_occ == 2) return false;
-
-        --ket_occ;
-        ++bra_occ;
-        return true;
+    [[nodiscard]] double two_static(const Move& move) const {
+        double out = 0.0;
+        visit_pair(static_cast<int>(move.add[0]), static_cast<int>(move.add[1]), [&](int p, int r) {
+            visit_pair(static_cast<int>(move.remove[0]), static_cast<int>(move.remove[1]), [&](int q, int s) {
+                out += 0.5 * c2_static(q, r) * std::abs(ints_->chem(p, q, r, s));
+            });
+        });
+        return pad(out);
     }
 
-    void add_bra_cfg(
-        const Cfg& ket_cfg,
-        Cfg bra_cfg,
-        std::vector<BraCfg>& bras
-    ) const {
-        BraCfg bra;
-        bra.change = change(bra_cfg, ket_cfg);
-        bra.bound = bound(ket_cfg, bra_cfg, bra.change);
-        bra.cfg = std::move(bra_cfg);
-        bras.push_back(std::move(bra));
+    static void sort_moves(std::vector<Move>& moves) {
+        std::sort(moves.begin(), moves.end(), [](const Move& lhs, const Move& rhs) {
+            if (lhs.ub != rhs.ub) return lhs.ub > rhs.ub;
+            if (lhs.degree != rhs.degree) return lhs.degree < rhs.degree;
+            if (lhs.remove != rhs.remove) return lhs.remove < rhs.remove;
+            return lhs.add < rhs.add;
+        });
     }
 
-    void build_bra_cfgs(const Cfg& ket_cfg, std::vector<BraCfg>& bras) const {
-        bras.clear();
-        bras.reserve(1u + static_cast<std::size_t>(norb_ * norb_));
-
-        add_bra_cfg(ket_cfg, ket_cfg, bras);
+    void build_moves() {
+        one_.clear();
+        two_.clear();
 
         for (int q = 0; q < norb_; ++q) {
-            if (ket_cfg[static_cast<std::size_t>(q)] == 0) continue;
-
             for (int p = 0; p < norb_; ++p) {
                 if (p == q) continue;
-
-                Cfg bra_cfg = ket_cfg;
-                if (move_one(bra_cfg, q, p)) {
-                    add_bra_cfg(ket_cfg, std::move(bra_cfg), bras);
-                }
+                Move move;
+                move.degree = 1u;
+                move.remove = {static_cast<unsigned char>(q), static_cast<unsigned char>(q)};
+                move.add = {static_cast<unsigned char>(p), static_cast<unsigned char>(p)};
+                move.ub = one_static(p, q);
+                if (move.ub >= cutoff_) one_.push_back(move);
             }
         }
 
         for (int q = 0; q < norb_; ++q) {
-            if (ket_cfg[static_cast<std::size_t>(q)] == 0) continue;
+            for (int s = q; s < norb_; ++s) {
+                for (int p = 0; p < norb_; ++p) {
+                    for (int r = p; r < norb_; ++r) {
+                        if (p == q || p == s || r == q || r == s) continue;
 
-            for (int p = 0; p < norb_; ++p) {
-                Cfg first = ket_cfg;
-                if (!move_one(first, q, p)) continue;
-
-                for (int s = 0; s < norb_; ++s) {
-                    if (first[static_cast<std::size_t>(s)] == 0) continue;
-
-                    for (int r = 0; r < norb_; ++r) {
-                        if (r == s) continue;
-
-                        Cfg bra_cfg = first;
-                        if (move_one(bra_cfg, s, r)) {
-                            add_bra_cfg(ket_cfg, std::move(bra_cfg), bras);
-                        }
+                        Move move;
+                        move.degree = 2u;
+                        move.remove = {
+                            static_cast<unsigned char>(q),
+                            static_cast<unsigned char>(s)
+                        };
+                        move.add = {
+                            static_cast<unsigned char>(p),
+                            static_cast<unsigned char>(r)
+                        };
+                        move.ub = two_static(move);
+                        if (move.ub >= cutoff_) two_.push_back(move);
                     }
                 }
             }
         }
 
-        std::sort(
-            bras.begin(),
-            bras.end(),
-            [](const BraCfg& lhs, const BraCfg& rhs) {
-                return lhs.cfg < rhs.cfg;
-            }
-        );
-
-        const auto last = std::unique(
-            bras.begin(),
-            bras.end(),
-            [](const BraCfg& lhs, const BraCfg& rhs) {
-                return lhs.cfg == rhs.cfg;
-            }
-        );
-        bras.erase(last, bras.end());
+        sort_moves(one_);
+        sort_moves(two_);
     }
 };
 

@@ -8,7 +8,7 @@
 #include <vector>
 
 #include <libdet/rhf/element.hpp>
-#include <libdet/spatial/space.hpp>
+#include <libdet/rhf/det.hpp>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -17,26 +17,18 @@
 namespace libdet::rhf {
 
 // Internal implementation header included by hamiltonian.hpp.
-struct Matrix {
-    std::size_t n_bra = 0;
-    std::size_t n_ket = 0;
-    std::vector<i32> indptr;
-    std::vector<i32> indices;
-    std::vector<double> data;
-};
-
 template <class Emit>
 inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
     if (h != 0.0) emit(iket, h);
 }
 
-// Visit off-diagonal RHF couplings from a bra into a known ket space.
+// Visit off-diagonal RHF terms from a bra into a known ket space.
 template <class Emit>
 inline void visit_kets(
     const Integral& ints,
-    const KetSpace& kets,
+    const DetSpace& kets,
     DetRef bra,
-    BraScratch& work,
+    VisitScratch& work,
     Emit&& emit
 ) {
     work.ensure_seen(kets.alpha.size(), kets.beta.size());
@@ -235,16 +227,8 @@ inline Matrix Hamiltonian::matrix(
     Matrix out;
     out.n_bra = bras.n_dets;
     out.n_ket = kets.n_dets;
-    build_matrix(out, bras, kets);
-    return out;
-}
 
-inline void Hamiltonian::build_matrix(
-    Matrix& out,
-    DetBatchView bras,
-    DetBatchView kets
-) const {
-    const auto ket_space = cached_ket_space(kets);
+    const auto ket_space = cached_space(kets);
     const std::size_t nbras = bras.n_dets;
     std::vector<double> hdiag(nbras, 0.0);
     out.indptr.assign(nbras + 1u, 0);
@@ -252,14 +236,14 @@ inline void Hamiltonian::build_matrix(
 #if defined(_OPENMP)
 #pragma omp parallel
     {
-        BraScratch scratch;
+        VisitScratch scratch;
 
 #pragma omp for schedule(static)
         for (i64 ii = 0; ii < static_cast<i64>(nbras); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
             const double h_bra_bra = diag(ints_, bra);
-            i32 nnz = find_ket(*ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
+            i32 nnz = find_det(*ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
 
             visit_kets(ints_, *ket_space, bra, scratch, [&](i32, double) {
                 ++nnz;
@@ -284,12 +268,12 @@ inline void Hamiltonian::build_matrix(
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
             std::size_t pos = static_cast<std::size_t>(out.indptr[ibra]);
-            const double diag = hdiag[ibra];
-            const i32 diag_idx = find_ket(*ket_space, bra);
+            const double hdiag_i = hdiag[ibra];
+            const i32 diag_idx = find_det(*ket_space, bra);
 
-            if (diag_idx >= 0 && diag != 0.0) {
+            if (diag_idx >= 0 && hdiag_i != 0.0) {
                 out.indices[pos] = diag_idx;
-                out.data[pos++] = diag;
+                out.data[pos++] = hdiag_i;
             }
 
             visit_kets(
@@ -305,11 +289,11 @@ inline void Hamiltonian::build_matrix(
         }
     }
 #else
-    BraScratch scratch;
+    VisitScratch scratch;
     for (std::size_t ibra = 0; ibra < nbras; ++ibra) {
         const DetRef bra = bras[ibra];
         const double h_bra_bra = diag(ints_, bra);
-        i32 nnz = find_ket(*ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
+        i32 nnz = find_det(*ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
         visit_kets(ints_, *ket_space, bra, scratch, [&](i32, double) {
             ++nnz;
         });
@@ -328,12 +312,12 @@ inline void Hamiltonian::build_matrix(
     for (std::size_t ibra = 0; ibra < nbras; ++ibra) {
         const DetRef bra = bras[ibra];
         std::size_t pos = static_cast<std::size_t>(out.indptr[ibra]);
-        const double diag = hdiag[ibra];
-        const i32 diag_idx = find_ket(*ket_space, bra);
+        const double hdiag_i = hdiag[ibra];
+        const i32 diag_idx = find_det(*ket_space, bra);
 
-        if (diag_idx >= 0 && diag != 0.0) {
+        if (diag_idx >= 0 && hdiag_i != 0.0) {
             out.indices[pos] = diag_idx;
-            out.data[pos++] = diag;
+            out.data[pos++] = hdiag_i;
         }
 
         visit_kets(
@@ -348,6 +332,8 @@ inline void Hamiltonian::build_matrix(
         );
     }
 #endif
+
+    return out;
 }
 
 inline std::vector<double> Hamiltonian::matvec(
@@ -361,25 +347,25 @@ inline std::vector<double> Hamiltonian::matvec(
         throw std::invalid_argument("matvec: x size must match kets");
     }
 
-    const auto ket_space = cached_ket_space(kets);
+    const auto ket_space = cached_space(kets);
     std::vector<double> out(bras.n_dets, 0.0);
 
 #if defined(_OPENMP)
 #pragma omp parallel
     {
-        BraScratch scratch;
+        VisitScratch scratch;
 
 #pragma omp for schedule(static)
         for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
 #else
     {
-        BraScratch scratch;
+        VisitScratch scratch;
         for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
 #endif
             const DetRef bra = bras[ibra];
             double value = 0.0;
-            const i32 diag_idx = find_ket(*ket_space, bra);
+            const i32 diag_idx = find_det(*ket_space, bra);
             if (diag_idx >= 0) {
                 value += diag(ints_, bra)
                     * x[static_cast<std::size_t>(diag_idx)];
@@ -412,25 +398,25 @@ inline std::vector<double> Hamiltonian::matmat(
         throw std::invalid_argument("matmat: X size must be n_ket * n_rhs");
     }
 
-    const auto ket_space = cached_ket_space(kets);
+    const auto ket_space = cached_space(kets);
     std::vector<double> out(bras.n_dets * nrhs, 0.0);
 
 #if defined(_OPENMP)
 #pragma omp parallel
     {
-        BraScratch scratch;
+        VisitScratch scratch;
 
 #pragma omp for schedule(static)
         for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
 #else
     {
-        BraScratch scratch;
+        VisitScratch scratch;
         for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
 #endif
             const DetRef bra = bras[ibra];
             double* y = out.data() + ibra * nrhs;
-            const i32 diag_idx = find_ket(*ket_space, bra);
+            const i32 diag_idx = find_det(*ket_space, bra);
 
             if (diag_idx >= 0) {
                 const double h = diag(ints_, bra);
@@ -463,7 +449,7 @@ inline Projection Hamiltonian::project_impl(
     std::span<const double> scale,
     double eps
 ) const {
-    const auto ket_space = cached_ket_space(kets);
+    const auto ket_space = cached_space(kets);
 
     Projection out;
     out.nword = nword_;
@@ -474,14 +460,14 @@ inline Projection Hamiltonian::project_impl(
 #if defined(_OPENMP)
 #pragma omp parallel
     {
-        BraScratch scratch;
+        VisitScratch scratch;
 
 #pragma omp for schedule(static)
         for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
 #else
     {
-        BraScratch scratch;
+        VisitScratch scratch;
         for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
 #endif
             const DetRef bra = bras[ibra];
@@ -489,7 +475,7 @@ inline Projection Hamiltonian::project_impl(
             double value = 0.0;
             out.diags[ibra] = h_bra_bra;
 
-            const i32 diag_idx = find_ket(*ket_space, bra);
+            const i32 diag_idx = find_det(*ket_space, bra);
             if (diag_idx >= 0) {
                 const double term =
                     h_bra_bra * scale[static_cast<std::size_t>(diag_idx)];

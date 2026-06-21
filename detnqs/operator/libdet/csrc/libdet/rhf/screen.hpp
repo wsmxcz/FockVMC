@@ -9,10 +9,11 @@
 #include <vector>
 
 #include <libdet/rhf/element.hpp>
+#include <libdet/window.hpp>
 
 namespace libdet::rhf {
 
-struct BraPair {
+struct Pair {
     int a = 0;
     int b = 0;
     double h = 0.0;
@@ -40,20 +41,18 @@ public:
         return cutoff_;
     }
 
-    [[nodiscard]] std::span<const BraPair> same(
+    [[nodiscard]] std::span<const Pair> same(
         int i,
         int j,
-        double lo = 0.0,
-        double hi = std::numeric_limits<double>::infinity()
+        AbsWindow win = AbsWindow{}
     ) const noexcept {
-        return window(same_pairs(i, j), lo, hi);
+        return window(same_pairs(i, j), win);
     }
 
-    [[nodiscard]] std::span<const BraPair> opposite(
+    [[nodiscard]] std::span<const Pair> opposite(
         int ia,
         int ib,
-        double lo = 0.0,
-        double hi = std::numeric_limits<double>::infinity()
+        AbsWindow win = AbsWindow{}
     ) const noexcept {
         const std::size_t k =
             static_cast<std::size_t>(ia) * static_cast<std::size_t>(norb_)
@@ -61,18 +60,18 @@ public:
         const std::size_t begin = opposite_off_[k];
         const std::size_t end = opposite_off_[k + 1u];
 
-        return window({opposite_data_.data() + begin, end - begin}, lo, hi);
+        return window({opposite_data_.data() + begin, end - begin}, win);
     }
 
 private:
     int norb_ = 0;
     double cutoff_ = 0.0;
     std::vector<std::size_t> same_off_;
-    std::vector<BraPair> same_data_;
+    std::vector<Pair> same_data_;
     std::vector<std::size_t> opposite_off_;
-    std::vector<BraPair> opposite_data_;
+    std::vector<Pair> opposite_data_;
 
-    [[nodiscard]] std::span<const BraPair> same_pairs(
+    [[nodiscard]] std::span<const Pair> same_pairs(
         int i,
         int j
     ) const noexcept {
@@ -86,13 +85,13 @@ private:
         return std::abs(h) >= cutoff_;
     }
 
-    [[nodiscard]] static double abs_h(const BraPair& pair) noexcept {
+    [[nodiscard]] static double abs_h(const Pair& pair) noexcept {
         return std::abs(pair.h);
     }
 
     [[nodiscard]] static bool before(
-        const BraPair& lhs,
-        const BraPair& rhs
+        const Pair& lhs,
+        const Pair& rhs
     ) noexcept {
         const double a = abs_h(lhs);
         const double b = abs_h(rhs);
@@ -104,7 +103,7 @@ private:
     }
 
     [[nodiscard]] static std::size_t first_lt(
-        std::span<const BraPair> pairs,
+        std::span<const Pair> pairs,
         double cutoff
     ) noexcept {
         if (cutoff <= 0.0) return pairs.size();
@@ -121,22 +120,21 @@ private:
         return lo;
     }
 
-    [[nodiscard]] static std::span<const BraPair> window(
-        std::span<const BraPair> pairs,
-        double lo,
-        double hi
+    [[nodiscard]] static std::span<const Pair> window(
+        std::span<const Pair> pairs,
+        AbsWindow win
     ) noexcept {
-        if (pairs.empty() || hi <= lo) return {};
+        if (pairs.empty() || win.hi <= win.lo) return {};
 
-        const std::size_t begin = std::isfinite(hi) ? first_lt(pairs, hi) : 0u;
-        const std::size_t end = first_lt(pairs, lo);
+        const std::size_t begin = std::isfinite(win.hi) ? first_lt(pairs, win.hi) : 0u;
+        const std::size_t end = first_lt(pairs, win.lo);
 
         if (end <= begin) return {};
         return {pairs.data() + begin, end - begin};
     }
 
     void build_same(const Integral& ints) {
-        std::vector<BraPair> pairs;
+        std::vector<Pair> pairs;
 
         for (int hi = 0; hi < norb_; ++hi) {
             for (int lo = 0; lo <= hi; ++lo) {
@@ -162,7 +160,7 @@ private:
     }
 
     void build_opposite(const Integral& ints) {
-        std::vector<BraPair> pairs;
+        std::vector<Pair> pairs;
 
         for (int ia = 0; ia < norb_; ++ia) {
             for (int ib = 0; ib < norb_; ++ib) {

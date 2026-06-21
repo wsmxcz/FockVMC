@@ -8,67 +8,92 @@
 #include <unordered_map>
 #include <vector>
 
-#include <libdet/spatial/space.hpp>
+#include <libdet/rhf/det.hpp>
+#include <libdet/window.hpp>
 
 namespace libdet::rhf {
 
-struct Coupling {
+struct Conn {
     Excitation excitation;
     double h = 0.0;
 };
 
-struct KetConns {
+struct Conns {
     double cutoff = 0.0;
     double diag = 0.0;
-    std::vector<Coupling> couplings;
+    std::vector<Conn> terms;
     std::vector<double> prefix_abs;
 
+    [[nodiscard]] std::size_t size() const noexcept {
+        return terms.size();
+    }
+
+    void add(Excitation excitation, double value) {
+        terms.push_back(Conn{excitation, value});
+    }
+
     void finish() {
-        std::sort(
-            couplings.begin(),
-            couplings.end(),
-            [](const Coupling& lhs, const Coupling& rhs) {
-                const double a = std::abs(lhs.h);
-                const double b = std::abs(rhs.h);
-                if (a != b) return a > b;
-                return excitation_less(lhs.excitation, rhs.excitation);
-            }
-        );
+        if (terms.empty()) {
+            prefix_abs.assign(1u, 0.0);
+            return;
+        }
+        if (terms.size() > 1u) {
+            std::sort(
+                terms.begin(),
+                terms.end(),
+                [](const Conn& lhs, const Conn& rhs) {
+                    const double a = std::abs(lhs.h);
+                    const double b = std::abs(rhs.h);
+                    if (a != b) return a > b;
+                    return excitation_less(lhs.excitation, rhs.excitation);
+                }
+            );
+        }
 
-        prefix_abs.resize(couplings.size() + 1u);
+        prefix_abs.resize(terms.size() + 1u);
         prefix_abs[0] = 0.0;
-
-        for (std::size_t k = 0; k < couplings.size(); ++k) {
-            prefix_abs[k + 1u] = prefix_abs[k] + std::abs(couplings[k].h);
+        for (std::size_t k = 0; k < terms.size(); ++k) {
+            prefix_abs[k + 1u] = prefix_abs[k] + std::abs(terms[k].h);
         }
     }
 
     [[nodiscard]] std::size_t count(double eps) const noexcept {
         const auto it = std::partition_point(
-            couplings.begin(),
-            couplings.end(),
-            [eps](const Coupling& coupling) {
-                return std::abs(coupling.h) >= eps;
+            terms.begin(),
+            terms.end(),
+            [eps](const Conn& term) {
+                return std::abs(term.h) >= eps;
             }
         );
 
-        return static_cast<std::size_t>(it - couplings.begin());
+        return static_cast<std::size_t>(it - terms.begin());
     }
 
+    [[nodiscard]] double abs_sum(std::size_t begin, std::size_t end) const noexcept {
+        if (begin >= end || end >= prefix_abs.size()) return 0.0;
+        return prefix_abs[end] - prefix_abs[begin];
+    }
+
+    [[nodiscard]] ::libdet::ConnWindow window(::libdet::AbsWindow win) const noexcept {
+        const std::size_t begin = std::isfinite(win.hi) ? count(win.hi) : 0u;
+        const std::size_t end = count(win.lo);
+        if (end <= begin) return ::libdet::ConnWindow{begin, begin, 0.0};
+        return ::libdet::ConnWindow{begin, end, abs_sum(begin, end)};
+    }
 };
 
-class KetCache {
+class ConnCache {
 public:
     static constexpr std::size_t capacity = 8192;
 
-    explicit KetCache(u32 nword = 0)
+    explicit ConnCache(u32 nword = 0)
         : nword_(nword),
           words_(capacity * det_size(nword), 0u),
           entries_(capacity) {
         index_.reserve(capacity);
     }
 
-    [[nodiscard]] std::shared_ptr<const KetConns> find(
+    [[nodiscard]] std::shared_ptr<const Conns> find(
         DetRef ket,
         double eps
     ) {
@@ -82,22 +107,13 @@ public:
         return entry.conns;
     }
 
-    void insert(DetRef ket, std::shared_ptr<const KetConns> conns) {
+    void insert(DetRef ket, std::shared_ptr<const Conns> conns) {
         if (nword_ == 0 || ket.nword() != nword_ || !conns) {
             return;
         }
 
         const std::size_t old = find_slot(ket);
         const u64 fingerprint = det_fingerprint(ket);
-
-        const auto collision = index_.find(fingerprint);
-        if (
-            old == npos
-            && collision != index_.end()
-            && !det_equal(ket_at(collision->second), ket)
-        ) {
-            return;
-        }
 
         if (
             old != npos
@@ -140,7 +156,7 @@ private:
     static constexpr std::size_t npos = static_cast<std::size_t>(-1);
 
     struct Entry {
-        std::shared_ptr<const KetConns> conns;
+        std::shared_ptr<const Conns> conns;
         u64 fingerprint = 0;
         std::list<std::size_t>::iterator position;
     };
@@ -148,7 +164,7 @@ private:
     u32 nword_ = 0;
     std::vector<u64> words_;
     std::vector<Entry> entries_;
-    std::unordered_map<u64, std::size_t> index_;
+    std::unordered_multimap<u64, std::size_t> index_;
     std::list<std::size_t> lru_;
     std::size_t size_ = 0;
 
@@ -162,17 +178,23 @@ private:
         if (nword_ == 0 || ket.nword() != nword_) return npos;
 
         const u64 fingerprint = det_fingerprint(ket);
-        const auto it = index_.find(fingerprint);
-        if (it == index_.end()) return npos;
-
-        const std::size_t slot = it->second;
-        return det_equal(ket_at(slot), ket) ? slot : npos;
+        const auto range = index_.equal_range(fingerprint);
+        for (auto it = range.first; it != range.second; ++it) {
+            const std::size_t slot = it->second;
+            if (det_equal(ket_at(slot), ket)) return slot;
+        }
+        return npos;
     }
 
     void erase_index(std::size_t slot) {
         const u64 fingerprint = entries_[slot].fingerprint;
-        const auto it = index_.find(fingerprint);
-        if (it != index_.end() && it->second == slot) index_.erase(it);
+        const auto range = index_.equal_range(fingerprint);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (it->second == slot) {
+                index_.erase(it);
+                return;
+            }
+        }
     }
 
     void touch(std::size_t slot) {
@@ -180,9 +202,9 @@ private:
     }
 };
 
-class KetSpaceCache {
+class SpaceCache {
 public:
-    [[nodiscard]] std::shared_ptr<const KetSpace> find(
+    [[nodiscard]] std::shared_ptr<const DetSpace> find(
         DetBatchView kets
     ) const {
         const std::size_t size = kets.n_dets * det_size(kets.nword);
@@ -202,7 +224,7 @@ public:
 
     void insert(
         DetBatchView kets,
-        std::shared_ptr<const KetSpace> space
+        std::shared_ptr<const DetSpace> space
     ) {
         nword_ = kets.nword;
         fingerprint_ = fingerprint(kets);
@@ -214,7 +236,7 @@ private:
     u32 nword_ = 0;
     u64 fingerprint_ = 0;
     std::vector<u64> words_;
-    std::shared_ptr<const KetSpace> space_;
+    std::shared_ptr<const DetSpace> space_;
 
     [[nodiscard]] static u64 fingerprint(DetBatchView kets) noexcept {
         const std::size_t size = kets.n_dets * det_size(kets.nword);

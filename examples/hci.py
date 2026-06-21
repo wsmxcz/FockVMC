@@ -258,52 +258,58 @@ def semi_pt2(
     return e2_det + e2_stoch, e2_det, e2_stoch, err
 
 
-# Build the problem and integral tensors.
-mol = gto.M(
-    atom="""
-    O   0.00000000,  0.00000000,  0.00000000
-    H   0.75700000,  0.00000000,  0.58590000
-    H  -0.75700000,  0.00000000,  0.58590000
-    """,
-    basis="sto-3g",
-    unit="Angstrom",
-    verbose=0,
-)
 
-mf = scf.RHF(mol).run()
-norb = mf.mo_coeff.shape[1]
-n_alpha, n_beta = mol.nelec
+def main():
+    # Build the problem and integral tensors.
+    mol = gto.M(
+        atom="""
+        O   0.00000000,  0.00000000,  0.00000000
+        O   1.1200000,  0.00000000,  0.58590000
+        """,
+        basis="sto-3g",
+        unit="Angstrom",
+        spin=0,
+        verbose=0,
+    )
 
-h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
-eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
+    mf = scf.ROHF(mol).run()
+    norb = mf.mo_coeff.shape[1]
+    n_alpha, n_beta = mol.nelec
 
-# Build the sector and Hamiltonian.
-sector = hilbert.SpinSector(norb, nelec = n_alpha + n_beta, spin=0)
-H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
+    h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
+    eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
 
-# Run the variational stage.
-state = hci_solve(
-    H,
-    eps=1e-3,
-    max_cycle=10,
-    davidson_mode="sparse",
-)
+    # Build the sector and Hamiltonian.
+    sector = hilbert.SpinSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
+    H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
-# Run the correction stage.
-e2_total, e2_det, e2_stoch, err = semi_pt2(
-    H,
-    state,
-    eps1=1e-6,
-    eps2=1e-6,
-    counts=16,
-    n_rep=4,
-    seed=0,
-)
+    # Run the variational stage.
+    state = hci_solve(
+        H,
+        eps=1e-6,
+        max_cycle=10,
+        davidson_mode="sparse",
+    )
 
-print()
-print(f"SCF          : {mf.e_tot:16.12f}")
-print(f"HCI var      : {state.energy:16.12f}  Ndet: {len(state.dets)}")
-print(f"PT2 det      : {e2_det:16.12f}")
-print(f"PT2 stoch    : {e2_stoch:16.12f} +/- {err:.12f}")
-print(f"PT2 total    : {e2_total:16.12f} +/- {err:.12f}")
-print(f"HCI + PT2    : {state.energy + e2_total:16.12f} +/- {err:.12f}")
+    # Run the correction stage.
+    e2_total, e2_det, e2_stoch, err = semi_pt2(
+        H,
+        state,
+        eps1=1e-6,
+        eps2=1e-6,
+        counts=16,
+        n_rep=4,
+        seed=0,
+    )
+
+    print()
+    print(f"SCF          : {mf.e_tot:16.12f}")
+    print(f"HCI var      : {state.energy:16.12f}  Ndet: {len(state.dets)}")
+    print(f"PT2 det      : {e2_det:16.12f}")
+    print(f"PT2 stoch    : {e2_stoch:16.12f} +/- {err:.12f}")
+    print(f"PT2 total    : {e2_total:16.12f} +/- {err:.12f}")
+    print(f"HCI + PT2    : {state.energy + e2_total:16.12f} +/- {err:.12f}")
+
+
+if __name__ == "__main__":
+    main()

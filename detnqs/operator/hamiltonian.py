@@ -16,12 +16,7 @@ Projections = libdet.Projections
 
 
 class Hamiltonian:
-    """Electronic Hamiltonian acting on a Fock-space sector.
-
-    `sector` fixes the basis language. `h1`, `eri`, and `ecore` follow PySCF
-    spatial-orbital integral conventions. Determinant-sector calls are routed
-    to the `detnqs.operator.libdet` oracle.
-    """
+    """Electronic Hamiltonian acting on a Fock-space sector."""
 
     def __init__(
         self,
@@ -34,8 +29,16 @@ class Hamiltonian:
         self.sector = sector
         self._ecore = float(ecore)
 
-        h1_arr = np.ascontiguousarray(np.asarray(h1, dtype=np.float64))
-        eri_arr = np.ascontiguousarray(np.asarray(eri, dtype=np.float64).reshape(-1))
+        h1_arr = np.asarray(h1, dtype=np.float64)
+        if h1_arr.shape != (sector.norb, sector.norb):
+            raise ValueError("h1 must have shape (sector.norb, sector.norb)")
+        h1_arr = np.ascontiguousarray(h1_arr)
+
+        eri_arr = np.asarray(eri, dtype=np.float64)
+        npair = sector.norb * (sector.norb + 1) // 2
+        if eri_arr.shape != (npair * (npair + 1) // 2,):
+            raise ValueError("eri must be a 1D PySCF chemist 8-fold array")
+        eri_arr = np.ascontiguousarray(eri_arr)
 
         if isinstance(sector, DetSector):
             self._raw = libdet.Hamiltonian.det(h1_arr, eri_arr, self._ecore)

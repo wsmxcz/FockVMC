@@ -23,16 +23,6 @@ struct KetScratch {
     DetOcc occ;
 };
 
-struct AbsWindow {
-    double lo = 0.0;
-    double hi = std::numeric_limits<double>::infinity();
-};
-
-struct Matrix;
-struct Conns;
-struct Projection;
-struct Projections;
-
 class Hamiltonian {
 public:
     Hamiltonian() = delete;
@@ -75,13 +65,13 @@ public:
         const DetBatchView* exclude
     ) const;
 
-    [[nodiscard]] Conns conn(
+    [[nodiscard]] ::libdet::Conns conn(
         DetBatchView kets,
         double eps = 0.0,
         const DetBatchView* include = nullptr
     ) const;
 
-    [[nodiscard]] Conns sample_conn(
+    [[nodiscard]] ::libdet::Conns sample_conn(
         DetBatchView kets,
         std::span<const i64> counts,
         std::size_t n_streams,
@@ -126,10 +116,10 @@ private:
 
     mutable std::mutex screen_mutex_;
     mutable std::shared_ptr<const Screen> screen_;
-    mutable std::mutex ket_cache_mutex_;
-    mutable KetCache ket_cache_;
-    mutable std::mutex ket_space_cache_mutex_;
-    mutable KetSpaceCache ket_space_cache_;
+    mutable std::mutex conn_cache_mutex_;
+    mutable ConnCache conn_cache_;
+    mutable std::mutex space_cache_mutex_;
+    mutable SpaceCache space_cache_;
 
     void check_one(DetRef det, const char* where) const;
     void check_dets(DetBatchView dets, const char* where) const;
@@ -142,28 +132,18 @@ private:
         double eps,
         double max_scale
     ) noexcept;
-    [[nodiscard]] static AbsWindow abs_window(
-        double lo,
-        double hi,
-        double scale
-    ) noexcept;
-
-    [[nodiscard]] std::shared_ptr<const KetSpace> cached_ket_space(
+    [[nodiscard]] std::shared_ptr<const DetSpace> cached_space(
         DetBatchView kets
     ) const;
 
-    [[nodiscard]] std::vector<u64> merge_det_parts(
-        std::vector<std::vector<u64>>& parts
-    ) const;
-
-    [[nodiscard]] std::shared_ptr<const KetConns> build_ket_conns(
+    [[nodiscard]] std::shared_ptr<const Conns> build_conns(
         DetRef ket,
         double eps,
-        KetScratch& scratch,
-        const Screen* screen
+        const Screen* screen,
+        KetScratch& scratch
     ) const;
 
-    [[nodiscard]] std::vector<std::shared_ptr<const KetConns>> ket_conns(
+    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> ket_conns(
         DetBatchView kets,
         double eps
     ) const;
@@ -174,8 +154,6 @@ private:
         std::span<const double> scale,
         double eps
     ) const;
-
-    void build_matrix(Matrix& out, DetBatchView bras, DetBatchView kets) const;
 };
 
 } // namespace libdet::rhf
@@ -188,20 +166,20 @@ namespace libdet::rhf {
 inline Hamiltonian::Hamiltonian(Integral ints)
     : ints_(std::move(ints)),
       nword_(bits::words_for(ints_.norb())),
-      ket_cache_(nword_) {}
+      conn_cache_(nword_) {}
 
 inline Hamiltonian::Hamiltonian(const Hamiltonian& other)
     : ints_(other.ints_),
       nword_(other.nword_),
-      ket_cache_(other.nword_) {}
+      conn_cache_(other.nword_) {}
 
 inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
     if (this != &other) {
         ints_ = other.ints_;
         nword_ = other.nword_;
         screen_.reset();
-        ket_cache_ = KetCache(nword_);
-        ket_space_cache_ = KetSpaceCache();
+        conn_cache_ = ConnCache(nword_);
+        space_cache_ = SpaceCache();
     }
     return *this;
 }
@@ -210,15 +188,15 @@ inline Hamiltonian::Hamiltonian(Hamiltonian&& other) noexcept
     : ints_(std::move(other.ints_)),
       nword_(other.nword_),
       screen_(std::move(other.screen_)),
-      ket_cache_(other.nword_) {}
+      conn_cache_(other.nword_) {}
 
 inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
     if (this != &other) {
         ints_ = std::move(other.ints_);
         nword_ = other.nword_;
         screen_ = std::move(other.screen_);
-        ket_cache_ = KetCache(nword_);
-        ket_space_cache_ = KetSpaceCache();
+        conn_cache_ = ConnCache(nword_);
+        space_cache_ = SpaceCache();
     }
     return *this;
 }
@@ -301,38 +279,18 @@ inline double Hamiltonian::screen_cutoff(
     return eps / max_scale;
 }
 
-inline AbsWindow Hamiltonian::abs_window(
-    double lo,
-    double hi,
-    double scale
-) noexcept {
-    if (scale <= 0.0) {
-        return {
-            std::numeric_limits<double>::infinity(),
-            std::numeric_limits<double>::infinity()
-        };
-    }
-
-    return {
-        lo <= 0.0 ? 0.0 : lo / scale,
-        std::isfinite(hi)
-            ? hi / scale
-            : std::numeric_limits<double>::infinity()
-    };
-}
-
-inline std::shared_ptr<const KetSpace> Hamiltonian::cached_ket_space(
+inline std::shared_ptr<const DetSpace> Hamiltonian::cached_space(
     DetBatchView kets
 ) const {
     {
-        std::lock_guard<std::mutex> lock(ket_space_cache_mutex_);
-        if (auto space = ket_space_cache_.find(kets)) return space;
+        std::lock_guard<std::mutex> lock(space_cache_mutex_);
+        if (auto space = space_cache_.find(kets)) return space;
     }
 
-    auto fresh = std::make_shared<KetSpace>(kets);
-    std::lock_guard<std::mutex> lock(ket_space_cache_mutex_);
-    if (auto space = ket_space_cache_.find(kets)) return space;
-    ket_space_cache_.insert(kets, fresh);
+    auto fresh = std::make_shared<DetSpace>(kets);
+    std::lock_guard<std::mutex> lock(space_cache_mutex_);
+    if (auto space = space_cache_.find(kets)) return space;
+    space_cache_.insert(kets, fresh);
     return fresh;
 }
 
@@ -390,11 +348,3 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
 
 } // namespace libdet::rhf
 
-namespace libdet {
-
-using rhf::Conns;
-using rhf::Matrix;
-using rhf::Projection;
-using rhf::Projections;
-
-} // namespace libdet

@@ -39,9 +39,9 @@ and geometry construction. The driver owns iteration only.
 
 - `Sector` denotes a constrained Fock-space sector.
 - `x` denotes a batch of Fock-basis configurations.
-- `det` denotes determinant-specialized `x`.
+- `det` denotes determinant-specialized `x`: alpha block, then beta block.
 - `bra` and `ket` denote the axes of `H[bra, ket]`.
-- `h1`, `eri`, and `ecore` follow PySCF integral conventions.
+- `eri` is PySCF chemist s8: $$g_{pqrs} = (pq|rs).$$
 - Public symmetry names should be mathematical group names, for example `U1`
   or `SU2`.
 

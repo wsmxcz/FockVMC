@@ -15,14 +15,10 @@
 #include <libdet/guga/cache.hpp>
 #include <libdet/guga/element.hpp>
 #include <libdet/guga/screen.hpp>
-#include <libdet/rhf/hamiltonian.hpp>
 
 namespace libdet::guga {
 
-using Matrix = rhf::Matrix;
-using Conns = rhf::Conns;
-using Projection = rhf::Projection;
-using Projections = rhf::Projections;
+struct KetScratch;
 
 class Hamiltonian {
 public:
@@ -44,69 +40,69 @@ public:
     [[nodiscard]] int norb() const noexcept;
     [[nodiscard]] u32 nword() const noexcept;
 
-    [[nodiscard]] double hij(DetRef bra, DetRef ket) const;
-    [[nodiscard]] std::vector<double> diags(DetBatchView dets) const;
+    [[nodiscard]] double hij(PathRef bra, PathRef ket) const;
+    [[nodiscard]] std::vector<double> diags(PathBatchView paths) const;
 
     [[nodiscard]] std::vector<u64> expand(
-        DetBatchView kets,
+        PathBatchView kets,
         double eps,
         std::span<const double> scale = {},
-        const DetBatchView* exclude = nullptr
+        const PathBatchView* exclude = nullptr
     ) const;
 
     [[nodiscard]] Projection project(
-        DetBatchView bras,
-        DetBatchView kets,
+        PathBatchView bras,
+        PathBatchView kets,
         std::span<const double> scale,
         double eps = 0.0
     ) const;
 
     [[nodiscard]] Projection project(
-        DetBatchView kets,
+        PathBatchView kets,
         std::span<const double> scale,
         double eps,
-        const DetBatchView* exclude
+        const PathBatchView* exclude
     ) const;
 
-    [[nodiscard]] Conns conn(
-        DetBatchView kets,
+    [[nodiscard]] ::libdet::Conns conn(
+        PathBatchView kets,
         double eps = 0.0,
-        const DetBatchView* include = nullptr
+        const PathBatchView* include = nullptr
     ) const;
 
-    [[nodiscard]] Conns sample_conn(
-        DetBatchView kets,
+    [[nodiscard]] ::libdet::Conns sample_conn(
+        PathBatchView kets,
         std::span<const i64> counts,
         std::size_t n_streams,
         double eps1,
         double eps2,
         u64 seed = 0,
         bool bra_weight = false,
-        const DetBatchView* include = nullptr
+        const PathBatchView* include = nullptr
     ) const;
 
     [[nodiscard]] Projections sample_project(
-        DetBatchView kets,
+        PathBatchView kets,
         std::span<const double> scale,
         std::span<const i64> counts,
         std::size_t n_streams,
         double eps1,
         double eps2,
-        const DetBatchView* exclude = nullptr,
+        const PathBatchView* exclude = nullptr,
         u64 seed = 0
     ) const;
 
-    [[nodiscard]] Matrix matrix(DetBatchView bras, DetBatchView kets) const;
+    [[nodiscard]] Matrix matrix(PathBatchView bras, PathBatchView kets) const;
 
     [[nodiscard]] std::vector<double> matvec(
-        DetBatchView bras,
-        DetBatchView kets,
+        PathBatchView bras,
+        PathBatchView kets,
         std::span<const double> x
     ) const;
 
     [[nodiscard]] std::vector<double> matmat(
-        DetBatchView bras,
-        DetBatchView kets,
+        PathBatchView bras,
+        PathBatchView kets,
         std::span<const double> x,
         std::size_t nrhs
     ) const;
@@ -118,46 +114,51 @@ private:
     int n_alpha_ = 0;
     int n_beta_ = 0;
     Sector sector_;
-    Screen screen_;
 
-    mutable std::mutex ket_cache_mutex_;
-    mutable KetCache ket_cache_;
-    mutable std::mutex csf_space_cache_mutex_;
-    mutable CsfSpaceCache csf_space_cache_;
+    mutable std::mutex screen_mutex_;
+    mutable std::shared_ptr<const Screen> screen_;
+    mutable std::mutex conn_cache_mutex_;
+    mutable ConnCache conn_cache_;
+    mutable std::mutex space_cache_mutex_;
+    mutable SpaceCache space_cache_;
 
-    void check_one(DetRef det, const char* where) const;
-    void check_dets(DetBatchView dets, const char* where) const;
+    void check_one(PathRef path_ref, const char* where) const;
+    void check_paths(PathBatchView paths, const char* where) const;
     static void check_eps(double eps);
     static void check_window_eps(double eps1, double eps2);
 
-    [[nodiscard]] Csf csf(DetRef det, const char* where) const;
-    [[nodiscard]] double element(const Csf& bra, const Csf& ket) const;
-    [[nodiscard]] double element(DetRef bra, DetRef ket) const;
+    [[nodiscard]] static double max_abs(std::span<const double> values) noexcept;
+    [[nodiscard]] static double screen_cutoff(
+        double eps,
+        double max_scale
+    ) noexcept;
 
-    [[nodiscard]] static double scaled_eps(double eps, double scale) noexcept;
+    [[nodiscard]] std::shared_ptr<const Screen> screen(double cutoff) const;
 
-    [[nodiscard]] std::shared_ptr<const CsfSpace> cached_csf_space(
-        DetBatchView dets
+    [[nodiscard]] std::shared_ptr<const PathSpace> cached_space(
+        PathBatchView paths
     ) const;
 
-    [[nodiscard]] std::shared_ptr<const KetConns> build_ket_conns(
-        DetRef ket,
+    [[nodiscard]] std::shared_ptr<const Conns> build_conns(
+        PathRef ket,
+        double eps,
+        const Screen& screen,
+        KetScratch& scratch
+    ) const;
+
+    [[nodiscard]] std::shared_ptr<const Conns> ket_conns(
+        PathRef ket,
         double eps
     ) const;
 
-    [[nodiscard]] std::shared_ptr<const KetConns> ket_conns(
-        DetRef ket,
-        double eps
-    ) const;
-
-    [[nodiscard]] std::vector<std::shared_ptr<const KetConns>> ket_conns(
-        DetBatchView kets,
+    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> ket_conns(
+        PathBatchView kets,
         double eps
     ) const;
 
     [[nodiscard]] Projection project_impl(
-        DetBatchView bras,
-        DetBatchView kets,
+        PathBatchView bras,
+        PathBatchView kets,
         std::span<const double> scale,
         double eps
     ) const;
@@ -173,16 +174,14 @@ inline Hamiltonian::Hamiltonian(Integral ints, int n_alpha, int n_beta)
           n_alpha - n_beta,
           bits::words_for(ints_.norb())
       },
-      screen_(ints_),
-      ket_cache_(sector_.nword) {}
+      conn_cache_(sector_.nword) {}
 
 inline Hamiltonian::Hamiltonian(const Hamiltonian& other)
     : ints_(other.ints_),
       n_alpha_(other.n_alpha_),
       n_beta_(other.n_beta_),
       sector_(other.sector_),
-      screen_(ints_),
-      ket_cache_(sector_.nword) {}
+      conn_cache_(sector_.nword) {}
 
 inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
     if (this != &other) {
@@ -190,9 +189,9 @@ inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
         n_alpha_ = other.n_alpha_;
         n_beta_ = other.n_beta_;
         sector_ = other.sector_;
-        screen_ = Screen(ints_);
-        ket_cache_ = KetCache(sector_.nword);
-        csf_space_cache_ = CsfSpaceCache();
+        screen_.reset();
+        conn_cache_ = ConnCache(sector_.nword);
+        space_cache_ = SpaceCache();
     }
     return *this;
 }
@@ -202,8 +201,8 @@ inline Hamiltonian::Hamiltonian(Hamiltonian&& other) noexcept
       n_alpha_(other.n_alpha_),
       n_beta_(other.n_beta_),
       sector_(other.sector_),
-      screen_(ints_),
-      ket_cache_(sector_.nword) {}
+      screen_(std::move(other.screen_)),
+      conn_cache_(sector_.nword) {}
 
 inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
     if (this != &other) {
@@ -211,9 +210,9 @@ inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
         n_alpha_ = other.n_alpha_;
         n_beta_ = other.n_beta_;
         sector_ = other.sector_;
-        screen_ = Screen(ints_);
-        ket_cache_ = KetCache(sector_.nword);
-        csf_space_cache_ = CsfSpaceCache();
+        screen_ = std::move(other.screen_);
+        conn_cache_ = ConnCache(sector_.nword);
+        space_cache_ = SpaceCache();
     }
     return *this;
 }
@@ -244,17 +243,17 @@ inline u32 Hamiltonian::nword() const noexcept {
     return sector_.nword;
 }
 
-inline void Hamiltonian::check_one(DetRef det, const char* where) const {
-    check_csf(det, sector_, where);
+inline void Hamiltonian::check_one(PathRef path_ref, const char* where) const {
+    check_path(path_ref, sector_, where);
 }
 
-inline void Hamiltonian::check_dets(DetBatchView dets, const char* where) const {
-    if (dets.nword != sector_.nword) {
-        throw std::invalid_argument(std::string(where) + ": det nword mismatch");
+inline void Hamiltonian::check_paths(PathBatchView paths, const char* where) const {
+    if (paths.nword != sector_.nword) {
+        throw std::invalid_argument(std::string(where) + ": path nword mismatch");
     }
 
-    for (std::size_t idet = 0; idet < dets.n_dets; ++idet) {
-        check_csf(dets[idet], sector_, where);
+    for (std::size_t ipath = 0; ipath < paths.n_paths; ++ipath) {
+        check_path(paths[ipath], sector_, where);
     }
 }
 
@@ -269,42 +268,45 @@ inline void Hamiltonian::check_window_eps(double eps1, double eps2) {
     if (eps2 > eps1) throw std::invalid_argument("eps2 must be <= eps1");
 }
 
-inline Csf Hamiltonian::csf(DetRef det, const char* where) const {
-    return decode_csf(det, sector_, where);
+inline double Hamiltonian::max_abs(
+    std::span<const double> values
+) noexcept {
+    double out = 0.0;
+    for (double value : values) out = std::max(out, std::abs(value));
+    return out;
 }
 
-inline double Hamiltonian::element(
-    const Csf& bra,
-    const Csf& ket
-) const {
-    return guga::element(ints_, bra, ket, sector_.nword);
-}
-
-inline double Hamiltonian::element(DetRef bra, DetRef ket) const {
-    return element(
-        csf(bra, "element(bra)"),
-        csf(ket, "element(ket)")
-    );
-}
-
-inline double Hamiltonian::scaled_eps(double eps, double scale) noexcept {
+inline double Hamiltonian::screen_cutoff(
+    double eps,
+    double max_scale
+) noexcept {
     if (eps <= 0.0) return 0.0;
-    if (scale <= 0.0) return std::numeric_limits<double>::infinity();
-    return eps / scale;
+    if (max_scale <= 0.0) return std::numeric_limits<double>::infinity();
+    return eps / max_scale;
 }
 
-inline std::shared_ptr<const CsfSpace> Hamiltonian::cached_csf_space(
-    DetBatchView dets
+inline std::shared_ptr<const Screen> Hamiltonian::screen(double cutoff) const {
+    if (cutoff < 0.0) cutoff = 0.0;
+
+    std::lock_guard<std::mutex> lock(screen_mutex_);
+    if (!screen_ || cutoff < screen_->cutoff()) {
+        screen_ = std::make_shared<Screen>(ints_, cutoff);
+    }
+    return screen_;
+}
+
+inline std::shared_ptr<const PathSpace> Hamiltonian::cached_space(
+    PathBatchView paths
 ) const {
     {
-        std::lock_guard<std::mutex> lock(csf_space_cache_mutex_);
-        if (auto hit = csf_space_cache_.find(dets)) return hit;
+        std::lock_guard<std::mutex> lock(space_cache_mutex_);
+        if (auto space = space_cache_.find(paths)) return space;
     }
 
-    auto fresh = std::make_shared<CsfSpace>(dets, sector_);
-    std::lock_guard<std::mutex> lock(csf_space_cache_mutex_);
-    if (auto hit = csf_space_cache_.find(dets)) return hit;
-    csf_space_cache_.insert(dets, fresh);
+    auto fresh = std::make_shared<PathSpace>(paths, sector_);
+    std::lock_guard<std::mutex> lock(space_cache_mutex_);
+    if (auto space = space_cache_.find(paths)) return space;
+    space_cache_.insert(paths, fresh);
     return fresh;
 }
 

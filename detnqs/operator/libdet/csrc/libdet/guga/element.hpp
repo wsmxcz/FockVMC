@@ -1,351 +1,362 @@
 #pragma once
 
-#include <array>
-#include <cmath>
+#include <algorithm>
 #include <cstddef>
-#include <span>
-#include <utility>
 #include <vector>
 
-#include <libdet/guga/csf.hpp>
-#include <libdet/guga/integral.hpp>
+#include <libdet/integral.hpp>
+#include <libdet/guga/path.hpp>
+#include <libdet/guga/segment.hpp>
 
 namespace libdet::guga {
 
-struct SpinTerm {
-    std::vector<Step> occ;
-    int m = 0;
-    double coeff = 1.0;
+struct ElementScratch {
+    // Scratch for the reduced intermediate-spin walk.
+    explicit ElementScratch(int n = 0) { reserve(n); }
+
+    void reserve(int n) {
+        const std::size_t m = static_cast<std::size_t>(std::max(0, 2 * n + 1));
+        curr.reserve(m);
+        next.reserve(m);
+        act.reserve(m);
+        tmp.reserve(m);
+    }
+
+    std::vector<double> curr;
+    std::vector<double> next;
+    std::vector<std::size_t> act;
+    std::vector<std::size_t> tmp;
+    Seg2Table seg2;
 };
 
-[[nodiscard]] inline bool has_alpha(Step step) noexcept {
-    return step == Step::upper || step == Step::doubly;
-}
 
-[[nodiscard]] inline bool has_beta(Step step) noexcept {
-    return step == Step::lower || step == Step::doubly;
-}
-
-[[nodiscard]] inline double spin_phase(const SpinTerm& term) noexcept {
-    int parity = 0;
-    const int norb = static_cast<int>(term.occ.size());
-    for (int p = 0; p < norb; ++p) {
-        if (!has_beta(term.occ[static_cast<std::size_t>(p)])) continue;
-        for (int q = p + 1; q < norb; ++q) {
-            if (has_alpha(term.occ[static_cast<std::size_t>(q)])) parity ^= 1;
-        }
-    }
-    return parity ? -1.0 : 1.0;
-}
-
-inline void fill_spin_prefix(
-    const SpinTerm& term,
-    bool alpha,
-    std::vector<int>& out
-) {
-    const int norb = static_cast<int>(term.occ.size());
-    out.assign(static_cast<std::size_t>(norb + 1), 0);
-    for (int p = 0; p < norb; ++p) {
-        const Step step = term.occ[static_cast<std::size_t>(p)];
-        const bool occupied = alpha ? has_alpha(step) : has_beta(step);
-        out[static_cast<std::size_t>(p + 1)] =
-            out[static_cast<std::size_t>(p)] + (occupied ? 1 : 0);
-    }
-}
-
-inline void fill_spin_occ(
-    const SpinTerm& term,
-    bool alpha,
-    std::vector<int>& out
-) {
-    out.clear();
-    const int norb = static_cast<int>(term.occ.size());
-    for (int p = 0; p < norb; ++p) {
-        const Step step = term.occ[static_cast<std::size_t>(p)];
-        if (alpha ? has_alpha(step) : has_beta(step)) out.push_back(p);
-    }
-}
-
-struct TermDiff {
-    int deg = 0;
-    int na = 0;
-    int nb = 0;
-
-    std::array<int, 2> occ_a{0, 0};
-    std::array<int, 2> vir_a{0, 0};
-    std::array<int, 2> occ_b{0, 0};
-    std::array<int, 2> vir_b{0, 0};
-};
-
-[[nodiscard]] inline TermDiff term_diff(
-    const SpinTerm& bra,
-    const SpinTerm& ket
+[[nodiscard]] inline bool same_outer(
+    const PathState& bra,
+    const PathState& ket,
+    int lo,
+    int hi
 ) noexcept {
-    TermDiff ex;
-    const int norb = static_cast<int>(bra.occ.size());
-
-    for (int p = 0; p < norb; ++p) {
-        const Step b = bra.occ[static_cast<std::size_t>(p)];
-        const Step k = ket.occ[static_cast<std::size_t>(p)];
-
-        const bool ba = has_alpha(b);
-        const bool ka = has_alpha(k);
-        if (ba && !ka) {
-            if (ex.na >= 2) {
-                ex.deg = 3;
-                return ex;
-            }
-            ex.occ_a[ex.na++] = p;
-        }
-
-        const bool bb = has_beta(b);
-        const bool kb = has_beta(k);
-        if (bb && !kb) {
-            if (ex.nb >= 2) {
-                ex.deg = 3;
-                return ex;
-            }
-            ex.occ_b[ex.nb++] = p;
-        }
+    const int n = bra.norb();
+    for (int k = 0; k < lo; ++k) {
+        if (bra.step[static_cast<std::size_t>(k)] != ket.step[static_cast<std::size_t>(k)]) return false;
     }
-
-    int va = 0;
-    int vb = 0;
-    for (int p = 0; p < norb; ++p) {
-        const Step b = bra.occ[static_cast<std::size_t>(p)];
-        const Step k = ket.occ[static_cast<std::size_t>(p)];
-
-        const bool ba = has_alpha(b);
-        const bool ka = has_alpha(k);
-        if (!ba && ka) {
-            if (va >= 2) {
-                ex.deg = 3;
-                return ex;
-            }
-            ex.vir_a[va++] = p;
-        }
-
-        const bool bb = has_beta(b);
-        const bool kb = has_beta(k);
-        if (!bb && kb) {
-            if (vb >= 2) {
-                ex.deg = 3;
-                return ex;
-            }
-            ex.vir_b[vb++] = p;
-        }
+    for (int k = hi + 1; k < n; ++k) {
+        if (bra.step[static_cast<std::size_t>(k)] != ket.step[static_cast<std::size_t>(k)]) return false;
     }
-
-    if (va != ex.na || vb != ex.nb) {
-        ex.deg = 3;
-        return ex;
-    }
-
-    ex.deg = ex.na + ex.nb;
-    return ex;
+    return true;
 }
 
-[[nodiscard]] inline double diag_value(
-    const Integral& ints,
-    const SpinTerm& term
-) {
-    std::vector<int> occ_a;
-    std::vector<int> occ_b;
-    fill_spin_occ(term, true, occ_a);
-    fill_spin_occ(term, false, occ_b);
 
-    double energy = ints.ecore();
-    for (int i : occ_a) energy += ints.h1(i, i);
-    for (int i : occ_b) energy += ints.h1(i, i);
-
-    for (std::size_t x = 0; x < occ_a.size(); ++x) {
-        const int i = occ_a[x];
-        for (std::size_t y = x + 1u; y < occ_a.size(); ++y) {
-            const int j = occ_a[y];
-            energy += ints.chem(i, i, j, j) - ints.chem(i, j, j, i);
-        }
-    }
-
-    for (std::size_t x = 0; x < occ_b.size(); ++x) {
-        const int i = occ_b[x];
-        for (std::size_t y = x + 1u; y < occ_b.size(); ++y) {
-            const int j = occ_b[y];
-            energy += ints.chem(i, i, j, j) - ints.chem(i, j, j, i);
-        }
-    }
-
-    for (int i : occ_a) {
-        for (int j : occ_b) energy += ints.chem(i, i, j, j);
-    }
-
-    return energy;
+[[nodiscard]] inline Seg1Kind seg1_kind(int k, int lo, int hi, bool right) noexcept {
+    if (lo == hi) return Seg1Kind::diag;
+    if (k == lo) return right ? Seg1Kind::r_tail : Seg1Kind::l_head;
+    if (k == hi) return right ? Seg1Kind::r_head : Seg1Kind::l_tail;
+    return right ? Seg1Kind::r_mid : Seg1Kind::l_mid;
 }
 
-[[nodiscard]] inline double single_value(
-    const Integral& ints,
-    const SpinTerm& bra,
-    bool alpha,
-    int i,
-    int a
+[[nodiscard]] inline double coeff1(
+    ElementScratch&,
+    const PathState& bra,
+    const PathState& ket,
+    int p,
+    int q
 ) {
-    std::vector<int> occ_same;
-    std::vector<int> occ_other;
-    fill_spin_occ(bra, alpha, occ_same);
-    fill_spin_occ(bra, !alpha, occ_other);
+    if (bra.norb() != ket.norb()) return 0.0;
+    const int n = bra.norb();
+    if (p < 0 || p >= n || q < 0 || q >= n) return 0.0;
 
-    double value = ints.h1(i, a);
-    for (int j : occ_same) {
-        if (j != i) {
-            value += ints.chem(i, a, j, j) - ints.chem(i, j, j, a);
-        }
+    if (p == q) {
+        return same_path(bra, ket)
+            ? static_cast<double>(ket.occ[static_cast<std::size_t>(p)])
+            : 0.0;
     }
-    for (int j : occ_other) value += ints.chem(i, a, j, j);
+
+    const int lo = std::min(p, q);
+    const int hi = std::max(p, q);
+    if (!same_outer(bra, ket, lo, hi)) return 0.0;
+
+    for (int k = lo; k <= hi; ++k) {
+        int diff = static_cast<int>(bra.occ[static_cast<std::size_t>(k)])
+            - static_cast<int>(ket.occ[static_cast<std::size_t>(k)]);
+        if (k == p) --diff;
+        if (k == q) ++diff;
+        if (diff != 0) return 0.0;
+    }
+
+    const bool right = p < q;
+    double value = 1.0;
+    for (int k = lo; k <= hi; ++k) {
+        const double w = seg1(
+            seg1_kind(k, lo, hi, right),
+            bra.step[static_cast<std::size_t>(k)],
+            ket.step[static_cast<std::size_t>(k)],
+            ket.spin[static_cast<std::size_t>(k + 1)] - bra.spin[static_cast<std::size_t>(k + 1)],
+            ket.spin[static_cast<std::size_t>(k + 1)]
+        );
+        if (w == 0.0) return 0.0;
+        value *= w;
+    }
     return value;
 }
 
-[[nodiscard]] inline double term_element(
-    const Integral& ints,
-    const SpinTerm& bra,
-    const SpinTerm& ket
-) {
-    const TermDiff ex = term_diff(bra, ket);
-    if (ex.deg > 2) return 0.0;
-    if (ex.deg == 0) return diag_value(ints, bra);
 
-    std::vector<int> pref_a;
-    std::vector<int> pref_b;
-    fill_spin_prefix(bra, true, pref_a);
-    fill_spin_prefix(bra, false, pref_b);
-
-    if (ex.deg == 1) {
-        if (ex.na == 1) {
-            return libdet::detail::sign_single(pref_a, ex.occ_a[0], ex.vir_a[0])
-                * single_value(ints, bra, true, ex.occ_a[0], ex.vir_a[0]);
-        }
-
-        return libdet::detail::sign_single(pref_b, ex.occ_b[0], ex.vir_b[0])
-            * single_value(ints, bra, false, ex.occ_b[0], ex.vir_b[0]);
+[[nodiscard]] inline bool coeff2_occ(
+    const PathState& bra,
+    const PathState& ket,
+    int p,
+    int q,
+    int r,
+    int s,
+    int lo,
+    int hi
+) noexcept {
+    for (int k = lo; k <= hi; ++k) {
+        int diff = static_cast<int>(bra.occ[static_cast<std::size_t>(k)])
+            - static_cast<int>(ket.occ[static_cast<std::size_t>(k)]);
+        if (k == p) --diff;
+        if (k == r) --diff;
+        if (k == q) ++diff;
+        if (k == s) ++diff;
+        if (diff != 0) return false;
     }
-
-    if (ex.na == 2) {
-        return libdet::detail::sign_double(
-            pref_a,
-            ex.occ_a[0],
-            ex.occ_a[1],
-            ex.vir_a[0],
-            ex.vir_a[1]
-        ) * (ints.chem(ex.occ_a[0], ex.vir_a[0], ex.occ_a[1], ex.vir_a[1])
-             - ints.chem(ex.occ_a[0], ex.vir_a[1], ex.occ_a[1], ex.vir_a[0]));
-    }
-
-    if (ex.nb == 2) {
-        return libdet::detail::sign_double(
-            pref_b,
-            ex.occ_b[0],
-            ex.occ_b[1],
-            ex.vir_b[0],
-            ex.vir_b[1]
-        ) * (ints.chem(ex.occ_b[0], ex.vir_b[0], ex.occ_b[1], ex.vir_b[1])
-             - ints.chem(ex.occ_b[0], ex.vir_b[1], ex.occ_b[1], ex.vir_b[0]));
-    }
-
-    return libdet::detail::sign_single(pref_a, ex.occ_a[0], ex.vir_a[0])
-        * libdet::detail::sign_single(pref_b, ex.occ_b[0], ex.vir_b[0])
-        * ints.chem(ex.occ_a[0], ex.vir_a[0], ex.occ_b[0], ex.vir_b[0]);
+    return true;
 }
 
-[[nodiscard]] inline double cg_coeff(
-    int spin_before,
-    int m_before,
-    int electron_spin,
-    int spin_after
-) noexcept {
-    const int b = spin_before;
-    const int m = m_before;
-    const double denom = static_cast<double>(2 * (b + 1));
-
-    if (spin_after == b + 1) {
-        const int num = electron_spin > 0 ? b + m + 2 : b - m + 2;
-        return num <= 0 ? 0.0 : std::sqrt(static_cast<double>(num) / denom);
+[[nodiscard]] inline double coeff2_prod(
+    ElementScratch& scratch,
+    const Seg2Table& table,
+    const PathState& bra,
+    const PathState& ket,
+    int p,
+    int q,
+    int r,
+    int s,
+    int lo,
+    int hi
+) {
+    if (p == q && r == s) {
+        if (!same_path(bra, ket)) return 0.0;
+        const double np = static_cast<double>(ket.occ[static_cast<std::size_t>(p)]);
+        const double nr = static_cast<double>(ket.occ[static_cast<std::size_t>(r)]);
+        return np * nr;
+    }
+    if (p == q) {
+        return static_cast<double>(bra.occ[static_cast<std::size_t>(p)])
+            * coeff1(scratch, bra, ket, r, s);
+    }
+    if (r == s) {
+        return static_cast<double>(ket.occ[static_cast<std::size_t>(r)])
+            * coeff1(scratch, bra, ket, p, q);
     }
 
-    if (spin_after == b - 1) {
-        const int num = electron_spin > 0 ? b - m : b + m;
-        if (num <= 0) return 0.0;
+    const int n = ket.norb();
+    const int width = 2 * n + 1;
+    const int shift = n;
+    if (scratch.curr.size() != static_cast<std::size_t>(width)) {
+        scratch.curr.assign(static_cast<std::size_t>(width), 0.0);
+        scratch.next.assign(static_cast<std::size_t>(width), 0.0);
+    }
+    scratch.act.clear();
+    scratch.tmp.clear();
 
-        const double value = std::sqrt(static_cast<double>(num) / denom);
-        return electron_spin > 0 ? -value : value;
+    if (bra.spin[static_cast<std::size_t>(lo)] != ket.spin[static_cast<std::size_t>(lo)]) return 0.0;
+    const int z0 = ket.spin[static_cast<std::size_t>(lo)];
+    scratch.curr[static_cast<std::size_t>(z0 + shift)] = 1.0;
+    scratch.act.push_back(static_cast<std::size_t>(z0 + shift));
+
+    for (int k = lo; k <= hi; ++k) {
+        scratch.tmp.clear();
+        const Shape2 sh = shape2(k, p, q, r, s);
+        const Step dx = bra.step[static_cast<std::size_t>(k)];
+        const Step dy = ket.step[static_cast<std::size_t>(k)];
+        const int db = ket.spin[static_cast<std::size_t>(k + 1)]
+            - bra.spin[static_cast<std::size_t>(k + 1)];
+        const int b = ket.spin[static_cast<std::size_t>(k + 1)];
+
+        for (std::size_t id : scratch.act) {
+            const double base = scratch.curr[id];
+            scratch.curr[id] = 0.0;
+            if (base == 0.0) continue;
+
+            const int z = static_cast<int>(id) - shift;
+            for (const Seg2Entry& e : table.get(sh, dx, dy, db, b, z)) {
+                const std::size_t pos = static_cast<std::size_t>(static_cast<int>(e.z) + shift);
+                if (scratch.next[pos] == 0.0) scratch.tmp.push_back(pos);
+                scratch.next[pos] += base * e.w;
+            }
+        }
+
+        scratch.act.swap(scratch.tmp);
+        for (std::size_t id : scratch.act) {
+            scratch.curr[id] = scratch.next[id];
+            scratch.next[id] = 0.0;
+        }
     }
 
-    return 0.0;
+    const int edge = ket.spin[static_cast<std::size_t>(hi + 1)];
+    if (edge != bra.spin[static_cast<std::size_t>(hi + 1)]) return 0.0;
+    const std::size_t pos = static_cast<std::size_t>(edge + shift);
+    double value = 0.0;
+    for (std::size_t id : scratch.act) {
+        if (id == pos) value = scratch.curr[id];
+        scratch.curr[id] = 0.0;
+    }
+    scratch.act.clear();
+    return value;
+}
+
+[[nodiscard]] inline double coeff2(
+    ElementScratch& scratch,
+    const PathState& bra,
+    const PathState& ket,
+    int p,
+    int q,
+    int r,
+    int s
+) {
+    const int n = bra.norb();
+    if (ket.norb() != n) return 0.0;
+    if (p < 0 || p >= n || q < 0 || q >= n || r < 0 || r >= n || s < 0 || s >= n) return 0.0;
+
+    const auto h = hull2(p, q, r, s);
+    const int lo = h[0];
+    const int hi = h[1];
+    if (!same_outer(bra, ket, lo, hi)) return 0.0;
+    if (!coeff2_occ(bra, ket, p, q, r, s, lo, hi)) return 0.0;
+    if (scratch.seg2.max_b < n) build_seg2(scratch.seg2, n);
+
+    double value = coeff2_prod(scratch, scratch.seg2, bra, ket, p, q, r, s, lo, hi);
+    if (q == r) value -= coeff1(scratch, bra, ket, p, s);
+    return value;
+}
+
+
+[[nodiscard]] inline double diag(
+    ElementScratch& scratch,
+    const Integral& ints,
+    const PathState& ket
+) {
+    const int n = ket.norb();
+    double value = ints.ecore();
+
+    for (int p = 0; p < n; ++p) {
+        const int np = static_cast<int>(ket.occ[static_cast<std::size_t>(p)]);
+        value += ints.h1(p, p) * static_cast<double>(np);
+        value += 0.5 * ints.chem(p, p, p, p) * static_cast<double>(np * (np - 1));
+    }
+
+    for (int p = 0; p < n; ++p) {
+        const int np = static_cast<int>(ket.occ[static_cast<std::size_t>(p)]);
+        if (np == 0) continue;
+        for (int q = p + 1; q < n; ++q) {
+            const int nq = static_cast<int>(ket.occ[static_cast<std::size_t>(q)]);
+            if (nq == 0) continue;
+            value += ints.chem(p, p, q, q) * static_cast<double>(np * nq);
+            value += ints.chem(p, q, q, p) * coeff2(scratch, ket, ket, p, q, q, p);
+        }
+    }
+
+    return value;
+}
+
+[[nodiscard]] inline double same_ocfg(
+    ElementScratch& scratch,
+    const Integral& ints,
+    const PathState& bra,
+    const PathState& ket
+) {
+    const int n = ket.norb();
+    int first = n;
+    int last = -1;
+    for (int p = 0; p < n; ++p) {
+        if (bra.step[static_cast<std::size_t>(p)] != ket.step[static_cast<std::size_t>(p)]) {
+            if (first == n) first = p;
+            last = p;
+        }
+    }
+    if (last < 0) return 0.0;
+
+    double value = 0.0;
+    for (int p = 0; p <= first; ++p) {
+        if (ket.occ[static_cast<std::size_t>(p)] != 1u) continue;
+        for (int q = std::max(p + 1, last); q < n; ++q) {
+            if (ket.occ[static_cast<std::size_t>(q)] != 1u) continue;
+            value += ints.chem(p, q, q, p) * coeff2(scratch, bra, ket, p, q, q, p);
+        }
+    }
+    return value;
+}
+
+[[nodiscard]] inline double single_move(
+    ElementScratch& scratch,
+    const Integral& ints,
+    const PathState& bra,
+    const PathState& ket,
+    const OccMove& move
+) {
+    const int n = ket.norb();
+    const int p = move.add[0];
+    const int q = move.remove[0];
+
+    double value = ints.h1(p, q) * coeff1(scratch, bra, ket, p, q);
+    value += ints.chem(p, p, p, q) * coeff2(scratch, bra, ket, p, p, p, q);
+    value += ints.chem(p, q, q, q) * coeff2(scratch, bra, ket, p, q, q, q);
+
+    for (int k = 0; k < n; ++k) {
+        if (k == p || k == q) continue;
+        value += ints.chem(p, q, k, k) * coeff2(scratch, bra, ket, p, q, k, k);
+        value += ints.chem(p, k, k, q) * coeff2(scratch, bra, ket, p, k, k, q);
+    }
+
+    return value;
 }
 
 template <class Visit>
-inline void visit_coupled_terms(const Csf& csf, Visit&& visit) {
-    std::vector<SpinTerm> current;
-    current.push_back({
-        std::vector<Step>(static_cast<std::size_t>(csf.norb()), Step::empty),
-        0,
-        1.0
-    });
-
-    const int norb = csf.norb();
-    for (int p = 0; p < norb; ++p) {
-        const Step step = csf.step[static_cast<std::size_t>(p)];
-        const int spin_before = csf.spin[static_cast<std::size_t>(p)];
-        const int spin_after = csf.spin[static_cast<std::size_t>(p + 1)];
-
-        if (step == Step::empty || step == Step::doubly) {
-            for (auto& item : current) {
-                item.occ[static_cast<std::size_t>(p)] = step;
-            }
-            continue;
-        }
-
-        std::vector<SpinTerm> next;
-        next.reserve(current.size() * 2u);
-        for (const SpinTerm& item : current) {
-            for (int sigma : {1, -1}) {
-                const double coeff =
-                    cg_coeff(spin_before, item.m, sigma, spin_after);
-                if (coeff == 0.0) continue;
-
-                SpinTerm out = item;
-                out.occ[static_cast<std::size_t>(p)] =
-                    sigma > 0 ? Step::upper : Step::lower;
-                out.coeff *= coeff;
-                out.m += sigma;
-                next.push_back(std::move(out));
-            }
-        }
-        current.swap(next);
-    }
-
-    const int target_m = csf.spin_twice();
-    for (SpinTerm& item : current) {
-        if (item.m != target_m || item.coeff == 0.0) continue;
-        item.coeff *= spin_phase(item);
-        visit(item);
-    }
+inline void visit_pair(int a, int b, Visit&& visit) {
+    visit(a, b);
+    if (a != b) visit(b, a);
 }
 
-[[nodiscard]] inline double element(
+[[nodiscard]] inline double double_move(
+    ElementScratch& scratch,
     const Integral& ints,
-    const Csf& bra,
-    const Csf& ket,
-    u32
+    const PathState& bra,
+    const PathState& ket,
+    const OccMove& move
 ) {
-    if (cfg_degree(bra.cfg, ket.cfg) > 2) return 0.0;
-
     double value = 0.0;
-    visit_coupled_terms(bra, [&](const SpinTerm& bra_term) {
-        visit_coupled_terms(ket, [&](const SpinTerm& ket_term) {
-            value += bra_term.coeff
-                * ket_term.coeff
-                * term_element(ints, bra_term, ket_term);
+    visit_pair(move.add[0], move.add[1], [&](int p, int r) {
+        visit_pair(move.remove[0], move.remove[1], [&](int q, int s) {
+            value += 0.5 * ints.chem(p, q, r, s) * coeff2(scratch, bra, ket, p, q, r, s);
         });
     });
     return value;
 }
+
+[[nodiscard]] inline double hij(
+    ElementScratch& scratch,
+    const Integral& ints,
+    const PathState& bra,
+    const PathState& ket,
+    const OccMove& move
+) {
+    if (bra.norb() != ket.norb() || move.degree > 2) return 0.0;
+
+    if (move.degree == 0) {
+        return same_path(bra, ket) ? diag(scratch, ints, ket) : same_ocfg(scratch, ints, bra, ket);
+    }
+    if (move.degree == 1) return single_move(scratch, ints, bra, ket, move);
+    return double_move(scratch, ints, bra, ket, move);
+}
+
+[[nodiscard]] inline double hij(
+    ElementScratch& scratch,
+    const Integral& ints,
+    const PathState& bra,
+    const PathState& ket
+) {
+    return hij(scratch, ints, bra, ket, occ_move(bra.occ, ket.occ));
+}
+
 
 } // namespace libdet::guga

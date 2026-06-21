@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <span>
@@ -15,15 +16,25 @@
 
 namespace libdet::guga {
 
+namespace detail {
+
+struct MatTerm {
+    i32 ibra = 0;
+    i32 iket = 0;
+    double h = 0.0;
+};
+
+} // namespace detail
+
 inline Projection Hamiltonian::project(
-    DetBatchView bras,
-    DetBatchView kets,
+    PathBatchView bras,
+    PathBatchView kets,
     std::span<const double> scale,
     double eps
 ) const {
-    check_dets(bras, "project(bras)");
-    check_dets(kets, "project(kets)");
-    if (scale.size() != kets.n_dets) {
+    check_paths(bras, "project(bras)");
+    check_paths(kets, "project(kets)");
+    if (scale.size() != kets.n_paths) {
         throw std::invalid_argument("project: scale size must match kets");
     }
     check_eps(eps);
@@ -31,287 +42,290 @@ inline Projection Hamiltonian::project(
 }
 
 inline Projection Hamiltonian::project_impl(
-    DetBatchView bras,
-    DetBatchView kets,
+    PathBatchView bras,
+    PathBatchView kets,
     std::span<const double> scale,
     double eps
 ) const {
-    const auto bra_space = cached_csf_space(bras);
-    const auto ket_space = cached_csf_space(kets);
+    const auto path_space = cached_space(bras);
 
     Projection out;
     out.nword = sector_.nword;
-    copy_batch(out.bra_words, bras);
-    out.hpsi.assign(bras.n_dets, 0.0);
-    out.diags.assign(bras.n_dets, 0.0);
+    copy_paths(out.bra_words, bras);
+    out.diags = diags(bras);
 
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-    for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
-        const std::size_t ibra = static_cast<std::size_t>(ii);
-#else
-    for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
-#endif
-        const Csf& bra_csf = bra_space->csf(ibra);
-        out.diags[ibra] = element(bra_csf, bra_csf);
-    }
+    const double max_scale = eps == 0.0 ? 0.0 : max_abs(scale);
+    const auto screen_ptr = (eps > 0.0 && max_scale > 0.0)
+        ? screen(screen_cutoff(eps, max_scale))
+        : std::shared_ptr<const Screen>{};
 
 #if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
 #else
     const int nthread = 1;
 #endif
-
-    std::vector<std::vector<double>> local(
-        static_cast<std::size_t>(nthread),
-        std::vector<double>(bras.n_dets, 0.0)
-    );
+    const std::size_t stride = bras.n_paths;
+    std::vector<double> local(static_cast<std::size_t>(nthread) * stride, 0.0);
 
 #if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& hpsi = local[static_cast<std::size_t>(tid)];
+        double* hpsi = local.data() + static_cast<std::size_t>(tid) * stride;
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
 
 #pragma omp for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+        for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
 #else
     {
-        auto& hpsi = local[0];
-        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+        double* hpsi = local.data();
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
+        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
 #endif
-        const double scale_i = scale[iket];
-        if (scale_i == 0.0) continue;
+            const double coeff = scale[iket];
+            if (coeff == 0.0) continue;
 
-        const double cutoff = scaled_eps(eps, std::abs(scale_i));
-        if (!std::isfinite(cutoff)) continue;
-
-        const Csf& ket_csf = ket_space->csf(iket);
-        screen_.visit_bra_cfgs(ket_csf, cutoff, [&](const BraCfg& bra_cfg) {
-            for (const CsfSpaceItem& item : bra_space->with_cfg(bra_cfg.cfg)) {
-                const std::size_t ibra = static_cast<std::size_t>(item.det);
-                const double h = element(bra_space->csf(ibra), ket_csf);
-                const double term = h * scale_i;
-                if (term != 0.0 && std::abs(term) >= eps) {
-                    hpsi[ibra] += term;
+            const double lo = eps == 0.0 ? 0.0 : eps / std::abs(coeff);
+            decode_path(kets[iket], sector_, "project(ket)", ket_scratch, ket);
+            path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
+                const PathState& bra = path_space->state(ibra);
+                if (screen_ptr) {
+                    if (move.degree == 0) {
+                        if (!same_path(bra, ket) && screen_ptr->same(ket.occ) < lo) return;
+                    } else if (screen_ptr->bound(ket.occ, Move::from(move)) < lo) {
+                        return;
+                    }
                 }
-            }
-        });
-    }
-    }
 
-    for (const auto& hpsi : local) {
-        for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
-            out.hpsi[ibra] += hpsi[ibra];
+                const double h = guga::hij(elem_scratch, ints_, bra, ket, move);
+                const double term = h * coeff;
+                if (term != 0.0 && std::abs(term) >= eps) {
+                    hpsi[static_cast<std::size_t>(ibra)] += term;
+                }
+            });
         }
     }
 
+    out.hpsi.assign(bras.n_paths, 0.0);
+    for (int t = 0; t < nthread; ++t) {
+        const double* part = local.data() + static_cast<std::size_t>(t) * stride;
+        for (std::size_t i = 0; i < stride; ++i) out.hpsi[i] += part[i];
+    }
     return out;
 }
 
-inline Matrix Hamiltonian::matrix(DetBatchView bras, DetBatchView kets) const {
-    check_dets(bras, "matrix(bras)");
-    check_dets(kets, "matrix(kets)");
+inline Matrix Hamiltonian::matrix(PathBatchView bras, PathBatchView kets) const {
+    check_paths(bras, "matrix(bras)");
+    check_paths(kets, "matrix(kets)");
 
-    const auto bra_space = cached_csf_space(bras);
-    const auto ket_space = cached_csf_space(kets);
-    std::vector<std::vector<std::pair<i32, double>>> bra_terms(bras.n_dets);
+    const auto path_space = cached_space(bras);
 
 #if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-    std::vector<std::vector<std::vector<std::pair<i32, double>>>> local(
-        static_cast<std::size_t>(nthread),
-        std::vector<std::vector<std::pair<i32, double>>>(bras.n_dets)
-    );
+#else
+    const int nthread = 1;
+#endif
+    std::vector<std::vector<detail::MatTerm>> local(static_cast<std::size_t>(nthread));
 
+#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& thread_terms = local[static_cast<std::size_t>(tid)];
+        auto& terms = local[static_cast<std::size_t>(tid)];
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
 
 #pragma omp for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+        for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
 #else
-    auto& thread_terms = bra_terms;
-    for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+    {
+        auto& terms = local[0];
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
+        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
 #endif
-        const Csf& ket_csf = ket_space->csf(iket);
-
-        screen_.visit_bra_cfgs(ket_csf, 0.0, [&](const BraCfg& bra_cfg) {
-            for (const CsfSpaceItem& item : bra_space->with_cfg(bra_cfg.cfg)) {
-                const std::size_t ibra = static_cast<std::size_t>(item.det);
-                const double h = element(bra_space->csf(ibra), ket_csf);
-                if (h != 0.0) thread_terms[ibra].push_back({to_i32(iket), h});
-            }
-        });
-    }
-#if defined(_OPENMP)
-    }
-
-    for (auto& thread_terms : local) {
-        for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
-            bra_terms[ibra].insert(
-                bra_terms[ibra].end(),
-                thread_terms[ibra].begin(),
-                thread_terms[ibra].end()
-            );
+            decode_path(kets[iket], sector_, "matrix(ket)", ket_scratch, ket);
+            path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
+                const double h = guga::hij(elem_scratch, ints_, path_space->state(ibra), ket, move);
+                if (h != 0.0) terms.push_back({ibra, to_i32(iket), h});
+            });
         }
     }
-#endif
+
+    std::size_t nnz = 0;
+    for (const auto& part : local) nnz += part.size();
+
+    std::vector<detail::MatTerm> terms;
+    terms.reserve(nnz);
+    for (auto& part : local) {
+        terms.insert(terms.end(), part.begin(), part.end());
+        std::vector<detail::MatTerm>().swap(part);
+    }
+    std::sort(terms.begin(), terms.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.ibra != rhs.ibra) return lhs.ibra < rhs.ibra;
+        return lhs.iket < rhs.iket;
+    });
 
     Matrix out;
-    out.n_bra = bras.n_dets;
-    out.n_ket = kets.n_dets;
-    out.indptr.assign(bras.n_dets + 1u, 0);
+    out.n_bra = bras.n_paths;
+    out.n_ket = kets.n_paths;
+    out.indptr.assign(bras.n_paths + 1u, 0);
+    for (const auto& term : terms) ++out.indptr[static_cast<std::size_t>(term.ibra) + 1u];
+    for (std::size_t i = 0; i < bras.n_paths; ++i) out.indptr[i + 1u] += out.indptr[i];
 
-    for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
-        out.indptr[ibra + 1u] =
-            out.indptr[ibra] + to_i32(bra_terms[ibra].size());
+    out.indices.reserve(terms.size());
+    out.data.reserve(terms.size());
+    for (const auto& term : terms) {
+        out.indices.push_back(term.iket);
+        out.data.push_back(term.h);
     }
-
-    out.indices.reserve(static_cast<std::size_t>(out.indptr.back()));
-    out.data.reserve(static_cast<std::size_t>(out.indptr.back()));
-    for (const auto& terms : bra_terms) {
-        for (const auto& [iket, h] : terms) {
-            out.indices.push_back(iket);
-            out.data.push_back(h);
-        }
-    }
-
     return out;
 }
 
 inline std::vector<double> Hamiltonian::matvec(
-    DetBatchView bras,
-    DetBatchView kets,
+    PathBatchView bras,
+    PathBatchView kets,
     std::span<const double> x
 ) const {
-    check_dets(bras, "matvec(bras)");
-    check_dets(kets, "matvec(kets)");
-    if (x.size() != kets.n_dets) {
+    check_paths(bras, "matvec(bras)");
+    check_paths(kets, "matvec(kets)");
+    if (x.size() != kets.n_paths) {
         throw std::invalid_argument("matvec: x size must match kets");
     }
 
-    const auto bra_space = cached_csf_space(bras);
-    const auto ket_space = cached_csf_space(kets);
-    std::vector<double> out(bras.n_dets, 0.0);
+    const auto path_space = cached_space(bras);
 
 #if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-    std::vector<std::vector<double>> local(
-        static_cast<std::size_t>(nthread),
-        std::vector<double>(bras.n_dets, 0.0)
-    );
+#else
+    const int nthread = 1;
+#endif
+    const std::size_t stride = bras.n_paths;
+    std::vector<double> local(static_cast<std::size_t>(nthread) * stride, 0.0);
 
+#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& y = local[static_cast<std::size_t>(tid)];
+        double* out = local.data() + static_cast<std::size_t>(tid) * stride;
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
 
 #pragma omp for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+        for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
 #else
     {
-        auto& y = out;
-        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+        double* out = local.data();
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
+        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
 #endif
-        const double coeff = x[iket];
-        if (coeff == 0.0) continue;
+            const double coeff = x[iket];
+            if (coeff == 0.0) continue;
 
-        const Csf& ket_csf = ket_space->csf(iket);
-        screen_.visit_bra_cfgs(ket_csf, 0.0, [&](const BraCfg& bra_cfg) {
-            for (const CsfSpaceItem& item : bra_space->with_cfg(bra_cfg.cfg)) {
-                const std::size_t ibra = static_cast<std::size_t>(item.det);
-                const double h = element(bra_space->csf(ibra), ket_csf);
-                if (h != 0.0) y[ibra] += h * coeff;
-            }
-        });
-    }
-    }
-
-#if defined(_OPENMP)
-    for (const auto& y : local) {
-        for (std::size_t ibra = 0; ibra < bras.n_dets; ++ibra) {
-            out[ibra] += y[ibra];
+            decode_path(kets[iket], sector_, "matvec(ket)", ket_scratch, ket);
+            path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
+                const double h = guga::hij(elem_scratch, ints_, path_space->state(ibra), ket, move);
+                if (h != 0.0) out[static_cast<std::size_t>(ibra)] += h * coeff;
+            });
         }
     }
-#endif
 
+    std::vector<double> out(bras.n_paths, 0.0);
+    for (int t = 0; t < nthread; ++t) {
+        const double* part = local.data() + static_cast<std::size_t>(t) * stride;
+        for (std::size_t i = 0; i < stride; ++i) out[i] += part[i];
+    }
     return out;
 }
 
 inline std::vector<double> Hamiltonian::matmat(
-    DetBatchView bras,
-    DetBatchView kets,
+    PathBatchView bras,
+    PathBatchView kets,
     std::span<const double> x,
     std::size_t nrhs
 ) const {
-    check_dets(bras, "matmat(bras)");
-    check_dets(kets, "matmat(kets)");
-    if (x.size() != kets.n_dets * nrhs) {
+    check_paths(bras, "matmat(bras)");
+    check_paths(kets, "matmat(kets)");
+    if (x.size() != kets.n_paths * nrhs) {
         throw std::invalid_argument("matmat: X size must be n_ket * n_rhs");
     }
 
-    const auto bra_space = cached_csf_space(bras);
-    const auto ket_space = cached_csf_space(kets);
-    std::vector<double> out(bras.n_dets * nrhs, 0.0);
+    const auto path_space = cached_space(bras);
 
 #if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-    std::vector<std::vector<double>> local(
-        static_cast<std::size_t>(nthread),
-        std::vector<double>(bras.n_dets * nrhs, 0.0)
-    );
+#else
+    const int nthread = 1;
+#endif
+    const std::size_t stride = bras.n_paths * nrhs;
+    std::vector<double> local(static_cast<std::size_t>(nthread) * stride, 0.0);
 
+#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& yout = local[static_cast<std::size_t>(tid)];
+        double* out = local.data() + static_cast<std::size_t>(tid) * stride;
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
 
 #pragma omp for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+        for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
 #else
     {
-        auto& yout = out;
-        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+        double* out = local.data();
+        PathScratch ket_scratch;
+        ElementScratch elem_scratch(sector_.norb);
+        PathState ket;
+        VisitScratch visit_scratch;
+        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
 #endif
-        const double* xrow = x.data() + iket * nrhs;
-
-        bool any = false;
-        for (std::size_t j = 0; j < nrhs; ++j) {
-            if (xrow[j] != 0.0) {
-                any = true;
-                break;
-            }
-        }
-        if (!any) continue;
-
-        const Csf& ket_csf = ket_space->csf(iket);
-        screen_.visit_bra_cfgs(ket_csf, 0.0, [&](const BraCfg& bra_cfg) {
-            for (const CsfSpaceItem& item : bra_space->with_cfg(bra_cfg.cfg)) {
-                const std::size_t ibra = static_cast<std::size_t>(item.det);
-                const double h = element(bra_space->csf(ibra), ket_csf);
-                if (h == 0.0) continue;
-
-                double* y = yout.data() + ibra * nrhs;
-                for (std::size_t j = 0; j < nrhs; ++j) {
-                    y[j] += h * xrow[j];
+            const double* xket = x.data() + iket * nrhs;
+            bool any = false;
+            for (std::size_t j = 0; j < nrhs; ++j) {
+                if (xket[j] != 0.0) {
+                    any = true;
+                    break;
                 }
             }
-        });
-    }
+            if (!any) continue;
+
+            decode_path(kets[iket], sector_, "matmat(ket)", ket_scratch, ket);
+            path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
+                const double h = guga::hij(elem_scratch, ints_, path_space->state(ibra), ket, move);
+                if (h == 0.0) return;
+
+                double* y = out + static_cast<std::size_t>(ibra) * nrhs;
+                for (std::size_t j = 0; j < nrhs; ++j) y[j] += h * xket[j];
+            });
+        }
     }
 
-#if defined(_OPENMP)
-    for (const auto& yout : local) {
-        for (std::size_t i = 0; i < out.size(); ++i) out[i] += yout[i];
+    std::vector<double> out(bras.n_paths * nrhs, 0.0);
+    for (int t = 0; t < nthread; ++t) {
+        const double* part = local.data() + static_cast<std::size_t>(t) * stride;
+        for (std::size_t i = 0; i < stride; ++i) out[i] += part[i];
     }
-#endif
-
     return out;
 }
 

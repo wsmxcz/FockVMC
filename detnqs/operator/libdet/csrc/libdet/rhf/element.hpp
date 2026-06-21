@@ -3,8 +3,8 @@
 #include <span>
 #include <vector>
 
-#include <libdet/rhf/integral.hpp>
-#include <libdet/spatial/determinant.hpp>
+#include <libdet/integral.hpp>
+#include <libdet/rhf/det.hpp>
 
 namespace libdet::rhf {
 

@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include <libdet/spatial/space.hpp>
+#include <libdet/rhf/det.hpp>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -67,12 +67,12 @@ inline void make_targets(
 namespace detail {
 
 struct SampleHit {
-    Coupling coupling;
+    std::size_t conn = 0;
     i64 count = 0;
 };
 
-struct SampleProjectPart {
-    SampleProjectPart(u32 nword, std::size_t streams)
+struct SampleBuffer {
+    SampleBuffer(u32 nword, std::size_t streams)
         : n_streams(streams), bras(nword) {}
 
     std::size_t n_streams = 0;
@@ -89,9 +89,78 @@ struct SampleProjectPart {
     }
 };
 
+inline void draw_window_search(
+    SmallRng& rng,
+    const Conns& conns,
+    std::size_t begin,
+    std::size_t end,
+    i64 n_draw,
+    double weight,
+    std::vector<SampleHit>& hits
+) {
+    if (n_draw <= 0 || begin >= end || !(weight > 0.0)) return;
+
+    const double base = conns.prefix_abs[begin];
+    const auto first = conns.prefix_abs.begin() + static_cast<std::ptrdiff_t>(begin + 1u);
+    const auto last = conns.prefix_abs.begin() + static_cast<std::ptrdiff_t>(end + 1u);
+
+    for (i64 draw = 0; draw < n_draw; ++draw) {
+        const double target = base + rng.uniform01() * weight;
+        auto it = std::upper_bound(first, last, target);
+        if (it == last) --it;
+        const std::size_t idx = static_cast<std::size_t>(it - conns.prefix_abs.begin() - 1);
+        if (idx >= begin && idx < end) hits.push_back({idx, 1});
+    }
+}
+
+inline void draw_window_scan(
+    SmallRng& rng,
+    const Conns& conns,
+    std::size_t begin,
+    std::size_t end,
+    i64 n_draw,
+    double weight,
+    std::vector<double>& targets,
+    std::vector<SampleHit>& hits
+) {
+    make_targets(rng, n_draw, weight, targets);
+    if (targets.empty()) return;
+
+    std::size_t pos = 0;
+    double cdf = 0.0;
+    for (std::size_t k = begin; k < end; ++k) {
+        cdf += std::abs(conns.terms[k].h);
+        i64 count = 0;
+        while (pos < targets.size() && targets[pos] <= cdf) {
+            ++count;
+            ++pos;
+        }
+        if (count > 0) hits.push_back({k, count});
+    }
+}
+
+inline void draw_window(
+    SmallRng& rng,
+    const Conns& conns,
+    std::size_t begin,
+    std::size_t end,
+    i64 n_draw,
+    double weight,
+    std::vector<double>& targets,
+    std::vector<SampleHit>& hits
+) {
+    if (n_draw <= 0 || begin >= end || !(weight > 0.0)) return;
+    const std::size_t n_conn = end - begin;
+    if (static_cast<std::size_t>(n_draw) * 16u < n_conn) {
+        draw_window_search(rng, conns, begin, end, n_draw, weight, hits);
+    } else {
+        draw_window_scan(rng, conns, begin, end, n_draw, weight, targets, hits);
+    }
+}
+
 } // namespace detail
 
-inline Conns Hamiltonian::sample_conn(
+inline ::libdet::Conns Hamiltonian::sample_conn(
     DetBatchView kets,
     std::span<const i64> counts,
     std::size_t n_streams,
@@ -135,63 +204,39 @@ inline Conns Hamiltonian::sample_conn(
 #if defined(_OPENMP)
 #pragma omp parallel
     {
-        std::vector<std::vector<double>> targets(n_streams);
-        std::vector<std::size_t> pos(n_streams);
+        std::vector<double> targets;
 
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
 #else
     {
-        std::vector<std::vector<double>> targets(n_streams);
-        std::vector<std::size_t> pos(n_streams);
+        std::vector<double> targets;
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
 #endif
             const std::size_t iket = static_cast<std::size_t>(ii);
-            const KetConns& src = *all[iket];
-            const std::size_t begin = std::isfinite(eps1) ? src.count(eps1) : 0u;
-            const std::size_t end = src.count(eps2);
-            const double weight = src.prefix_abs[end] - src.prefix_abs[begin];
-            ket_weight[iket] = weight;
-            if (!(weight > 0.0)) continue;
+            const Conns& conns = *all[iket];
+            const ConnWindow win = conns.window(AbsWindow{eps2, eps1});
+            ket_weight[iket] = win.weight;
+            if (!(win.weight > 0.0)) continue;
 
-            std::fill(pos.begin(), pos.end(), 0u);
-            bool any = false;
             for (std::size_t stream = 0; stream < n_streams; ++stream) {
+                const i64 n_draw = counts[stream * kets.n_dets + iket];
                 SmallRng rng(sample_seed(seed, kets[iket], 0, static_cast<int>(stream)));
-                make_targets(
+                detail::draw_window(
                     rng,
-                    counts[stream * kets.n_dets + iket],
-                    weight,
-                    targets[stream]
+                    conns,
+                    win.begin,
+                    win.end,
+                    n_draw,
+                    win.weight,
+                    targets,
+                    hits[stream * kets.n_dets + iket]
                 );
-                any = any || !targets[stream].empty();
-            }
-            if (!any) continue;
-
-            double cdf = 0.0;
-            for (std::size_t k = begin; k < end; ++k) {
-                const Coupling& coupling = src.couplings[k];
-                cdf += std::abs(coupling.h);
-                for (std::size_t stream = 0; stream < n_streams; ++stream) {
-                    i64 count = 0;
-                    while (
-                        pos[stream] < targets[stream].size()
-                        && targets[stream][pos[stream]] <= cdf
-                    ) {
-                        ++count;
-                        ++pos[stream];
-                    }
-                    if (count > 0) {
-                        hits[stream * kets.n_dets + iket].push_back(
-                            {coupling, count}
-                        );
-                    }
-                }
             }
         }
     }
 
-    Conns out;
+    ::libdet::Conns out;
     out.nword = nword_;
     out.n_kets = kets.n_dets;
     out.n_streams = n_streams;
@@ -202,12 +247,14 @@ inline Conns Hamiltonian::sample_conn(
     for (std::size_t stream = 0; stream < n_streams; ++stream) {
         for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
             const DetRef ket = kets[iket];
+            const Conns& conns = *all[iket];
             for (const auto& hit : hits[stream * kets.n_dets + iket]) {
-                const DetRef bra = apply(ket, hit.coupling.excitation, bra_scratch);
+                const Conn& term = conns.terms[hit.conn];
+                const DetRef bra = apply(ket, term.excitation, bra_scratch);
                 const i32 idx = pool.find_or_add(bra);
                 for (i64 n = 0; n < hit.count; ++n) {
                     out.bra.push_back(idx);
-                    out.h.push_back(hit.coupling.h);
+                    out.h.push_back(term.h);
                 }
             }
             out.ptr.push_back(to_i32(out.bra.size()));
@@ -215,7 +262,7 @@ inline Conns Hamiltonian::sample_conn(
     }
 
     const std::size_t pool_size = pool.size();
-    out.x_words = std::move(pool.words());
+    out.bra_words = std::move(pool.words());
     out.weight.assign(bra_weight ? pool_size : kets.n_dets, 0.0);
     for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
         out.weight[iket] = ket_weight[iket];
@@ -223,16 +270,14 @@ inline Conns Hamiltonian::sample_conn(
 
     if (bra_weight) {
         const DetBatchView pool_view{
-            out.x_words.data(),
+            out.bra_words.data(),
             pool_size,
             nword_
         };
         const auto pool_conns = ket_conns(pool_view, eps2);
         for (std::size_t i = kets.n_dets; i < pool_size; ++i) {
-            const KetConns& src = *pool_conns[i];
-            const std::size_t begin = std::isfinite(eps1) ? src.count(eps1) : 0u;
-            const std::size_t end = src.count(eps2);
-            out.weight[i] = src.prefix_abs[end] - src.prefix_abs[begin];
+            const Conns& conns = *pool_conns[i];
+            out.weight[i] = conns.window(AbsWindow{eps2, eps1}).weight;
         }
     }
     return out;
@@ -287,7 +332,7 @@ inline Projections Hamiltonian::sample_project(
 #else
     const int nthread = 1;
 #endif
-    std::vector<detail::SampleProjectPart> parts;
+    std::vector<detail::SampleBuffer> parts;
     parts.reserve(static_cast<std::size_t>(nthread));
     for (int t = 0; t < nthread; ++t) {
         parts.emplace_back(nword_, n_streams);
@@ -299,7 +344,8 @@ inline Projections Hamiltonian::sample_project(
         const int tid = omp_get_thread_num();
         auto& part = parts[static_cast<std::size_t>(tid)];
         std::vector<std::vector<double>> targets(n_streams);
-        std::vector<Coupling> candidates;
+        std::vector<std::size_t> candidates;
+        std::vector<std::size_t> pos(n_streams, 0u);
         DetScratch bra_scratch(nword_);
 
 #pragma omp for schedule(static)
@@ -309,7 +355,8 @@ inline Projections Hamiltonian::sample_project(
     {
         auto& part = parts[0];
         std::vector<std::vector<double>> targets(n_streams);
-        std::vector<Coupling> candidates;
+        std::vector<std::size_t> candidates;
+        std::vector<std::size_t> pos(n_streams, 0u);
         DetScratch bra_scratch(nword_);
         for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
 #endif
@@ -317,20 +364,21 @@ inline Projections Hamiltonian::sample_project(
             const double coeff_abs = std::abs(coeff);
             if (coeff_abs <= 0.0) continue;
 
-            const KetConns& src = *all[iket];
+            const double lo = eps2 <= 0.0 ? 0.0 : eps2 / coeff_abs;
+            const double hi = std::isfinite(eps1) ? eps1 / coeff_abs : eps1;
+            const Conns& conns = *all[iket];
+            const ConnWindow win = conns.window(AbsWindow{lo, hi});
+            if (win.begin >= win.end) continue;
+
             candidates.clear();
             double weight = 0.0;
-
-            for (const Coupling& coupling : src.couplings) {
-                const double term_abs = std::abs(coupling.h) * coeff_abs;
-                if (term_abs < eps2 || term_abs >= eps1) continue;
-
-                const DetRef bra =
-                    apply(kets[iket], coupling.excitation, bra_scratch);
+            for (std::size_t k = win.begin; k < win.end; ++k) {
+                const Conn& term = conns.terms[k];
+                const DetRef bra = apply(kets[iket], term.excitation, bra_scratch);
                 if (exclude_index.find(bra) >= 0) continue;
 
-                candidates.push_back(coupling);
-                weight += std::abs(coupling.h);
+                candidates.push_back(k);
+                weight += std::abs(term.h);
             }
             if (!(weight > 0.0)) continue;
 
@@ -347,15 +395,15 @@ inline Projections Hamiltonian::sample_project(
             }
             if (!any) continue;
 
-            std::vector<std::size_t> pos(n_streams, 0u);
+            std::fill(pos.begin(), pos.end(), 0u);
             double cdf = 0.0;
-            for (const Coupling& coupling : candidates) {
-                const double abs_h = std::abs(coupling.h);
+            for (std::size_t k : candidates) {
+                const Conn& term = conns.terms[k];
+                const double abs_h = std::abs(term.h);
                 cdf += abs_h;
                 if (!(abs_h > 0.0)) continue;
 
-                const DetRef bra =
-                    apply(kets[iket], coupling.excitation, bra_scratch);
+                const DetRef bra = apply(kets[iket], term.excitation, bra_scratch);
                 for (std::size_t stream = 0; stream < n_streams; ++stream) {
                     i64 count = 0;
                     while (
@@ -369,7 +417,7 @@ inline Projections Hamiltonian::sample_project(
 
                     const i64 draws = counts[stream * kets.n_dets + iket];
                     const double value =
-                        static_cast<double>(count) * coeff * coupling.h * weight
+                        static_cast<double>(count) * coeff * term.h * weight
                         / (static_cast<double>(draws) * abs_h);
                     part.add(stream, bra, value);
                 }

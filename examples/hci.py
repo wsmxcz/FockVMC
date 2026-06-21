@@ -268,7 +268,7 @@ def main():
         """,
         basis="sto-3g",
         unit="Angstrom",
-        spin=0,
+        spin=2,
         verbose=0,
     )
 

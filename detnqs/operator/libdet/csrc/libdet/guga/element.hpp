@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <vector>
 
@@ -10,42 +11,181 @@
 
 namespace libdet::guga {
 
+struct PathDiff {
+    OccMove move;
+    int first = 0;
+    int last = -1;
+
+    [[nodiscard]] bool same_path() const noexcept { return last < first; }
+
+    [[nodiscard]] bool contains(int lo, int hi) const noexcept {
+        return same_path() || (lo <= first && last <= hi);
+    }
+};
+
+[[nodiscard]] inline PathDiff path_diff(
+    const PathState& ket,
+    const PathState& bra,
+    OccMove move
+) noexcept {
+    PathDiff out;
+    out.move = move;
+    const int n = ket.norb();
+    out.first = n;
+    out.last = -1;
+    if (bra.norb() != n) {
+        out.move.degree = 3;
+        out.first = 0;
+        out.last = 0;
+        return out;
+    }
+    for (int k = 0; k < n; ++k) {
+        if (bra.step[static_cast<std::size_t>(k)] != ket.step[static_cast<std::size_t>(k)]) {
+            if (out.first == n) out.first = k;
+            out.last = k;
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] inline PathDiff path_diff(
+    const PathState& ket,
+    const PathState& bra
+) noexcept {
+    return path_diff(ket, bra, occ_move(ket.occ, bra.occ));
+}
+
 struct ElementScratch {
-    // Scratch for the reduced intermediate-spin walk.
     explicit ElementScratch(int n = 0) { reserve(n); }
 
     void reserve(int n) {
-        const std::size_t m = static_cast<std::size_t>(std::max(0, 2 * n + 1));
-        curr.reserve(m);
-        next.reserve(m);
-        act.reserve(m);
-        tmp.reserve(m);
+        norb = std::max(0, n);
+        const std::size_t width = static_cast<std::size_t>(2 * norb + 1);
+        curr.reserve(width);
+        next.reserve(width);
+        act.reserve(width);
+        tmp.reserve(width);
+        single.assign(static_cast<std::size_t>(norb) * static_cast<std::size_t>(norb), 0.0);
     }
 
+    void load_single(const Integral& ints, const PathState& ket) {
+        const int n = ket.norb();
+        if (n != norb) reserve(n);
+        for (int p = 0; p < n; ++p) {
+            for (int q = 0; q < n; ++q) {
+                double value = ints.h1(p, q) - ints.coulomb(p, q, q);
+                for (int k : ket.donor) {
+                    value += static_cast<double>(ket.occ[static_cast<std::size_t>(k)])
+                        * ints.coulomb(p, q, k);
+                }
+                single[slot(p, q)] = value;
+            }
+        }
+    }
+
+    [[nodiscard]] double single_coulomb(int p, int q) const noexcept {
+        return single[slot(p, q)];
+    }
+
+    int norb = 0;
     std::vector<double> curr;
     std::vector<double> next;
     std::vector<std::size_t> act;
     std::vector<std::size_t> tmp;
-    Seg2Table seg2;
+    std::vector<double> single;
+
+private:
+    [[nodiscard]] std::size_t slot(int p, int q) const noexcept {
+        return static_cast<std::size_t>(p) * static_cast<std::size_t>(norb)
+            + static_cast<std::size_t>(q);
+    }
 };
 
+[[nodiscard]] inline OccMove invalid_move() noexcept {
+    OccMove out;
+    out.degree = 3;
+    out.remove = {-1, -1};
+    out.add = {-1, -1};
+    return out;
+}
 
-[[nodiscard]] inline bool same_outer(
-    const PathState& bra,
-    const PathState& ket,
-    int lo,
-    int hi
-) noexcept {
-    const int n = bra.norb();
-    for (int k = 0; k < lo; ++k) {
-        if (bra.step[static_cast<std::size_t>(k)] != ket.step[static_cast<std::size_t>(k)]) return false;
-    }
-    for (int k = hi + 1; k < n; ++k) {
-        if (bra.step[static_cast<std::size_t>(k)] != ket.step[static_cast<std::size_t>(k)]) return false;
+[[nodiscard]] inline bool same_move(const OccMove& lhs, const OccMove& rhs) noexcept {
+    if (lhs.degree != rhs.degree) return false;
+    if (lhs.degree < 0 || lhs.degree > 2) return false;
+    for (int i = 0; i < lhs.degree; ++i) {
+        const std::size_t j = static_cast<std::size_t>(i);
+        if (lhs.remove[j] != rhs.remove[j] || lhs.add[j] != rhs.add[j]) return false;
     }
     return true;
 }
 
+namespace detail {
+
+struct MoveBuilder {
+    std::array<int, 4> idx{-1, -1, -1, -1};
+    std::array<int, 4> val{0, 0, 0, 0};
+    int size = 0;
+
+    void add(int p, int delta) noexcept {
+        for (int i = 0; i < size; ++i) {
+            if (idx[static_cast<std::size_t>(i)] == p) {
+                val[static_cast<std::size_t>(i)] += delta;
+                return;
+            }
+        }
+        idx[static_cast<std::size_t>(size)] = p;
+        val[static_cast<std::size_t>(size)] = delta;
+        ++size;
+    }
+
+    [[nodiscard]] OccMove move() const noexcept {
+        OccMove out;
+        int nr = 0;
+        int na = 0;
+        for (int p = 0; p < size; ++p) {
+            const int v = val[static_cast<std::size_t>(p)];
+            const int id = idx[static_cast<std::size_t>(p)];
+            if (v == 0) continue;
+            if (v < -2 || v > 2) return invalid_move();
+            if (v < 0) {
+                for (int k = 0; k < -v; ++k) {
+                    if (nr >= 2) return invalid_move();
+                    out.remove[static_cast<std::size_t>(nr++)] = id;
+                }
+            } else {
+                for (int k = 0; k < v; ++k) {
+                    if (na >= 2) return invalid_move();
+                    out.add[static_cast<std::size_t>(na++)] = id;
+                }
+            }
+        }
+        if (nr != na) return invalid_move();
+        out.degree = nr;
+        if (out.degree == 2) {
+            if (out.remove[1] < out.remove[0]) std::swap(out.remove[0], out.remove[1]);
+            if (out.add[1] < out.add[0]) std::swap(out.add[0], out.add[1]);
+        }
+        return out;
+    }
+};
+
+} // namespace detail
+
+[[nodiscard]] inline OccMove one_move(int p, int q) noexcept {
+    detail::MoveBuilder move;
+    move.add(q, -1);
+    move.add(p, 1);
+    return move.move();
+}
+
+[[nodiscard]] inline OccMove two_move(int p, int q, int r, int s) noexcept {
+    detail::MoveBuilder move;
+    move.add(q, -1);
+    move.add(s, -1);
+    move.add(p, 1);
+    move.add(r, 1);
+    return move.move();
+}
 
 [[nodiscard]] inline Seg1Kind seg1_kind(int k, int lo, int hi, bool right) noexcept {
     if (lo == hi) return Seg1Kind::diag;
@@ -54,34 +194,16 @@ struct ElementScratch {
     return right ? Seg1Kind::r_mid : Seg1Kind::l_mid;
 }
 
-[[nodiscard]] inline double coeff1(
-    ElementScratch&,
+[[nodiscard]] inline double coeff1_move(
     const PathState& bra,
     const PathState& ket,
+    const PathDiff& diff,
     int p,
     int q
 ) {
-    if (bra.norb() != ket.norb()) return 0.0;
-    const int n = bra.norb();
-    if (p < 0 || p >= n || q < 0 || q >= n) return 0.0;
-
-    if (p == q) {
-        return same_path(bra, ket)
-            ? static_cast<double>(ket.occ[static_cast<std::size_t>(p)])
-            : 0.0;
-    }
-
     const int lo = std::min(p, q);
     const int hi = std::max(p, q);
-    if (!same_outer(bra, ket, lo, hi)) return 0.0;
-
-    for (int k = lo; k <= hi; ++k) {
-        int diff = static_cast<int>(bra.occ[static_cast<std::size_t>(k)])
-            - static_cast<int>(ket.occ[static_cast<std::size_t>(k)]);
-        if (k == p) --diff;
-        if (k == q) ++diff;
-        if (diff != 0) return 0.0;
-    }
+    if (!diff.contains(lo, hi)) return 0.0;
 
     const bool right = p < q;
     double value = 1.0;
@@ -99,34 +221,40 @@ struct ElementScratch {
     return value;
 }
 
-
-[[nodiscard]] inline bool coeff2_occ(
+[[nodiscard]] inline double coeff1(
     const PathState& bra,
     const PathState& ket,
+    const PathDiff& diff,
     int p,
-    int q,
-    int r,
-    int s,
-    int lo,
-    int hi
-) noexcept {
-    for (int k = lo; k <= hi; ++k) {
-        int diff = static_cast<int>(bra.occ[static_cast<std::size_t>(k)])
-            - static_cast<int>(ket.occ[static_cast<std::size_t>(k)]);
-        if (k == p) --diff;
-        if (k == r) --diff;
-        if (k == q) ++diff;
-        if (k == s) ++diff;
-        if (diff != 0) return false;
+    int q
+) {
+    if (bra.norb() != ket.norb()) return 0.0;
+    const int n = bra.norb();
+    if (p < 0 || p >= n || q < 0 || q >= n) return 0.0;
+
+    if (p == q) {
+        return diff.same_path()
+            ? static_cast<double>(ket.occ[static_cast<std::size_t>(p)])
+            : 0.0;
     }
-    return true;
+
+    if (!same_move(diff.move, one_move(p, q))) return 0.0;
+    return coeff1_move(bra, ket, diff, p, q);
 }
 
-[[nodiscard]] inline double coeff2_prod(
+inline void clear_active(ElementScratch& scratch) noexcept {
+    for (std::size_t id : scratch.act) scratch.curr[id] = 0.0;
+    scratch.act.clear();
+    for (std::size_t id : scratch.tmp) scratch.next[id] = 0.0;
+    scratch.tmp.clear();
+}
+
+[[nodiscard]] inline double prod2(
     ElementScratch& scratch,
     const Seg2Table& table,
     const PathState& bra,
     const PathState& ket,
+    const PathDiff& diff,
     int p,
     int q,
     int r,
@@ -135,18 +263,18 @@ struct ElementScratch {
     int hi
 ) {
     if (p == q && r == s) {
-        if (!same_path(bra, ket)) return 0.0;
+        if (!diff.same_path()) return 0.0;
         const double np = static_cast<double>(ket.occ[static_cast<std::size_t>(p)]);
         const double nr = static_cast<double>(ket.occ[static_cast<std::size_t>(r)]);
         return np * nr;
     }
     if (p == q) {
         return static_cast<double>(bra.occ[static_cast<std::size_t>(p)])
-            * coeff1(scratch, bra, ket, r, s);
+            * coeff1(bra, ket, diff, r, s);
     }
     if (r == s) {
         return static_cast<double>(ket.occ[static_cast<std::size_t>(r)])
-            * coeff1(scratch, bra, ket, p, q);
+            * coeff1(bra, ket, diff, p, q);
     }
 
     const int n = ket.norb();
@@ -193,9 +321,13 @@ struct ElementScratch {
         }
     }
 
-    const int edge = ket.spin[static_cast<std::size_t>(hi + 1)];
-    if (edge != bra.spin[static_cast<std::size_t>(hi + 1)]) return 0.0;
-    const std::size_t pos = static_cast<std::size_t>(edge + shift);
+    const int spin = ket.spin[static_cast<std::size_t>(hi + 1)];
+    if (spin != bra.spin[static_cast<std::size_t>(hi + 1)]) {
+        clear_active(scratch);
+        return 0.0;
+    }
+
+    const std::size_t pos = static_cast<std::size_t>(spin + shift);
     double value = 0.0;
     for (std::size_t id : scratch.act) {
         if (id == pos) value = scratch.curr[id];
@@ -207,8 +339,10 @@ struct ElementScratch {
 
 [[nodiscard]] inline double coeff2(
     ElementScratch& scratch,
+    const Seg2Table& table,
     const PathState& bra,
     const PathState& ket,
+    const PathDiff& diff,
     int p,
     int q,
     int r,
@@ -221,38 +355,105 @@ struct ElementScratch {
     const auto h = hull2(p, q, r, s);
     const int lo = h[0];
     const int hi = h[1];
-    if (!same_outer(bra, ket, lo, hi)) return 0.0;
-    if (!coeff2_occ(bra, ket, p, q, r, s, lo, hi)) return 0.0;
-    if (scratch.seg2.max_b < n) build_seg2(scratch.seg2, n);
+    if (!diff.contains(lo, hi)) return 0.0;
+    if (!same_move(diff.move, two_move(p, q, r, s))) return 0.0;
 
-    double value = coeff2_prod(scratch, scratch.seg2, bra, ket, p, q, r, s, lo, hi);
-    if (q == r) value -= coeff1(scratch, bra, ket, p, s);
+    double value = prod2(scratch, table, bra, ket, diff, p, q, r, s, lo, hi);
+    if (q == r) value -= coeff1(bra, ket, diff, p, s);
     return value;
 }
 
+[[nodiscard]] inline double exchange_coeff(
+    ElementScratch& scratch,
+    const Seg2Table& table,
+    const PathState& bra,
+    const PathState& ket,
+    const PathDiff& diff,
+    int p,
+    int q,
+    double sub
+) {
+    if (diff.move.degree != 0) return 0.0;
+    const int lo = std::min(p, q);
+    const int hi = std::max(p, q);
+    if (!diff.contains(lo, hi)) return 0.0;
+    return prod2(scratch, table, bra, ket, diff, p, q, q, p, lo, hi) - sub;
+}
+
+[[nodiscard]] inline double single_exchange_coeff(
+    ElementScratch& scratch,
+    const Seg2Table& table,
+    const PathState& bra,
+    const PathState& ket,
+    const PathDiff& diff,
+    int p,
+    int q,
+    int k,
+    double c1
+) {
+    const auto h = hull2(p, k, k, q);
+    const int lo = h[0];
+    const int hi = h[1];
+    if (!diff.contains(lo, hi)) return 0.0;
+    return prod2(scratch, table, bra, ket, diff, p, k, k, q, lo, hi) - c1;
+}
+
+[[nodiscard]] inline double double_coeff(
+    ElementScratch& scratch,
+    const Seg2Table& table,
+    const PathState& bra,
+    const PathState& ket,
+    const PathDiff& diff,
+    int p,
+    int q,
+    int r,
+    int s
+) {
+    const auto h = hull2(p, q, r, s);
+    const int lo = h[0];
+    const int hi = h[1];
+    if (!diff.contains(lo, hi)) return 0.0;
+    return prod2(scratch, table, bra, ket, diff, p, q, r, s, lo, hi);
+}
+
+[[nodiscard]] inline double single_coulomb(
+    const Integral& ints,
+    const PathState& ket,
+    int p,
+    int q
+) {
+    double value = ints.h1(p, q) - ints.coulomb(p, q, q);
+    for (int k : ket.donor) {
+        value += static_cast<double>(ket.occ[static_cast<std::size_t>(k)])
+            * ints.coulomb(p, q, k);
+    }
+    return value;
+}
 
 [[nodiscard]] inline double diag(
     ElementScratch& scratch,
+    const Seg2Table& table,
     const Integral& ints,
     const PathState& ket
 ) {
-    const int n = ket.norb();
+    const PathDiff diff = path_diff(ket, ket, OccMove{});
     double value = ints.ecore();
 
-    for (int p = 0; p < n; ++p) {
+    for (int p : ket.donor) {
         const int np = static_cast<int>(ket.occ[static_cast<std::size_t>(p)]);
-        value += ints.h1(p, p) * static_cast<double>(np);
-        value += 0.5 * ints.chem(p, p, p, p) * static_cast<double>(np * (np - 1));
+        value += ints.hdiag(p) * static_cast<double>(np);
+        value += 0.5 * ints.coulomb(p, p) * static_cast<double>(np * (np - 1));
     }
 
-    for (int p = 0; p < n; ++p) {
+    for (std::size_t ip = 0; ip < ket.donor.size(); ++ip) {
+        const int p = ket.donor[ip];
         const int np = static_cast<int>(ket.occ[static_cast<std::size_t>(p)]);
-        if (np == 0) continue;
-        for (int q = p + 1; q < n; ++q) {
+        for (std::size_t iq = ip + 1; iq < ket.donor.size(); ++iq) {
+            const int q = ket.donor[iq];
             const int nq = static_cast<int>(ket.occ[static_cast<std::size_t>(q)]);
-            if (nq == 0) continue;
-            value += ints.chem(p, p, q, q) * static_cast<double>(np * nq);
-            value += ints.chem(p, q, q, p) * coeff2(scratch, ket, ket, p, q, q, p);
+            value += ints.coulomb(p, q) * static_cast<double>(np * nq);
+            value += ints.exchange(p, q)
+                * exchange_coeff(scratch, table, ket, ket, diff, p, q, static_cast<double>(np));
         }
     }
 
@@ -261,27 +462,26 @@ struct ElementScratch {
 
 [[nodiscard]] inline double same_ocfg(
     ElementScratch& scratch,
+    const Seg2Table& table,
     const Integral& ints,
     const PathState& bra,
-    const PathState& ket
+    const PathState& ket,
+    const PathDiff& diff
 ) {
-    const int n = ket.norb();
-    int first = n;
-    int last = -1;
-    for (int p = 0; p < n; ++p) {
-        if (bra.step[static_cast<std::size_t>(p)] != ket.step[static_cast<std::size_t>(p)]) {
-            if (first == n) first = p;
-            last = p;
-        }
-    }
-    if (last < 0) return 0.0;
+    if (diff.same_path()) return 0.0;
 
     double value = 0.0;
-    for (int p = 0; p <= first; ++p) {
-        if (ket.occ[static_cast<std::size_t>(p)] != 1u) continue;
-        for (int q = std::max(p + 1, last); q < n; ++q) {
-            if (ket.occ[static_cast<std::size_t>(q)] != 1u) continue;
-            value += ints.chem(p, q, q, p) * coeff2(scratch, bra, ket, p, q, q, p);
+    for (std::size_t ip = 0; ip < ket.open.size(); ++ip) {
+        const int p = ket.open[ip];
+        if (p > diff.first) break;
+        const int qmin = std::max(diff.last, p + 1);
+        auto iq = std::lower_bound(ket.open.begin() + static_cast<std::ptrdiff_t>(ip + 1),
+                                   ket.open.end(),
+                                   qmin);
+        for (; iq != ket.open.end(); ++iq) {
+            const int q = *iq;
+            value += ints.exchange(p, q)
+                * exchange_coeff(scratch, table, bra, ket, diff, p, q, 0.0);
         }
     }
     return value;
@@ -289,45 +489,48 @@ struct ElementScratch {
 
 [[nodiscard]] inline double single_move(
     ElementScratch& scratch,
+    const Seg2Table& table,
     const Integral& ints,
     const PathState& bra,
     const PathState& ket,
-    const OccMove& move
+    const PathDiff& diff,
+    const OccMove& move,
+    double gpq
 ) {
     const int n = ket.norb();
     const int p = move.add[0];
     const int q = move.remove[0];
 
-    double value = ints.h1(p, q) * coeff1(scratch, bra, ket, p, q);
-    value += ints.chem(p, p, p, q) * coeff2(scratch, bra, ket, p, p, p, q);
-    value += ints.chem(p, q, q, q) * coeff2(scratch, bra, ket, p, q, q, q);
-
+    const double c1 = coeff1_move(bra, ket, diff, p, q);
+    double value = c1 * gpq;
     for (int k = 0; k < n; ++k) {
         if (k == p || k == q) continue;
-        value += ints.chem(p, q, k, k) * coeff2(scratch, bra, ket, p, q, k, k);
-        value += ints.chem(p, k, k, q) * coeff2(scratch, bra, ket, p, k, k, q);
+        value += ints.exchange(p, q, k)
+            * single_exchange_coeff(scratch, table, bra, ket, diff, p, q, k, c1);
     }
-
     return value;
 }
 
 template <class Visit>
-inline void visit_pair(int a, int b, Visit&& visit) {
+inline void visit_ordered_pair(int a, int b, Visit&& visit) {
     visit(a, b);
     if (a != b) visit(b, a);
 }
 
 [[nodiscard]] inline double double_move(
     ElementScratch& scratch,
+    const Seg2Table& table,
     const Integral& ints,
     const PathState& bra,
     const PathState& ket,
+    const PathDiff& diff,
     const OccMove& move
 ) {
     double value = 0.0;
-    visit_pair(move.add[0], move.add[1], [&](int p, int r) {
-        visit_pair(move.remove[0], move.remove[1], [&](int q, int s) {
-            value += 0.5 * ints.chem(p, q, r, s) * coeff2(scratch, bra, ket, p, q, r, s);
+    visit_ordered_pair(move.add[0], move.add[1], [&](int p, int r) {
+        visit_ordered_pair(move.remove[0], move.remove[1], [&](int q, int s) {
+            value += 0.5 * ints.chem(p, q, r, s)
+                * double_coeff(scratch, table, bra, ket, diff, p, q, r, s);
         });
     });
     return value;
@@ -335,28 +538,24 @@ inline void visit_pair(int a, int b, Visit&& visit) {
 
 [[nodiscard]] inline double hij(
     ElementScratch& scratch,
-    const Integral& ints,
-    const PathState& bra,
-    const PathState& ket,
-    const OccMove& move
-) {
-    if (bra.norb() != ket.norb() || move.degree > 2) return 0.0;
-
-    if (move.degree == 0) {
-        return same_path(bra, ket) ? diag(scratch, ints, ket) : same_ocfg(scratch, ints, bra, ket);
-    }
-    if (move.degree == 1) return single_move(scratch, ints, bra, ket, move);
-    return double_move(scratch, ints, bra, ket, move);
-}
-
-[[nodiscard]] inline double hij(
-    ElementScratch& scratch,
+    const Seg2Table& table,
     const Integral& ints,
     const PathState& bra,
     const PathState& ket
 ) {
-    return hij(scratch, ints, bra, ket, occ_move(bra.occ, ket.occ));
+    const PathDiff diff = path_diff(ket, bra);
+    if (bra.norb() != ket.norb() || diff.move.degree > 2) return 0.0;
+    if (diff.move.degree == 0) {
+        return diff.same_path()
+            ? diag(scratch, table, ints, ket)
+            : same_ocfg(scratch, table, ints, bra, ket, diff);
+    }
+    if (diff.move.degree == 1) {
+        const int p = diff.move.add[0];
+        const int q = diff.move.remove[0];
+        return single_move(scratch, table, ints, bra, ket, diff, diff.move, single_coulomb(ints, ket, p, q));
+    }
+    return double_move(scratch, table, ints, bra, ket, diff, diff.move);
 }
-
 
 } // namespace libdet::guga

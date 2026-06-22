@@ -10,7 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
 #include <libdet/bit.hpp>
+#include <libdet/hash.hpp>
 
 namespace libdet::guga {
 
@@ -36,13 +39,6 @@ struct OccMove {
     int degree = 0;
     std::array<int, 2> remove{-1, -1};
     std::array<int, 2> add{-1, -1};
-};
-
-struct TwoOp {
-    int p = 0;
-    int q = 0;
-    int r = 0;
-    int s = 0;
 };
 
 [[nodiscard]] inline constexpr std::size_t path_size(u32 nword) noexcept {
@@ -133,16 +129,16 @@ struct PathLess {
 struct PathHash {
     [[nodiscard]] std::size_t operator()(PathRef path) const noexcept {
         u64 h = 0x706174686b657973ULL ^ static_cast<u64>(path.nword());
-        for (u64 x : path.up()) h = splitmix64(h ^ x);
-        for (u64 x : path.down()) h = splitmix64(h ^ (x + 0x517cc1b727220a95ULL));
+        for (u64 x : path.up()) h = mix64(h ^ x);
+        for (u64 x : path.down()) h = mix64(h ^ (x + 0x517cc1b727220a95ULL));
         return static_cast<std::size_t>(h);
     }
 };
 
 [[nodiscard]] inline u64 path_fingerprint(PathRef path, u64 seed = 0) noexcept {
-    u64 h = splitmix64(seed ^ 0x706174686b657973ULL);
-    for (u64 x : path.up()) h = splitmix64(h ^ x);
-    for (u64 x : path.down()) h = splitmix64(h ^ (x + 0x517cc1b727220a95ULL));
+    u64 h = mix64(seed ^ 0x706174686b657973ULL);
+    for (u64 x : path.up()) h = mix64(h ^ x);
+    for (u64 x : path.down()) h = mix64(h ^ (x + 0x517cc1b727220a95ULL));
     return h;
 }
 
@@ -180,50 +176,41 @@ inline void sort_unique_paths(std::vector<u64>& packed, u32 nword) {
 class PathIndex {
 public:
     explicit PathIndex(PathBatchView paths) : paths_(paths) {
-        std::size_t capacity = 8;
-        while (capacity < paths.n_paths * 2u + 1u) capacity <<= 1u;
-
-        slots_.assign(capacity, -1);
-        mask_ = capacity - 1u;
+        index_.reserve(paths.n_paths);
         for (std::size_t i = 0; i < paths.n_paths; ++i) {
             insert(static_cast<i32>(i));
         }
     }
 
     [[nodiscard]] i32 find(PathRef path) const noexcept {
-        std::size_t slot = PathHash{}(path) & mask_;
-        for (;;) {
-            const i32 idx = slots_[slot];
-            if (idx < 0) return -1;
+        const auto it = index_.find(path_fingerprint(path));
+        if (it == index_.end()) return -1;
+
+        for (i32 idx : it->second) {
             if (path_equal(paths_[static_cast<std::size_t>(idx)], path)) {
                 return idx;
             }
-            slot = (slot + 1u) & mask_;
         }
+
+        return -1;
     }
 
 private:
     PathBatchView paths_;
-    std::vector<i32> slots_;
-    std::size_t mask_ = 0;
+    ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
 
     void insert(i32 idx) {
-        std::size_t slot =
-            PathHash{}(paths_[static_cast<std::size_t>(idx)]) & mask_;
-        while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
-        slots_[slot] = idx;
+        index_[path_fingerprint(paths_[static_cast<std::size_t>(idx)])].push_back(idx);
     }
 };
 
 class PathPool {
 public:
-    explicit PathPool(u32 nword = 0) : nword_(nword) {
-        rehash(8);
-    }
+    explicit PathPool(u32 nword = 0) : nword_(nword) {}
 
     explicit PathPool(PathBatchView paths) : nword_(paths.nword) {
         copy_paths(words_, paths);
-        rehash(std::max<std::size_t>(8, paths.n_paths * 2u + 1u));
+        build_index();
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -243,42 +230,32 @@ public:
     }
 
     [[nodiscard]] i32 find_or_add(PathRef path) {
-        if ((size() + 1u) * 2u >= slots_.size()) {
-            rehash(slots_.size() * 2u);
+        const u64 fingerprint = path_fingerprint(path);
+        const auto it = index_.find(fingerprint);
+        if (it != index_.end()) {
+            for (i32 idx : it->second) {
+                if (path_equal(get(static_cast<std::size_t>(idx)), path)) {
+                    return idx;
+                }
+            }
         }
 
-        std::size_t slot = PathHash{}(path) & mask_;
-        for (;;) {
-            const i32 idx = slots_[slot];
-            if (idx < 0) {
-                const i32 fresh = to_i32(size());
-                append_path(words_, path);
-                slots_[slot] = fresh;
-                return fresh;
-            }
-            if (path_equal(get(static_cast<std::size_t>(idx)), path)) {
-                return idx;
-            }
-            slot = (slot + 1u) & mask_;
-        }
+        const i32 fresh = to_i32(size());
+        append_path(words_, path);
+        index_[fingerprint].push_back(fresh);
+        return fresh;
     }
 
 private:
     u32 nword_ = 0;
     std::vector<u64> words_;
-    std::vector<i32> slots_;
-    std::size_t mask_ = 0;
+    ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
 
-    void rehash(std::size_t capacity) {
-        std::size_t size = 8;
-        while (size < capacity) size <<= 1u;
-        slots_.assign(size, -1);
-        mask_ = size - 1u;
-
-        for (std::size_t i = 0; i < this->size(); ++i) {
-            std::size_t slot = PathHash{}(get(i)) & mask_;
-            while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
-            slots_[slot] = static_cast<i32>(i);
+    void build_index() {
+        index_.clear();
+        index_.reserve(size());
+        for (std::size_t i = 0; i < size(); ++i) {
+            index_[path_fingerprint(get(i))].push_back(static_cast<i32>(i));
         }
     }
 };
@@ -500,12 +477,12 @@ inline void decode_path(
 }
 
 [[nodiscard]] inline bool move_one_occ(
-    std::span<const unsigned char> src,
+    std::span<const unsigned char> occ,
     int from,
     int to,
     std::vector<unsigned char>& out
 ) {
-    out.assign(src.begin(), src.end());
+    out.assign(occ.begin(), occ.end());
     if (from == to) return true;
     if (out[static_cast<std::size_t>(from)] == 0u) return false;
     if (out[static_cast<std::size_t>(to)] >= 2u) return false;
@@ -515,12 +492,12 @@ inline void decode_path(
 }
 
 [[nodiscard]] inline bool remove_pair_occ(
-    std::span<const unsigned char> src,
+    std::span<const unsigned char> occ,
     int q,
     int s,
     std::vector<unsigned char>& out
 ) {
-    out.assign(src.begin(), src.end());
+    out.assign(occ.begin(), occ.end());
     if (q == s) {
         if (out[static_cast<std::size_t>(q)] < 2u) return false;
         out[static_cast<std::size_t>(q)] =
@@ -535,12 +512,12 @@ inline void decode_path(
 }
 
 [[nodiscard]] inline bool add_pair_occ(
-    std::span<const unsigned char> src,
+    std::span<const unsigned char> occ,
     int p,
     int r,
     std::vector<unsigned char>& out
 ) {
-    out.assign(src.begin(), src.end());
+    out.assign(occ.begin(), occ.end());
     if (p == r) {
         if (out[static_cast<std::size_t>(p)] != 0u) return false;
         out[static_cast<std::size_t>(p)] =
@@ -555,8 +532,8 @@ inline void decode_path(
 }
 
 [[nodiscard]] inline OccMove occ_move(
-    std::span<const unsigned char> bra,
-    std::span<const unsigned char> ket
+    std::span<const unsigned char> ket,
+    std::span<const unsigned char> bra
 ) noexcept {
     OccMove move;
     int nr = 0;
@@ -569,11 +546,11 @@ inline void decode_path(
         return move;
     };
 
-    if (bra.size() != ket.size()) return invalid();
+    if (ket.size() != bra.size()) return invalid();
 
     for (std::size_t i = 0; i < ket.size(); ++i) {
-        const int b = static_cast<int>(bra[i]);
         const int k = static_cast<int>(ket[i]);
+        const int b = static_cast<int>(bra[i]);
         if (b > 2 || k > 2) return invalid();
 
         const int p = static_cast<int>(i);
@@ -618,63 +595,6 @@ inline void decode_path(
         && std::equal(bra.step.begin(), bra.step.end(), ket.step.begin());
 }
 
-[[nodiscard]] inline bool same_two_op(const TwoOp& a, const TwoOp& b) noexcept {
-    return a.p == b.p && a.q == b.q && a.r == b.r && a.s == b.s;
-}
-
-template <class Visit>
-inline void visit_two_ops(const OccMove& move, int norb, Visit&& visit) {
-    auto add = [&](int p, int q, int r, int s) {
-        visit(TwoOp{p, q, r, s});
-    };
-
-    if (move.degree == 0) {
-        for (int p = 0; p < norb; ++p) {
-            for (int r = 0; r < norb; ++r) {
-                add(p, p, r, r);
-                if (p != r) add(p, r, r, p);
-            }
-        }
-        return;
-    }
-
-    if (move.degree == 1) {
-        const int p = move.add[0];
-        const int q = move.remove[0];
-        for (int t = 0; t < norb; ++t) {
-            add(p, q, t, t);
-            if (t != q) add(p, t, t, q);
-            if (t != p) add(t, q, p, t);
-            if (t != p && t != q) add(t, t, p, q);
-        }
-        return;
-    }
-
-    if (move.degree == 2) {
-        std::array<TwoOp, 4> ops{};
-        std::size_t n = 0;
-        auto add_small = [&](int p, int q, int r, int s) {
-            const TwoOp op{p, q, r, s};
-            for (std::size_t i = 0; i < n; ++i) {
-                if (same_two_op(ops[i], op)) return;
-            }
-            ops[n++] = op;
-        };
-
-        for (int ip = 0; ip < 2; ++ip) {
-            for (int iq = 0; iq < 2; ++iq) {
-                add_small(
-                    move.add[static_cast<std::size_t>(ip)],
-                    move.remove[static_cast<std::size_t>(iq)],
-                    move.add[static_cast<std::size_t>(1 - ip)],
-                    move.remove[static_cast<std::size_t>(1 - iq)]
-                );
-            }
-        }
-        for (std::size_t i = 0; i < n; ++i) visit(ops[i]);
-    }
-}
-
 inline void encode_path(
     std::span<const Step> steps,
     u32 nword,
@@ -716,7 +636,7 @@ struct PathGroup {
 
 [[nodiscard]] inline u64 occ_tag(int p, unsigned char n) noexcept {
     if (n == 0u) return 0u;
-    return splitmix64(
+    return mix64(
         0x6f63636667746167ULL
         ^ (static_cast<u64>(p) * 0x9e3779b97f4a7c15ULL)
         ^ (static_cast<u64>(n) * 0xbf58476d1ce4e5b9ULL)
@@ -724,7 +644,7 @@ struct PathGroup {
 }
 
 [[nodiscard]] inline u64 occ_fingerprint(Occ occ) noexcept {
-    u64 fp = splitmix64(0x6f6363666770726fULL ^ static_cast<u64>(occ.size()));
+    u64 fp = mix64(0x6f6363666770726fULL ^ static_cast<u64>(occ.size()));
     for (int p = 0; p < static_cast<int>(occ.size()); ++p) {
         fp ^= occ_tag(p, occ[static_cast<std::size_t>(p)]);
     }
@@ -829,7 +749,7 @@ public:
         auto emit_group = [&](i32 group, int degree) {
             if (scratch.marked(group)) return;
             const OccGroup& occ_group = groups_[static_cast<std::size_t>(group)];
-            const OccMove move = occ_move(occ_group.occ, ket.occ);
+            const OccMove move = occ_move(ket.occ, occ_group.occ);
             if (move.degree != degree) return;
             scratch.mark(group);
             for (i32 idx : group_ids(occ_group)) visit(idx, move);

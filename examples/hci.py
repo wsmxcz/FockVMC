@@ -6,9 +6,11 @@ import time
 import numpy as np
 import primme
 from scipy.sparse.linalg import LinearOperator
+from pyscf import ao2mo, gto, scf
 
 from detnqs import hilbert, operator
-from pyscf import ao2mo, gto, scf
+
+import utils as run_utils
 
 
 @dataclass(slots=True)
@@ -33,7 +35,7 @@ def davidson_primme(
     """Solve the variational problem in a fixed determinant basis."""
     t0 = time.perf_counter()
 
-    hdiag = np.asarray(H.diag(dets), dtype=np.float64).reshape(-1)
+    hdiag = H.diag(dets).reshape(-1)
     n = hdiag.size
 
     if n == 1:
@@ -61,12 +63,14 @@ def davidson_primme(
     elif mode == "matvec":
 
         def matvec(x: np.ndarray) -> np.ndarray:
-            x = np.asarray(x, dtype=np.float64).reshape(-1)
-            return np.asarray(H.matvec(dets, x, ket=dets), dtype=np.float64)
+            return H.matvec(
+                dets,
+                np.asarray(x, dtype=np.float64).reshape(-1),
+                kets=dets,
+            )
 
         def matmat(X: np.ndarray) -> np.ndarray:
-            X = np.asarray(X, dtype=np.float64)
-            return np.asarray(H.matvec(dets, X, ket=dets), dtype=np.float64)
+            return H.matvec(dets, np.asarray(X, dtype=np.float64), kets=dets)
 
         A = LinearOperator((n, n), matvec=matvec, matmat=matmat, dtype=np.float64)
 
@@ -143,15 +147,21 @@ def hci_solve(
 
     dets = H.sector.reference(1)
     coeffs = np.array([1.0], dtype=np.float64)
-    diags = np.asarray(H.diag(dets), dtype=np.float64).reshape(-1)
+    diags = H.diag(dets).reshape(-1)
     energy = float(diags[0])
 
-    header = (
-        f"{'Iter':>4} | {'Ndet':>8} | {'Screen':>10} | "
-        f"{'Conns':>11} | {'Solve':>10} | {'Other':>10} | {'Energy':>16}"
-    )
-    print(header)
-    print("-" * len(header))
+    metrics = {
+        "cycle": ("Cycle", "d", 6),
+        "n_det": ("Ndet", "d", 9),
+        "n_new": ("Nnew", "d", 9),
+        "energy": ("Energy", ".10f", 16),
+        "time_screen": ("Screen", ".3f", 9),
+        "time_conns": ("Conns", ".3f", 9),
+        "time_solve": ("Solve", ".3f", 9),
+        "time_other": ("Other", ".3f", 9),
+    }
+
+    line = run_utils.print_metrics(metrics)
 
     for it in range(max_cycle):
         # Select new external configurations above the cutoff.
@@ -176,14 +186,22 @@ def hci_solve(
             mode=davidson_mode,
         )
 
-        print(
-            f"{it + 1:4d} | {len(dets):8d} | {t_screen:10.4f} | "
-            f"{t_conns:11.4f} | {t_solve:10.4f} | {t_other:10.4f} | "
-            f"{energy:16.10f}"
+        run_utils.print_metrics(
+            metrics,
+            {
+                "cycle": it + 1,
+                "n_det": len(dets),
+                "n_new": cand.shape[0],
+                "energy": energy,
+                "time_screen": t_screen,
+                "time_conns": t_conns,
+                "time_solve": t_solve,
+                "time_other": t_other,
+            },
         )
 
-    print("-" * len(header))
-    print(f"Total: {time.perf_counter() - t_total:.4f} s")
+    print(line)
+    print(f"Total time: {time.perf_counter() - t_total:.2f}s")
 
     return HCIState(
         dets=dets,
@@ -217,8 +235,8 @@ def semi_pt2(
         exclude=dets,
     )
 
-    hpsi = np.asarray(prj.hpsi, dtype=np.float64)
-    diags = np.asarray(prj.diag, dtype=np.float64)
+    hpsi = np.asarray(prj.hpsi)
+    diags = np.asarray(prj.diag)
     e2_det = float(np.sum((hpsi * hpsi) / (energy - diags)))
     del prj, hpsi, diags
 
@@ -238,14 +256,14 @@ def semi_pt2(
             seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
         )
 
-        sample_bra = np.asarray(weak.bra, dtype=np.uint64)
-        weak_hpsi = np.asarray(weak.hpsi, dtype=np.float64)
+        sample_bra = np.asarray(weak.bra)
+        weak_hpsi = np.asarray(weak.hpsi)
         if sample_bra.shape[0] == 0:
             continue
 
         strong = H.project(sample_bra, dets, coeffs, eps=eps1)
-        strong_pair = np.asarray(strong.hpsi, dtype=np.float64)
-        denom = energy - np.asarray(strong.diag, dtype=np.float64)
+        strong_pair = np.asarray(strong.hpsi)
+        denom = energy - np.asarray(strong.diag)
         weak_a, weak_b = weak_hpsi
 
         corr[r] = np.sum(
@@ -258,17 +276,18 @@ def semi_pt2(
     return e2_det + e2_stoch, e2_det, e2_stoch, err
 
 
-
 def main():
-    # Build the problem and integral tensors.
+    # problem and integral tensors.
     mol = gto.M(
-        atom="""
+        atom=
+        '''
         O   0.00000000,  0.00000000,  0.00000000
-        O   1.1200000,  0.00000000,  0.58590000
-        """,
-        basis="sto-3g",
+        H   0.75700000,  0.00000000,  0.58590000
+        H  -0.75700000,  0.00000000,  0.58590000
+        ''',
+        basis="6-31g",
         unit="Angstrom",
-        spin=2,
+        spin=0,
         verbose=0,
     )
 
@@ -279,19 +298,19 @@ def main():
     h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
     eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
 
-    # Build the sector and Hamiltonian.
+    # sector and Hamiltonian.
     sector = hilbert.SpinSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
-    # Run the variational stage.
+    # variational stage.
     state = hci_solve(
         H,
-        eps=1e-6,
+        eps=1e-4,
         max_cycle=10,
         davidson_mode="sparse",
     )
 
-    # Run the correction stage.
+    # correction stage.
     e2_total, e2_det, e2_stoch, err = semi_pt2(
         H,
         state,

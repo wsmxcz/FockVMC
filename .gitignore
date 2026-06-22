@@ -1,108 +1,96 @@
-# 1. Build & Compilation Artifacts
-# ---------------------------------
-# General build output directories
+# Build artifacts
 build/
 dist/
-documents/
+_skbuild/
 *.egg-info/
 
-# CMake generated files
+# CMake artifacts
 CMakeCache.txt
 CMakeFiles/
+CTestTestfile.cmake
 cmake-build-*/
 cmake_install.cmake
+compile_commands.json
+install_manifest.txt
 Makefile
-*.cmake
-!CMakeLists.txt
 
-# Compiled libraries and executables
-*.o
-*.so
+# Compiled outputs
 *.a
-*.lib
-*.dll
-*.exe
-*.dylib
-*.out
 *.app
+*.dll
+*.dylib
+*.exe
+*.lib
+*.o
+*.out
+*.so
 
-# 2. Python Specific
-# --------------------
-# Bytecode and caches
+# Python caches and metadata
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Virtual environments
-.env
-.venv
-env/
-venv/
-
-# Caches for linters, formatters, and test runners
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 .coverage.*
+htmlcov/
 
-# 3. JAX & Machine Learning
-# ---------------------------
-# Caches
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+
+# JAX/XLA caches
 jax_cache/
 xla_cache/
 
-# Large data, model, and serialization files
+# Local experiment outputs and generated data
+.benchmarks/
+data/
+documents/
+performance/
+runs/
+scans/
+*.FCIDUMP
+*.ckpt
+*.csv
 *.h5
 *.hdf5
-*.pkl
-*.pickle
+*.joblib
+*.log
+*.model
+*.msgpack
 *.npy
 *.npz
+*.pdf
+*.pickle
+*.pkl
 *.pt
 *.pth
-*.ckpt
-*.model
-*.joblib
 
-# Jupyter Notebook checkpoints
+# Jupyter
 .ipynb_checkpoints/
 
-# 4. IDE & Editor Files
-# -----------------------
-.vscode/
+# Editors and IDEs
 .idea/
+.vscode/
+*.suo
 *.swp
 *.swo
-*~
-*.suo
 *.user
+*~
 
-# 5. OS Generated Files
-# -----------------------
+# OS files
 .DS_Store
 Thumbs.db
 ehthumbs.db
 
-# 6. Logs & Temporary Files
-# ---------------------------
-*.log
-*.tmp
-*.temp
+# Temporary files
 *.bak
 *.backup
 *.pid
 *.seed
-# .benchmarks
-# *.FCIDUMP
-*.pdf
-*.csv
-*.json
-*.msgpack
-*.npz
-performance/
-runs/
-scans/
-data/
-cpp/
-AGENTS.md
+*.temp
+*.tmp

@@ -19,13 +19,13 @@ authors = [
 ]
 
 dependencies = [
-  "numpy>=2.0",
-  "scipy>=1.10",
+  "flax>=0.12",
   "jax>=0.8",
   "jaxlib>=0.8",
-  "flax>=0.12",
+  "numpy>=2.0",
   "optax>=0.2",
-  "pyscf>=2.13"
+  "pyscf>=2.13",
+  "scipy>=1.10",
 ]
 
 classifiers = [
@@ -59,20 +59,25 @@ wheel.packages = [
 
 sdist.include = [
   "CMakeLists.txt",
-  "README.md",
   "LICENSE",
+  "README.md",
 
   "detnqs/**",
-
   "examples/**",
   "tests/**",
 ]
 
 sdist.exclude = [
-  "**/__pycache__/**",
-  "**/*.pyc",
   ".git/**",
+  ".mypy_cache/**",
+  ".pytest_cache/**",
+  ".ruff_cache/**",
+  "**/__pycache__/**",
+  "**/*.py[cod]",
+  "*.egg-info/**",
+  "_skbuild/**",
   "build/**",
+  "cmake-build-*/**",
   "dist/**",
 ]
 

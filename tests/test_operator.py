@@ -168,9 +168,9 @@ def test_det_core() -> None:
     np.testing.assert_allclose(H.matvec(basis, vec), mat @ vec)
 
     con = H.conn(basis[:4], eps=0.15)
-    pool = np.asarray(con.x)
+    pool = np.asarray(con.bra)
     ptr = np.asarray(con.ptr)
-    idx = np.asarray(con.bra)
+    idx = np.asarray(con.idx)
     val = np.asarray(con.h)
 
     for j, ket in enumerate(basis[:4]):
@@ -257,9 +257,9 @@ def test_guga_conn() -> None:
     mat = dense(H, basis)
     con = H.conn(basis[:3], eps=0.05)
 
-    pool = np.asarray(con.x)
+    pool = np.asarray(con.bra)
     ptr = np.asarray(con.ptr)
-    idx = np.asarray(con.bra)
+    idx = np.asarray(con.idx)
     val = np.asarray(con.h)
     ids = {np.ascontiguousarray(x).tobytes(): i for i, x in enumerate(basis)}
 

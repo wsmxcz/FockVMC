@@ -11,6 +11,7 @@ FloatArray = NDArray[np.float64]
 UInt64Array = NDArray[np.uint64]
 
 Conns = libdet.Conns
+LocalConns = libdet.LocalConns
 Projection = libdet.Projection
 Projections = libdet.Projections
 
@@ -29,19 +30,21 @@ class Hamiltonian:
         self.sector = sector
         self._ecore = float(ecore)
 
-        h1_arr = np.asarray(h1, dtype=np.float64)
+        h1_arr = np.ascontiguousarray(h1, dtype=np.float64)
         if h1_arr.shape != (sector.norb, sector.norb):
             raise ValueError("h1 must have shape (sector.norb, sector.norb)")
-        h1_arr = np.ascontiguousarray(h1_arr)
 
-        eri_arr = np.asarray(eri, dtype=np.float64)
+        eri_arr = np.ascontiguousarray(eri, dtype=np.float64).reshape(-1)
         npair = sector.norb * (sector.norb + 1) // 2
         if eri_arr.shape != (npair * (npair + 1) // 2,):
             raise ValueError("eri must be a 1D PySCF chemist 8-fold array")
-        eri_arr = np.ascontiguousarray(eri_arr)
 
         if isinstance(sector, DetSector):
-            self._raw = libdet.Hamiltonian.det(h1_arr, eri_arr, self._ecore)
+            self._raw = libdet.Hamiltonian.det(
+                h1_arr,
+                eri_arr,
+                self._ecore,
+            )
         elif isinstance(sector, SpinSector):
             self._raw = libdet.Hamiltonian.spin(
                 h1_arr,
@@ -63,110 +66,132 @@ class Hamiltonian:
 
     def hij(self, bra: ArrayLike, ket: ArrayLike) -> float:
         """Return a single matrix element `H[bra, ket]`."""
-        return float(self._raw.hij(bra, ket))
+        return float(
+            self._raw.hij(
+                np.ascontiguousarray(bra, dtype=np.uint64),
+                np.ascontiguousarray(ket, dtype=np.uint64),
+            )
+        )
 
     def diag(self, x: ArrayLike) -> FloatArray:
         """Return diagonal elements for a batch of basis states."""
-        return np.asarray(self._raw.diag(x), dtype=np.float64)
+        return self._raw.diag(np.ascontiguousarray(x, dtype=np.uint64))
 
     def expand(
         self,
-        ket: ArrayLike,
+        kets: ArrayLike,
         eps: float,
         *,
         scale: ArrayLike | None = None,
         exclude: ArrayLike | None = None,
     ) -> UInt64Array:
         """Generate unique connected `bra` states above the screening cutoff."""
-        scale_arr = None
-        if scale is not None:
-            scale_arr = np.ascontiguousarray(
-                np.asarray(scale, dtype=np.float64).reshape(-1)
-            )
-            if scale_arr.shape[0] != ket.shape[0]:
-                raise ValueError("scale length must match ket")
-
-        return np.asarray(
-            self._raw.expand(ket, float(eps), scale_arr, exclude),
-            dtype=np.uint64,
+        return self._raw.expand(
+            np.ascontiguousarray(kets, dtype=np.uint64),
+            float(eps),
+            None
+            if scale is None
+            else np.ascontiguousarray(scale, dtype=np.float64).reshape(-1),
+            None
+            if exclude is None
+            else np.ascontiguousarray(exclude, dtype=np.uint64),
         )
 
     def project(
         self,
-        bra: ArrayLike | None,
-        ket: ArrayLike,
+        bras: ArrayLike | None,
+        kets: ArrayLike,
         scale: ArrayLike,
         *,
         eps: float = 0.0,
         exclude: ArrayLike | None = None,
     ) -> Projection:
-        """Contract `H[bra, ket] scale[ket]`.
+        """Contract `H[bras, kets] scale[kets]`.
 
-        If `bra` is `None`, connected external `bra` states are generated with
+        If `bras` is `None`, connected external `bra` states are generated with
         the same screening rule used by `expand`.
         """
-        scale_arr = np.ascontiguousarray(
-            np.asarray(scale, dtype=np.float64).reshape(-1)
-        )
-        if scale_arr.shape[0] != ket.shape[0]:
-            raise ValueError("scale length must match ket")
+        kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
+        scale_arr = np.ascontiguousarray(scale, dtype=np.float64).reshape(-1)
 
-        if bra is None:
-            return self._raw.project(None, ket, scale_arr, float(eps), exclude)
+        if bras is None:
+            exclude_arr = (
+                None
+                if exclude is None
+                else np.ascontiguousarray(exclude, dtype=np.uint64)
+            )
+            return self._raw.project(None, kets_arr, scale_arr, float(eps), exclude_arr)
 
         if exclude is not None:
-            raise ValueError("exclude is only valid when bra is None")
+            raise ValueError("exclude is only valid when bras is None")
 
-        return self._raw.project(bra, ket, scale_arr, float(eps), None)
+        return self._raw.project(
+            np.ascontiguousarray(bras, dtype=np.uint64),
+            kets_arr,
+            scale_arr,
+            float(eps),
+            None,
+        )
 
     def conn(
         self,
-        ket: ArrayLike,
+        kets: ArrayLike,
         eps: float = 0.0,
-        *,
-        include: ArrayLike | None = None,
     ) -> Conns:
-        """Return screened off-diagonal connections for each `ket`."""
-        return self._raw.conn(ket, float(eps), include)
+        """Return screened off-diagonal connections for each ket."""
+        return self._raw.conn(
+            np.ascontiguousarray(kets, dtype=np.uint64),
+            float(eps),
+        )
 
     def sample_conn(
         self,
-        ket: ArrayLike,
+        kets: ArrayLike,
         counts: ArrayLike | int,
         *,
         eps1: float = np.inf,
         eps2: float = 0.0,
         seed: int = 0,
-        bra_weight: bool = False,
-        include: ArrayLike | None = None,
     ) -> Conns:
-        """Sample connections in the screened window `eps2 <= |H| < eps1`."""
-        n_ket = ket.shape[0]
-        if np.isscalar(counts):
-            counts_arr = np.full(n_ket, int(counts), dtype=np.int64)
-        else:
-            counts_arr = np.ascontiguousarray(np.asarray(counts, dtype=np.int64))
-            if counts_arr.ndim not in (1, 2):
-                raise ValueError("counts must have shape (N,) or (S, N)")
-            if counts_arr.shape[-1] != n_ket:
-                raise ValueError("counts last dimension must match ket")
-
-        if np.any(counts_arr < 0):
-            raise ValueError("counts must be nonnegative")
-
+        """Sample connections in the screened span `eps2 <= |H| < eps1`."""
+        kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
+        counts_arr = (
+            np.full(kets_arr.shape[0], int(counts), dtype=np.int64)
+            if np.isscalar(counts)
+            else np.ascontiguousarray(counts, dtype=np.int64)
+        )
         return self._raw.sample_conn(
-            ket,
-            counts_arr,
+            kets_arr, counts_arr, float(eps1), float(eps2), int(seed)
+        )
+
+
+    def local_conn(
+        self,
+        kets: ArrayLike,
+        eps1: float,
+        eps2: float,
+        counts: ArrayLike | int,
+        *,
+        seed: int = 0,
+    ) -> LocalConns:
+        """Return strong connections and weak-window samples for local energy."""
+        kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
+        counts_arr = (
+            np.full(kets_arr.shape[0], int(counts), dtype=np.int64)
+            if np.isscalar(counts)
+            else np.ascontiguousarray(counts, dtype=np.int64).reshape(-1)
+        )
+        return self._raw.local_conn(
+            kets_arr,
             float(eps1),
             float(eps2),
+            counts_arr,
             int(seed),
-            bool(bra_weight),
-            include,
         )
 
     def sample_project(
         self,
-        ket: ArrayLike,
+        kets: ArrayLike,
         scale: ArrayLike,
         counts: ArrayLike | int,
         *,
@@ -175,69 +200,56 @@ class Hamiltonian:
         exclude: ArrayLike | None = None,
         seed: int = 0,
     ) -> Projections:
-        """Sample projected amplitudes in the screened external window."""
-        n_ket = ket.shape[0]
-        scale_arr = np.ascontiguousarray(
-            np.asarray(scale, dtype=np.float64).reshape(-1)
+        """Sample projected amplitudes in the screened external span."""
+        kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
+        scale_arr = np.ascontiguousarray(scale, dtype=np.float64).reshape(-1)
+        counts_arr = (
+            np.full(kets_arr.shape[0], int(counts), dtype=np.int64)
+            if np.isscalar(counts)
+            else np.ascontiguousarray(counts, dtype=np.int64)
         )
-        if scale_arr.shape[0] != n_ket:
-            raise ValueError("scale length must match ket")
 
-        if np.isscalar(counts):
-            counts_arr = np.full(n_ket, int(counts), dtype=np.int64)
-        else:
-            counts_arr = np.ascontiguousarray(np.asarray(counts, dtype=np.int64))
-            if counts_arr.ndim not in (1, 2):
-                raise ValueError("counts must have shape (N,) or (S, N)")
-            if counts_arr.shape[-1] != n_ket:
-                raise ValueError("counts last dimension must match ket")
-
-        if np.any(counts_arr < 0):
-            raise ValueError("counts must be nonnegative")
-
+        exclude_arr = (
+            None
+            if exclude is None
+            else np.ascontiguousarray(exclude, dtype=np.uint64)
+        )
         return self._raw.sample_project(
-            ket,
-            scale_arr,
-            counts_arr,
-            float(eps1),
-            float(eps2),
-            exclude,
-            int(seed),
+            kets_arr, scale_arr, counts_arr, float(eps1), float(eps2),
+            exclude_arr, int(seed),
         )
 
-    def matrix(self, bra: ArrayLike, ket: ArrayLike | None = None) -> csr_matrix:
-        """Build the sparse matrix `H[bra, ket]`."""
-        ket = bra if ket is None else ket
-        indptr, indices, data, shape = self._raw.matrix(bra, ket)
+    def matrix(self, bras: ArrayLike, kets: ArrayLike | None = None) -> csr_matrix:
+        """Build the sparse matrix `H[bras, kets]`."""
+        bras_arr = np.ascontiguousarray(bras, dtype=np.uint64)
+        kets_arr = (
+            bras_arr
+            if kets is None
+            else np.ascontiguousarray(kets, dtype=np.uint64)
+        )
+        indptr, indices, data, shape = self._raw.matrix(bras_arr, kets_arr)
         return csr_matrix((data, indices, indptr), shape=tuple(shape))
 
     def matvec(
         self,
-        bra: ArrayLike,
-        coeff: ArrayLike,
+        bras: ArrayLike,
+        x: ArrayLike,
         *,
-        ket: ArrayLike | None = None,
+        kets: ArrayLike | None = None,
     ) -> FloatArray:
-        """Apply `H[bra, ket]` to one or more coefficient vectors."""
-        ket = bra if ket is None else ket
-        coeff_arr = np.asarray(coeff, dtype=np.float64)
+        """Apply `H[bras, kets]` to one or more vectors."""
+        bras_arr = np.ascontiguousarray(bras, dtype=np.uint64)
+        kets_arr = (
+            bras_arr
+            if kets is None
+            else np.ascontiguousarray(kets, dtype=np.uint64)
+        )
+        x_arr = np.ascontiguousarray(x, dtype=np.float64)
 
-        if coeff_arr.ndim == 1:
-            coeff_vec = np.ascontiguousarray(coeff_arr)
-            if coeff_vec.shape[0] != ket.shape[0]:
-                raise ValueError("coeff length must match ket")
-            return np.asarray(
-                self._raw.matvec(bra, ket, coeff_vec),
-                dtype=np.float64,
-            )
+        if x_arr.ndim == 1:
+            return self._raw.matvec(bras_arr, kets_arr, x_arr)
 
-        if coeff_arr.ndim == 2:
-            coeff_mat = np.ascontiguousarray(coeff_arr)
-            if coeff_mat.shape[0] != ket.shape[0]:
-                raise ValueError("coeff must have shape (n_ket, n_rhs)")
-            return np.asarray(
-                self._raw.matmat(bra, ket, coeff_mat),
-                dtype=np.float64,
-            )
+        if x_arr.ndim == 2:
+            return self._raw.matmat(bras_arr, kets_arr, x_arr)
 
-        raise ValueError("coeff must be a vector or matrix")
+        raise ValueError("x must be a vector or matrix")

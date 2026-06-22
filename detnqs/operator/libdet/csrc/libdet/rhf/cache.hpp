@@ -3,15 +3,21 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <list>
 #include <memory>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include <libdet/hash.hpp>
+
 #include <libdet/rhf/det.hpp>
-#include <libdet/window.hpp>
 
 namespace libdet::rhf {
+
+struct ConnSpan {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    double degree = 0.0;
+};
 
 struct Conn {
     Excitation excitation;
@@ -37,6 +43,7 @@ struct Conns {
             prefix_abs.assign(1u, 0.0);
             return;
         }
+
         if (terms.size() > 1u) {
             std::sort(
                 terms.begin(),
@@ -52,6 +59,7 @@ struct Conns {
 
         prefix_abs.resize(terms.size() + 1u);
         prefix_abs[0] = 0.0;
+
         for (std::size_t k = 0; k < terms.size(); ++k) {
             prefix_abs[k + 1u] = prefix_abs[k] + std::abs(terms[k].h);
         }
@@ -69,104 +77,131 @@ struct Conns {
         return static_cast<std::size_t>(it - terms.begin());
     }
 
-    [[nodiscard]] double abs_sum(std::size_t begin, std::size_t end) const noexcept {
+    [[nodiscard]] double abs_sum(
+        std::size_t begin,
+        std::size_t end
+    ) const noexcept {
         if (begin >= end || end >= prefix_abs.size()) return 0.0;
         return prefix_abs[end] - prefix_abs[begin];
     }
 
-    [[nodiscard]] ::libdet::ConnWindow window(::libdet::AbsWindow win) const noexcept {
-        const std::size_t begin = std::isfinite(win.hi) ? count(win.hi) : 0u;
-        const std::size_t end = count(win.lo);
-        if (end <= begin) return ::libdet::ConnWindow{begin, begin, 0.0};
-        return ::libdet::ConnWindow{begin, end, abs_sum(begin, end)};
+    [[nodiscard]] ConnSpan span(double eps1, double eps2) const noexcept {
+        const std::size_t begin = count(eps1);
+        const std::size_t end = count(eps2);
+
+        if (end <= begin) return ConnSpan{begin, begin, 0.0};
+        return ConnSpan{begin, end, abs_sum(begin, end)};
     }
 };
 
 class ConnCache {
 public:
+    static constexpr std::size_t way = 4;
     static constexpr std::size_t capacity = 8192;
+    static_assert((capacity & (capacity - 1u)) == 0u);
+    static_assert(capacity % way == 0u);
+
+    static constexpr std::size_t nset = capacity / way;
+    static_assert((nset & (nset - 1u)) == 0u);
 
     explicit ConnCache(u32 nword = 0)
         : nword_(nword),
           words_(capacity * det_size(nword), 0u),
-          entries_(capacity) {
-        index_.reserve(capacity);
-    }
+          entries_(capacity) {}
 
-    [[nodiscard]] std::shared_ptr<const Conns> find(
-        DetRef ket,
-        double eps
-    ) {
-        const std::size_t slot = find_slot(ket);
-        if (slot == npos) return {};
+    [[nodiscard]] std::shared_ptr<const Conns> find(DetRef ket, double eps) {
+        if (eps <= 0.0) return {};
 
-        Entry& entry = entries_[slot];
-        if (entry.conns->cutoff > eps) return {};
+        const u64 fingerprint = det_fingerprint(ket);
+        const std::size_t begin = set_begin(ket, fingerprint);
+        if (begin >= entries_.size()) return {};
 
-        touch(slot);
-        return entry.conns;
+        for (std::size_t k = 0; k < way; ++k) {
+            const std::size_t slot = begin + k;
+            Entry& entry = entries_[slot];
+
+            if (!entry.conns) continue;
+            if (entry.fingerprint != fingerprint) continue;
+            if (!det_equal(ket_at(slot), ket)) continue;
+            if (entry.conns->cutoff > eps) return {};
+
+            touch(entry);
+            return entry.conns;
+        }
+
+        return {};
     }
 
     void insert(DetRef ket, std::shared_ptr<const Conns> conns) {
-        if (nword_ == 0 || ket.nword() != nword_ || !conns) {
-            return;
-        }
-
-        const std::size_t old = find_slot(ket);
-        const u64 fingerprint = det_fingerprint(ket);
-
         if (
-            old != npos
-            && entries_[old].conns
-            && entries_[old].conns->cutoff <= conns->cutoff
+            nword_ == 0
+            || ket.nword() != nword_
+            || !conns
+            || conns->cutoff <= 0.0
         ) {
-            touch(old);
             return;
         }
 
-        std::size_t slot = old;
-        if (old == npos) {
-            if (size_ < capacity) {
-                slot = size_++;
-                lru_.push_front(slot);
-                entries_[slot].position = lru_.begin();
-            } else {
-                slot = lru_.back();
-                erase_index(slot);
-                touch(slot);
+        const u64 fingerprint = det_fingerprint(ket);
+        const std::size_t begin = set_begin(ket, fingerprint);
+        if (begin >= entries_.size()) return;
+
+        std::size_t slot = begin;
+        bool found = false;
+
+        for (std::size_t k = 0; k < way; ++k) {
+            const std::size_t item = begin + k;
+            Entry& entry = entries_[item];
+
+            if (!entry.conns) {
+                slot = item;
+                break;
             }
-        } else {
-            touch(slot);
+
+            if (
+                entry.fingerprint == fingerprint
+                && det_equal(ket_at(item), ket)
+            ) {
+                if (entry.conns->cutoff <= conns->cutoff) {
+                    touch(entry);
+                    return;
+                }
+
+                slot = item;
+                found = true;
+                break;
+            }
+
+            if (victim_less(entry, entries_[slot])) {
+                slot = item;
+            }
         }
 
         const std::size_t stride = det_size(nword_);
-        u64* slot_words = words_.data() + slot * stride;
+        u64* ptr = words_.data() + slot * stride;
 
-        std::copy(ket.alpha().begin(), ket.alpha().end(), slot_words);
-        std::copy(ket.beta().begin(), ket.beta().end(), slot_words + nword_);
+        std::copy(ket.alpha().begin(), ket.alpha().end(), ptr);
+        std::copy(ket.beta().begin(), ket.beta().end(), ptr + nword_);
 
-        entries_[slot].conns = std::move(conns);
-        entries_[slot].fingerprint = fingerprint;
-        if (old == npos) {
-            index_.emplace(fingerprint, slot);
-        }
+        Entry& entry = entries_[slot];
+        entry.conns = std::move(conns);
+        entry.fingerprint = fingerprint;
+        entry.stamp = ++clock_;
+        entry.hit = found ? bump(entry.hit) : 1u;
     }
 
 private:
-    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
-
     struct Entry {
         std::shared_ptr<const Conns> conns;
         u64 fingerprint = 0;
-        std::list<std::size_t>::iterator position;
+        u64 stamp = 0;
+        unsigned char hit = 0;
     };
 
     u32 nword_ = 0;
+    u64 clock_ = 0;
     std::vector<u64> words_;
     std::vector<Entry> entries_;
-    std::unordered_multimap<u64, std::size_t> index_;
-    std::list<std::size_t> lru_;
-    std::size_t size_ = 0;
 
     [[nodiscard]] DetRef ket_at(std::size_t slot) const noexcept {
         const std::size_t stride = det_size(nword_);
@@ -174,31 +209,45 @@ private:
         return DetRef(ptr, ptr + nword_, nword_);
     }
 
-    [[nodiscard]] std::size_t find_slot(DetRef ket) const noexcept {
-        if (nword_ == 0 || ket.nword() != nword_) return npos;
-
-        const u64 fingerprint = det_fingerprint(ket);
-        const auto range = index_.equal_range(fingerprint);
-        for (auto it = range.first; it != range.second; ++it) {
-            const std::size_t slot = it->second;
-            if (det_equal(ket_at(slot), ket)) return slot;
+    [[nodiscard]] std::size_t set_begin(
+        DetRef ket,
+        u64 fingerprint
+    ) const noexcept {
+        if (
+            nword_ == 0
+            || ket.nword() != nword_
+            || entries_.empty()
+        ) {
+            return entries_.size();
         }
-        return npos;
+
+        return set_begin(fingerprint);
     }
 
-    void erase_index(std::size_t slot) {
-        const u64 fingerprint = entries_[slot].fingerprint;
-        const auto range = index_.equal_range(fingerprint);
-        for (auto it = range.first; it != range.second; ++it) {
-            if (it->second == slot) {
-                index_.erase(it);
-                return;
-            }
-        }
+    [[nodiscard]] static std::size_t set_begin(u64 fingerprint) noexcept {
+        return (
+            static_cast<std::size_t>(mix64(fingerprint))
+            & (nset - 1u)
+        ) * way;
     }
 
-    void touch(std::size_t slot) {
-        lru_.splice(lru_.begin(), lru_, entries_[slot].position);
+    [[nodiscard]] static unsigned char bump(unsigned char hit) noexcept {
+        return hit < 3u ? static_cast<unsigned char>(hit + 1u) : hit;
+    }
+
+    void touch(Entry& entry) noexcept {
+        entry.stamp = ++clock_;
+        entry.hit = bump(entry.hit);
+    }
+
+    [[nodiscard]] static bool victim_less(
+        const Entry& lhs,
+        const Entry& rhs
+    ) noexcept {
+        if (!rhs.conns) return false;
+        if (!lhs.conns) return true;
+        if (lhs.hit != rhs.hit) return lhs.hit < rhs.hit;
+        return lhs.stamp < rhs.stamp;
     }
 };
 
@@ -240,10 +289,11 @@ private:
 
     [[nodiscard]] static u64 fingerprint(DetBatchView kets) noexcept {
         const std::size_t size = kets.n_dets * det_size(kets.nword);
-        const u64 seed = splitmix64(
+        const u64 seed = mix64(
             static_cast<u64>(kets.n_dets)
             ^ (static_cast<u64>(kets.nword) << 32)
         );
+
         return hash_words(seed, {kets.data, size});
     }
 };

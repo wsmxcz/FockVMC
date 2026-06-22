@@ -117,11 +117,61 @@ r_\nu(y)=
 $$
 
 The identity observation kernel gives $\nu=\eta_{\theta,\alpha}$. A blurred
-observation kernel may mix the current configuration with Hamiltonian-connected
-neighbors. This can improve support for local-energy and gradient estimators,
+observation kernel may mix the current ket with Hamiltonian-connected bras.
+This can improve support for local-energy and gradient estimators,
 while leaving the Born objective unchanged.
 
-## 4. Reweighting
+## 4. Degree-Tilted Hamiltonian Sampling
+
+For Hamiltonian-informed moves let
+
+$$
+b_{xy}=|H_{xy}|,\qquad
+d(x)=\sum_{z\ne x} b_{xz},\qquad
+s(x)=
+\begin{cases}
+d(x),&d(x)>0,\\
+1,&d(x)=0.
+\end{cases}
+$$
+
+The heat-bath kernel is $q(y|x)=b_{xy}/d(x)$ when $d(x)>0$. Used directly,
+reverse proposal probabilities or observed blur densities require degrees of
+sampled bras, which creates a second Hamiltonian traversal.
+
+Degree tilting absorbs the ket degree into the working law. For blur, use
+the unnormalized observed density
+
+$$
+\widetilde r(y)
+=
+c_\beta(y)|\psi_\theta(y)|^\alpha
++
+\beta\sum_{x\ne y}b_{xy}|\psi_\theta(x)|^\alpha,
+\qquad
+c_\beta(y)=
+\begin{cases}
+(1-\beta)d(y),&d(y)>0,\\
+1,&d(y)=0.
+\end{cases}
+$$
+
+This expression is local to bra $y$. For Hamiltonian proposals, target the
+working chain law $|\psi_\theta(x)|^\alpha s(x)$; the heat-bath degree factors
+then cancel in the Metropolis ratio, leaving only
+
+$$
+A(x\to y)=
+\min\left\{1,
+\frac{|\psi_\theta(y)|^\alpha}{|\psi_\theta(x)|^\alpha}
+\right\}.
+$$
+
+The physical Born target is unchanged. Estimates are still reweighted by
+$|\psi_\theta(y)|^2/\widetilde r(y)$ or by the corresponding identity-law
+density when no tilt is used.
+
+## 5. Reweighting
 
 When samples are distributed according to $\nu$ but the target is $\pi_\theta$,
 use the unnormalized importance weight
@@ -149,7 +199,7 @@ $$
 For a nontrivial observation kernel, $r_\nu$ includes the probability mass
 transported to $y$ by that kernel.
 
-## 5. Support, Tails, and ESS
+## 6. Support, Tails, and ESS
 
 Reweighting requires the observed law to cover the relevant target
 contributions. For an observable $f_\theta$,
@@ -178,10 +228,10 @@ $$
 ESS diagnoses weight concentration, not Markov-chain mixing. A chain may mix
 well while producing poor weights, or mix slowly while weights are benign.
 
-## 6. Local-Energy Estimation
+## 7. Local-Energy Estimation
 
-Local energy evaluation can itself be expensive. If the Hamiltonian row is not
-summed exactly, write a stochastic estimator as
+Local energy evaluation can itself be expensive. If the Hamiltonian action on a
+ket is not summed exactly, write a stochastic estimator as
 
 $$
 \widehat E_{\mathrm{loc}}(y,\xi),
@@ -211,10 +261,10 @@ $$
 
 This separates configuration-sampling error from Hamiltonian-connection
 estimation error. In screened Hamiltonian workflows, deterministic strong
-connections and sampled weak connections are two parts of the same row-sum
-estimator.
+connections use `eps1`, while sampled weak connections use the window
+`eps2 <= |H| < eps1`. They are two parts of the same ket sum estimator.
 
-## 7. Validation
+## 8. Validation
 
 A VMC sampling specification is described by
 
@@ -236,7 +286,7 @@ Useful diagnostics include:
 - cost of Hamiltonian connections or local-energy sampling.
 
 These diagnostics distinguish support mismatch, heavy-tailed weights, slow
-mixing, and expensive Hamiltonian-row evaluation. They interact in practice,
+mixing, and expensive Hamiltonian action. They interact in practice,
 but they are conceptually different and should be examined separately.
 
 ## References

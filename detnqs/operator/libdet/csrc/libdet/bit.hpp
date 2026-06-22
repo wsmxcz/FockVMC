@@ -274,19 +274,4 @@ inline void clear_list(
 
 } // namespace bits
 
-[[nodiscard]] inline u64 splitmix64(u64 x) noexcept {
-    x += 0x9e3779b97f4a7c15ULL;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
-}
-
-[[nodiscard]] inline u64 hash_words(u64 seed, std::span<const u64> words) noexcept {
-    u64 h = splitmix64(seed ^ (0x9e3779b97f4a7c15ULL + static_cast<u64>(words.size())));
-    for (u64 x : words) {
-        h = splitmix64(h ^ splitmix64(x + 0x517cc1b727220a95ULL));
-    }
-    return h;
-}
-
 } // namespace libdet

@@ -73,16 +73,16 @@ struct Shape2 {
     return make < kill ? Dir2::r : Dir2::l;
 }
 
-inline constexpr void add_bit(unsigned char& dst, Op2 x) noexcept {
-    dst = static_cast<unsigned char>(dst | bit(x));
+inline constexpr void add_bit(unsigned char& bits, Op2 x) noexcept {
+    bits = static_cast<unsigned char>(bits | bit(x));
 }
 
-inline constexpr void add_bit(unsigned char& dst, Line2 x) noexcept {
-    dst = static_cast<unsigned char>(dst | bit(x));
+inline constexpr void add_bit(unsigned char& bits, Line2 x) noexcept {
+    bits = static_cast<unsigned char>(bits | bit(x));
 }
 
-inline constexpr void add_bit(unsigned char& dst, Act2 x) noexcept {
-    dst = static_cast<unsigned char>(dst | bit(x));
+inline constexpr void add_bit(unsigned char& bits, Act2 x) noexcept {
+    bits = static_cast<unsigned char>(bits | bit(x));
 }
 
 [[nodiscard]] inline constexpr Shape2 shape2(int k, int p, int q, int r, int s) noexcept {
@@ -298,7 +298,7 @@ enum class Seg1Kind : unsigned char {
 }
 
 struct Seg2Entry {
-    unsigned char z = 0;
+    std::uint16_t z = 0;
     double w = 0.0;
 };
 
@@ -306,9 +306,9 @@ struct Seg2Key {
     unsigned code = 0;
     Step dx = Step::empty;
     Step dy = Step::empty;
-    signed char db = 0;
-    unsigned char b = 0;
-    unsigned char z = 0;
+    std::int16_t db = 0;
+    std::uint16_t b = 0;
+    std::uint16_t z = 0;
 };
 
 [[nodiscard]] inline constexpr unsigned shape_code(Shape2 x) noexcept {
@@ -332,24 +332,46 @@ struct Seg2Key {
     return x.z < y.z;
 }
 
-struct Seg2Table {
-    // shape_code uses 14 bits: op, line, active flags, and two directions.
-    static constexpr std::size_t ncode = 1u << 14u;
+[[nodiscard]] inline std::uint64_t seg2_hash(Seg2Key key) noexcept {
+    std::uint64_t x = static_cast<std::uint64_t>(key.code);
+    x ^= static_cast<std::uint64_t>(key.dx) << 16u;
+    x ^= static_cast<std::uint64_t>(key.dy) << 18u;
+    x ^= static_cast<std::uint64_t>(static_cast<std::uint16_t>(key.db)) << 20u;
+    x ^= static_cast<std::uint64_t>(key.b) << 36u;
+    x ^= static_cast<std::uint64_t>(key.z) << 52u;
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30u)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27u)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31u);
+}
 
+struct Seg2Table {
     std::vector<Seg2Key> keys;
     std::vector<std::size_t> off;
     std::vector<Seg2Entry> val;
-    std::array<std::size_t, ncode> code_first{};
-    std::array<std::size_t, ncode> code_last{};
+    std::vector<int> slot;
+    std::size_t mask = 0;
     int max_b = -1;
 
     void clear() {
         keys.clear();
         off.clear();
         val.clear();
-        code_first.fill(0);
-        code_last.fill(0);
+        slot.clear();
+        mask = 0;
         max_b = -1;
+    }
+
+    void index() {
+        std::size_t size = 8;
+        while (size < keys.size() * 2u + 1u) size <<= 1u;
+        slot.assign(size, -1);
+        mask = size - 1u;
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            std::size_t pos = static_cast<std::size_t>(seg2_hash(keys[i])) & mask;
+            while (slot[pos] >= 0) pos = (pos + 1u) & mask;
+            slot[pos] = static_cast<int>(i);
+        }
     }
 
     [[nodiscard]] std::span<const Seg2Entry> get(
@@ -360,26 +382,25 @@ struct Seg2Table {
         int b,
         int z
     ) const noexcept {
-        if (b < 0 || z < 0 || b > max_b || z > max_b) return {};
-        const unsigned code = shape_code(shape);
-        if (code >= ncode) return {};
-        const std::size_t first = code_first[code];
-        const std::size_t last = code_last[code];
-        if (first == last) return {};
+        if (b < 0 || z < 0 || b > max_b || z > max_b || slot.empty()) return {};
         const Seg2Key q{
-            code,
+            shape_code(shape),
             dx,
             dy,
-            static_cast<signed char>(db),
-            static_cast<unsigned char>(b),
-            static_cast<unsigned char>(z)
+            static_cast<std::int16_t>(db),
+            static_cast<std::uint16_t>(b),
+            static_cast<std::uint16_t>(z)
         };
-        const auto it = std::lower_bound(keys.begin() + static_cast<std::ptrdiff_t>(first),
-                                         keys.begin() + static_cast<std::ptrdiff_t>(last),
-                                         q);
-        if (it == keys.begin() + static_cast<std::ptrdiff_t>(last) || !(*it == q)) return {};
-        const std::size_t i = static_cast<std::size_t>(it - keys.begin());
-        return std::span<const Seg2Entry>(val.data() + off[i], off[i + 1] - off[i]);
+        std::size_t pos = static_cast<std::size_t>(seg2_hash(q)) & mask;
+        for (;;) {
+            const int idx = slot[pos];
+            if (idx < 0) return {};
+            const std::size_t i = static_cast<std::size_t>(idx);
+            if (keys[i] == q) {
+                return std::span<const Seg2Entry>(val.data() + off[i], off[i + 1] - off[i]);
+            }
+            pos = (pos + 1u) & mask;
+        }
     }
 };
 
@@ -449,11 +470,11 @@ inline void add_local(
             shape_code(shape),
             dx,
             dy,
-            static_cast<signed char>(db),
-            static_cast<unsigned char>(b),
-            static_cast<unsigned char>(z)
+            static_cast<std::int16_t>(db),
+            static_cast<std::uint16_t>(b),
+            static_cast<std::uint16_t>(z)
         };
-        out.push_back({key, Seg2Entry{static_cast<unsigned char>(z1), w}});
+        out.push_back({key, Seg2Entry{static_cast<std::uint16_t>(z1), w}});
     }
 }
 
@@ -461,7 +482,7 @@ inline void add_local(
 inline void build_seg2(Seg2Table& table, int max_b) {
     table.clear();
     table.max_b = max_b;
-    std::vector<std::pair<Seg2Key, Seg2Entry>> rows;
+    std::vector<std::pair<Seg2Key, Seg2Entry>> entries;
     const std::vector<Shape2> shapes = shapes2();
 
     for (Shape2 shape : shapes) {
@@ -471,7 +492,7 @@ inline void build_seg2(Seg2Table& table, int max_b) {
                     for (int b = 0; b <= max_b; ++b) {
                         for (int z = 0; z <= max_b; ++z) {
                             add_local(
-                                rows,
+                                entries,
                                 shape,
                                 static_cast<Step>(dx),
                                 static_cast<Step>(dy),
@@ -487,33 +508,23 @@ inline void build_seg2(Seg2Table& table, int max_b) {
         }
     }
 
-    std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) {
+    std::sort(entries.begin(), entries.end(), [](const auto& lhs, const auto& rhs) {
         if (lhs.first == rhs.first) return lhs.second.z < rhs.second.z;
         return lhs.first < rhs.first;
     });
 
-    for (std::size_t i = 0; i < rows.size();) {
-        const Seg2Key key = rows[i].first;
+    for (std::size_t i = 0; i < entries.size();) {
+        const Seg2Key key = entries[i].first;
         table.keys.push_back(key);
         table.off.push_back(table.val.size());
-        while (i < rows.size() && rows[i].first == key) {
-            if (rows[i].second.w != 0.0) table.val.push_back(rows[i].second);
+        while (i < entries.size() && entries[i].first == key) {
+            if (entries[i].second.w != 0.0) table.val.push_back(entries[i].second);
             ++i;
         }
     }
     table.off.push_back(table.val.size());
 
-    table.code_first.fill(0);
-    table.code_last.fill(0);
-    for (std::size_t i = 0; i < table.keys.size();) {
-        const unsigned code = table.keys[i].code;
-        const std::size_t first = i;
-        while (i < table.keys.size() && table.keys[i].code == code) ++i;
-        if (code < Seg2Table::ncode) {
-            table.code_first[code] = first;
-            table.code_last[code] = i;
-        }
-    }
+    table.index();
 }
 
 } // namespace libdet::guga

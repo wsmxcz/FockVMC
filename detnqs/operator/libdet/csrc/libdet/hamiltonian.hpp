@@ -5,9 +5,9 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
-#include <vector>
 
 #include <libdet/bit.hpp>
+#include <libdet/results.hpp>
 
 namespace libdet {
 
@@ -34,41 +34,6 @@ struct StateBatchView {
     [[nodiscard]] StateRef operator[](std::size_t idx) const noexcept {
         return StateRef(data + idx * word_pair_size(nword), nword);
     }
-};
-
-struct Matrix {
-    std::size_t n_bra = 0;
-    std::size_t n_ket = 0;
-    std::vector<i32> indptr;
-    std::vector<i32> indices;
-    std::vector<double> data;
-};
-
-struct Conns {
-    u32 nword = 0;
-    std::size_t n_kets = 0;
-    std::size_t n_streams = 1;
-    std::vector<u64> bra_words;
-    std::vector<double> diag;
-    std::vector<i32> ptr;
-    std::vector<i32> bra;
-    std::vector<double> h;
-    std::vector<double> weight;
-};
-
-struct Projection {
-    u32 nword = 0;
-    std::vector<u64> bra_words;
-    std::vector<double> hpsi;
-    std::vector<double> diags;
-};
-
-struct Projections {
-    u32 nword = 0;
-    std::size_t n_streams = 0;
-    std::vector<u64> bra_words;
-    std::vector<double> hpsi;
-    std::vector<double> diags;
 };
 
 } // namespace libdet
@@ -233,17 +198,14 @@ public:
 
     [[nodiscard]] Conns conn(
         StateBatchView kets,
-        double eps = 0.0,
-        const StateBatchView* include = nullptr
+        double eps = 0.0
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                const auto inc = include ? detail::as_dets(*include) : rhf::DetBatchView{};
-                return ham.conn(detail::as_dets(kets), eps, include ? &inc : nullptr);
+                return ham.conn(detail::as_dets(kets), eps);
             } else {
-                const auto inc = include ? detail::as_paths(*include) : guga::PathBatchView{};
-                return ham.conn(detail::as_paths(kets), eps, include ? &inc : nullptr);
+                return ham.conn(detail::as_paths(kets), eps);
             }
         });
     }
@@ -254,18 +216,32 @@ public:
         std::size_t n_streams,
         double eps1,
         double eps2,
-        u64 seed = 0,
-        bool bra_weight = false,
-        const StateBatchView* include = nullptr
+        u64 seed = 0
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                const auto inc = include ? detail::as_dets(*include) : rhf::DetBatchView{};
-                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed, bra_weight, include ? &inc : nullptr);
+                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed);
             } else {
-                const auto inc = include ? detail::as_paths(*include) : guga::PathBatchView{};
-                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed, bra_weight, include ? &inc : nullptr);
+                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed);
+            }
+        });
+    }
+
+
+    [[nodiscard]] LocalConns local_conn(
+        StateBatchView kets,
+        double eps1,
+        double eps2,
+        std::span<const i64> counts,
+        u64 seed = 0
+    ) const {
+        return visit([&](const auto& ham) {
+            using H = std::decay_t<decltype(ham)>;
+            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
+                return ham.local_conn(detail::as_dets(kets), eps1, eps2, counts, seed);
+            } else {
+                return ham.local_conn(detail::as_paths(kets), eps1, eps2, counts, seed);
             }
         });
     }

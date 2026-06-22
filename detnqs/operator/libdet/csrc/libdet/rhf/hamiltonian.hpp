@@ -14,14 +14,10 @@
 
 #include <libdet/rhf/cache.hpp>
 #include <libdet/rhf/screen.hpp>
+#include <libdet/results.hpp>
 
 namespace libdet::rhf {
 
-struct KetScratch {
-    explicit KetScratch(int norb) : occ(norb) {}
-
-    DetOcc occ;
-};
 
 class Hamiltonian {
 public:
@@ -67,8 +63,15 @@ public:
 
     [[nodiscard]] ::libdet::Conns conn(
         DetBatchView kets,
-        double eps = 0.0,
-        const DetBatchView* include = nullptr
+        double eps = 0.0
+    ) const;
+
+    [[nodiscard]] ::libdet::LocalConns local_conn(
+        DetBatchView kets,
+        double eps1,
+        double eps2,
+        std::span<const i64> counts,
+        u64 seed = 0
     ) const;
 
     [[nodiscard]] ::libdet::Conns sample_conn(
@@ -77,9 +80,7 @@ public:
         std::size_t n_streams,
         double eps1,
         double eps2,
-        u64 seed = 0,
-        bool bra_weight = false,
-        const DetBatchView* include = nullptr
+        u64 seed = 0
     ) const;
 
     [[nodiscard]] Projections sample_project(
@@ -115,7 +116,7 @@ private:
     u32 nword_ = 0;
 
     mutable std::mutex screen_mutex_;
-    mutable std::shared_ptr<const Screen> screen_;
+    mutable std::shared_ptr<const ScreenTable> screen_table_;
     mutable std::mutex conn_cache_mutex_;
     mutable ConnCache conn_cache_;
     mutable std::mutex space_cache_mutex_;
@@ -124,11 +125,11 @@ private:
     void check_one(DetRef det, const char* where) const;
     void check_dets(DetBatchView dets, const char* where) const;
     static void check_eps(double eps);
-    static void check_window_eps(double eps1, double eps2);
+    static void check_sample_eps(double eps1, double eps2);
 
-    [[nodiscard]] std::shared_ptr<const Screen> screen(double cutoff) const;
+    [[nodiscard]] std::shared_ptr<const ScreenTable> screen_table(double cutoff) const;
     [[nodiscard]] static double max_abs(std::span<const double> values) noexcept;
-    [[nodiscard]] static double screen_cutoff(
+    [[nodiscard]] static double screen_table_cutoff(
         double eps,
         double max_scale
     ) noexcept;
@@ -136,19 +137,19 @@ private:
         DetBatchView kets
     ) const;
 
-    [[nodiscard]] std::shared_ptr<const Conns> build_conns(
+    [[nodiscard]] std::shared_ptr<const Conns> make_conns(
         DetRef ket,
         double eps,
-        const Screen* screen,
-        KetScratch& scratch
+        const ScreenTable* screen,
+        ElementScratch& element
     ) const;
 
-    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> ket_conns(
+    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> cached_conns(
         DetBatchView kets,
         double eps
     ) const;
 
-    [[nodiscard]] Projection project_impl(
+    [[nodiscard]] Projection project_internal(
         DetBatchView bras,
         DetBatchView kets,
         std::span<const double> scale,
@@ -177,7 +178,7 @@ inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
     if (this != &other) {
         ints_ = other.ints_;
         nword_ = other.nword_;
-        screen_.reset();
+        screen_table_.reset();
         conn_cache_ = ConnCache(nword_);
         space_cache_ = SpaceCache();
     }
@@ -187,14 +188,14 @@ inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
 inline Hamiltonian::Hamiltonian(Hamiltonian&& other) noexcept
     : ints_(std::move(other.ints_)),
       nword_(other.nword_),
-      screen_(std::move(other.screen_)),
+      screen_table_(std::move(other.screen_table_)),
       conn_cache_(other.nword_) {}
 
 inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
     if (this != &other) {
         ints_ = std::move(other.ints_);
         nword_ = other.nword_;
-        screen_ = std::move(other.screen_);
+        screen_table_ = std::move(other.screen_table_);
         conn_cache_ = ConnCache(nword_);
         space_cache_ = SpaceCache();
     }
@@ -242,7 +243,7 @@ inline void Hamiltonian::check_eps(double eps) {
     if (eps < 0.0) throw std::invalid_argument("eps must be nonnegative");
 }
 
-inline void Hamiltonian::check_window_eps(double eps1, double eps2) {
+inline void Hamiltonian::check_sample_eps(double eps1, double eps2) {
     check_eps(eps1);
     check_eps(eps2);
     if (eps2 > eps1) {
@@ -250,16 +251,16 @@ inline void Hamiltonian::check_window_eps(double eps1, double eps2) {
     }
 }
 
-inline std::shared_ptr<const Screen> Hamiltonian::screen(
+inline std::shared_ptr<const ScreenTable> Hamiltonian::screen_table(
     double cutoff
 ) const {
     if (cutoff <= 0.0 || !std::isfinite(cutoff)) return {};
 
     std::lock_guard<std::mutex> lock(screen_mutex_);
-    if (!screen_ || cutoff < screen_->cutoff()) {
-        screen_ = std::make_shared<Screen>(ints_, cutoff);
+    if (!screen_table_ || cutoff < screen_table_->base_eps()) {
+        screen_table_ = std::make_shared<ScreenTable>(ints_, cutoff);
     }
-    return screen_;
+    return screen_table_;
 }
 
 inline double Hamiltonian::max_abs(
@@ -270,7 +271,7 @@ inline double Hamiltonian::max_abs(
     return out;
 }
 
-inline double Hamiltonian::screen_cutoff(
+inline double Hamiltonian::screen_table_cutoff(
     double eps,
     double max_scale
 ) noexcept {
@@ -298,53 +299,28 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
     check_one(bra, "hij(bra)");
     check_one(ket, "hij(ket)");
 
-    const DetDiff ex = det_diff(bra, ket);
-    if (ex.deg > 2) return 0.0;
-    if (ex.deg == 0) return diag(ints_, bra);
+    const DetExcitation ex = excitation(ket, bra);
+    if (ex.degree > 2) return 0.0;
 
-    if (ex.deg == 1) {
-        return ex.na == 1
-            ? ex.sign * single_alpha(
-                ints_,
-                bra,
-                ex.occ_a[0],
-                ex.vir_a[0]
-            )
-            : ex.sign * single_beta(
-                ints_,
-                bra,
-                ex.occ_b[0],
-                ex.vir_b[0]
-            );
+    DetOcc occ(ints_.norb());
+    fill_occ(ket, ints_.norb(), occ);
+
+    if (ex.degree == 0) return diag(ints_, occ);
+
+    const Excitation& e = ex.excitation;
+    switch (e.kind) {
+    case ExcitationKind::alpha1:
+        return ex.sign * single_alpha(ints_, occ, e.i, e.a);
+    case ExcitationKind::beta1:
+        return ex.sign * single_beta(ints_, occ, e.i, e.a);
+    case ExcitationKind::alpha2:
+    case ExcitationKind::beta2:
+        return ex.sign * double_same(ints_, e.i, e.j, e.a, e.b);
+    case ExcitationKind::mixed2:
+        return ex.sign * double_mixed(ints_, e.i, e.j, e.a, e.b);
     }
 
-    if (ex.na == 2) {
-        return ex.sign * double_alpha(
-            ints_,
-            ex.occ_a[0],
-            ex.occ_a[1],
-            ex.vir_a[0],
-            ex.vir_a[1]
-        );
-    }
-    if (ex.nb == 2) {
-        return ex.sign * double_beta(
-            ints_,
-            ex.occ_b[0],
-            ex.occ_b[1],
-            ex.vir_b[0],
-            ex.vir_b[1]
-        );
-    }
-
-    return ex.sign * double_mixed(
-        ints_,
-        ex.occ_a[0],
-        ex.occ_b[0],
-        ex.vir_a[0],
-        ex.vir_b[0]
-    );
+    return 0.0;
 }
 
 } // namespace libdet::rhf
-

@@ -26,13 +26,14 @@ class MCState(VState):
         pi_theta(x) proportional to |psi_theta(x)|^2.
 
     Markov reference:
-        eta_alpha(x) proportional to |psi_theta(x)|^alpha.
+        Hamiltonian proposals use the degree-tilted law
+        ``|psi_theta(x)|^alpha s(x)``.
 
     Observation law:
-        x ~ eta_alpha, y ~ B(y|x).
+        Hamiltonian chains or blur use degree-tilted observed density.
 
-    The same ``screen_eps`` defines Hamiltonian proposal moves, observation
-    blur, and deterministic local-energy connections.
+    ``eps1`` defines Hamiltonian proposal, blur, and deterministic local
+    energy. ``eps2`` is the sampled weak-window lower cutoff.
     """
 
     model: Model
@@ -43,7 +44,8 @@ class MCState(VState):
 
     chain_init: str | Any = "hf"
 
-    screen_eps: float = 1.0e-3
+    eps1: float = 1.0e-3
+    eps2: float = 1.0e-6
     eloc_sample: int = 256
 
     @classmethod
@@ -55,13 +57,19 @@ class MCState(VState):
         sampler: MCSampler,
         key: jax.Array,
         chain_init: str | Any = "hf",
-        screen_eps: float = 1.0e-3,
+        eps1: float = 1.0e-3,
+        eps2: float = 1.0e-6,
         eloc_sample: int = 256,
     ) -> MCState:
         """Initialize a Monte Carlo variational state."""
-        screen_eps = float(screen_eps)
-        if screen_eps < 0.0:
-            raise ValueError("screen_eps must be nonnegative")
+        eps1 = float(eps1)
+        eps2 = float(eps2)
+        if eps1 < 0.0:
+            raise ValueError("eps1 must be nonnegative")
+        if eps2 < 0.0:
+            raise ValueError("eps2 must be nonnegative")
+        if eps2 > eps1:
+            raise ValueError("eps2 must be <= eps1")
 
         if not 0.0 <= float(sampler.blur) <= 1.0:
             raise ValueError("sampler.blur must satisfy 0 <= blur <= 1")
@@ -78,7 +86,7 @@ class MCState(VState):
             H,
             model,
             key=sample_key,
-            screen_eps=screen_eps,
+            eps1=eps1,
             chain_init=chain_init,
         )
 
@@ -89,7 +97,8 @@ class MCState(VState):
             sampler=sampler,
             sampler_state=sampler_state,
             chain_init=chain_init,
-            screen_eps=screen_eps,
+            eps1=eps1,
+            eps2=eps2,
             eloc_sample=int(eloc_sample),
         )
 
@@ -115,7 +124,7 @@ class MCState(VState):
                     self.H,
                     self.model,
                     key=sampler_state.key,
-                    screen_eps=float(self.screen_eps),
+                    eps1=float(self.eps1),
                     chain_init=self.chain_init,
                     alpha=(
                         float(sampler_state.alpha)
@@ -162,7 +171,7 @@ class MCState(VState):
             self.H,
             self.model,
             sampler_state,
-            screen_eps=float(self.screen_eps),
+            eps1=float(self.eps1),
         )
         alpha = float(sampler_state.alpha)
 
@@ -202,50 +211,42 @@ class MCState(VState):
                 sampler_state = replace(sampler_state, key=key)
 
         with timer("conns"):
-            weak = None
-            if self.eloc_sample > 0:
-                weak = self.H.sample_conn(
-                    ket,
-                    int(self.eloc_sample),
-                    eps1=float(self.screen_eps),
-                    eps2=0.0,
-                    seed=seed,
-                )
-                conn = self.H.conn(
-                    ket,
-                    float(self.screen_eps),
-                    include=np.asarray(weak.x, dtype=np.uint64),
-                )
-            else:
-                conn = self.H.conn(ket, float(self.screen_eps))
+            conn = self.H.local_conn(
+                ket,
+                float(self.eps1),
+                float(self.eps2),
+                int(self.eloc_sample),
+                seed=seed,
+            )
 
-            pool = np.asarray(conn.x, dtype=np.uint64)
+            pool = np.asarray(conn.bra, dtype=np.uint64)
 
-            strong_ptr = np.asarray(conn.ptr, dtype=np.int64)
-            strong_bra = np.asarray(conn.bra, dtype=np.int64)
-            strong_h = precision.asarray(np.asarray(conn.h), "calc", host=True)
+            strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
+            strong_bra = np.asarray(conn.strong_idx, dtype=np.int64)
+            strong_h = precision.asarray(np.asarray(conn.strong_h), "calc", host=True)
             strong_w = precision.asarray(
-                np.asarray(conn.weight),
+                np.asarray(conn.strong_degree),
                 "calc",
                 "real",
                 host=True,
             )
             diag = precision.asarray(np.asarray(conn.diag), "calc", host=True)
 
-            weak_ptr = None
-            weak_bra = None
-            weak_h = None
-            weak_w = None
-            if weak is not None:
-                weak_ptr = np.asarray(weak.ptr, dtype=np.int64)
-                weak_bra = np.asarray(weak.bra, dtype=np.int64)
-                weak_h = precision.asarray(np.asarray(weak.h), "calc", host=True)
-                weak_w = precision.asarray(
-                    np.asarray(weak.weight),
-                    "calc",
-                    "real",
-                    host=True,
-                )
+            weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
+            weak_bra = np.asarray(conn.weak_idx, dtype=np.int64)
+            weak_h = precision.asarray(np.asarray(conn.weak_h), "calc", host=True)
+            weak_count = precision.asarray(
+                np.asarray(conn.weak_count),
+                "calc",
+                "real",
+                host=True,
+            )
+            weak_w = precision.asarray(
+                np.asarray(conn.weak_degree),
+                "calc",
+                "real",
+                host=True,
+            )
 
         with timer("forward"):
             pool_logpsi_jax = utils.apply(
@@ -300,8 +301,9 @@ class MCState(VState):
                 eloc = eloc.astype(np.result_type(eloc, contribution), copy=False)
                 np.add.at(eloc, ket_idx, contribution)
 
-            # Observation density for identity and Hamiltonian blur.
-            if beta <= 0.0:
+            # Degree-tilted observed density for Hamiltonian chains or blur.
+            tilted_obs = self.sampler.proposal == "ham" or beta > 0.0
+            if not tilted_obs:
                 lognu = logrho
             else:
                 stay_scale = np.where(
@@ -316,7 +318,7 @@ class MCState(VState):
                     + logrho[nonzero]
                 )
 
-                if strong_h.size:
+                if beta > 0.0 and strong_h.size:
                     terms = (
                         alpha_r * pool_logabs[strong_bra]
                         + np.log(np.maximum(np.abs(strong_h), tiny))
@@ -335,14 +337,7 @@ class MCState(VState):
                     lognu = log_stay
 
             # Unbiased weak-window local energy correction.
-            if (
-                weak_ptr is not None
-                and weak_bra is not None
-                and weak_h is not None
-                and weak_w is not None
-                and weak_h.size
-                and int(self.eloc_sample) > 0
-            ):
+            if weak_h.size and int(self.eloc_sample) > 0:
                 weak_ket = np.repeat(
                     np.arange(n_ket, dtype=np.int64),
                     np.diff(weak_ptr),
@@ -361,7 +356,7 @@ class MCState(VState):
                     rdtype(int(self.eloc_sample)) * np.abs(weak_h),
                     tiny,
                 )
-                contribution = scale * weak_h * ratio
+                contribution = weak_count * scale * weak_h * ratio
                 eloc = eloc.astype(np.result_type(eloc, contribution), copy=False)
                 np.add.at(eloc, weak_ket, contribution)
 
@@ -444,7 +439,7 @@ class MCState(VState):
 
         n_sample = int(samples.shape[0])
         n_strong = int(strong_bra.size)
-        n_weak = 0 if weak_bra is None else int(weak_bra.size)
+        n_weak = int(weak_bra.size)
         n_forward_raw = n_ket + n_strong + n_weak
         forward_frac = float(pool.shape[0]) / max(1, n_forward_raw)
 

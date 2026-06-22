@@ -21,7 +21,7 @@ import utils as run_utils
 def main():
     # numerical defaults.
     dq_utils.batch.configure(chunk=8192)
-    dq_utils.precision.configure("double")
+    dq_utils.precision.configure("single")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
@@ -77,10 +77,10 @@ def main():
     model = RBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 
     sampler = MCSampler(
-        n_samples=1024,
-        n_chains=1024,
+        n_samples=4096,
+        n_chains=4096,
         thermal_steps=128,
-        proposal="ham",
+        proposal="single",
         blur=0.5,
     )
 
@@ -90,7 +90,7 @@ def main():
         sampler=sampler,
         chain_init="hf",
         key=jax.random.key(0),
-        screen_eps=1e-3,
+        eps1=1e-3,
         eloc_sample=1024,
     )
 

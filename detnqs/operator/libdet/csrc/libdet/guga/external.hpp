@@ -12,11 +12,14 @@
 
 #include <libdet/guga/hamiltonian.hpp>
 
-#if defined(_OPENMP)
 #include <omp.h>
-#endif
 
 namespace libdet::guga {
+
+[[nodiscard]] inline bool keep_h(double h, double eps) noexcept {
+    const double value = std::abs(h);
+    return value > 0.0 && value >= eps;
+}
 
 namespace detail {
 
@@ -36,53 +39,20 @@ struct ProjectBuffer {
 
 } // namespace detail
 
-struct KetScratch {
-    explicit KetScratch(int norb) : elem(norb) {}
-
-    ElementScratch elem;
-    PathScratch ket_scratch;
-    PathScratch bra_scratch;
-    PathState ket;
-    PathState bra;
-    std::vector<Step> steps;
-    std::vector<u64> words;
-    std::vector<unsigned char> occ;
-    std::vector<unsigned char> removed;
-
-    [[nodiscard]] PathRef encode(std::span<const Step> step, u32 nword) {
-        encode_path(step, nword, words);
-        return PathRef(words.data(), words.data() + static_cast<std::size_t>(nword), nword);
-    }
-};
-
 namespace detail {
 
 [[nodiscard]] inline bool apply_move(
     Occ ket,
-    const Move& move,
-    std::vector<unsigned char>& removed,
+    const OccMove& move,
+    std::vector<unsigned char>& work,
     std::vector<unsigned char>& occ
 ) {
-    if (move.degree == 1u) {
-        return move_one_occ(
-            ket,
-            static_cast<int>(move.remove[0]),
-            static_cast<int>(move.add[0]),
-            occ
-        );
+    if (move.degree == 1) {
+        return move_one_occ(ket, move.remove[0], move.add[0], occ);
     }
-    if (move.degree == 2u) {
-        return remove_pair_occ(
-            ket,
-            static_cast<int>(move.remove[0]),
-            static_cast<int>(move.remove[1]),
-            removed
-        ) && add_pair_occ(
-            removed,
-            static_cast<int>(move.add[0]),
-            static_cast<int>(move.add[1]),
-            occ
-        );
+    if (move.degree == 2) {
+        return remove_pair_occ(ket, move.remove[0], move.remove[1], work)
+            && add_pair_occ(work, move.add[0], move.add[1], occ);
     }
     return false;
 }
@@ -93,6 +63,7 @@ namespace detail {
 template <class Visit>
 inline void occ_paths_rec(
     std::span<const unsigned char> occ,
+    std::span<const int> suffix,
     int p,
     int norb,
     int spin,
@@ -100,8 +71,12 @@ inline void occ_paths_rec(
     std::vector<Step>& steps,
     Visit&& visit
 ) {
+    const int remain = suffix[static_cast<std::size_t>(p)];
+    const int need = target_spin - spin;
+    if (std::abs(need) > remain || ((remain - std::abs(need)) & 1) != 0) return;
+
     if (p == norb) {
-        if (spin == target_spin) visit(steps);
+        visit(steps);
         return;
     }
 
@@ -109,20 +84,20 @@ inline void occ_paths_rec(
     if (n == 0u || n == 2u) {
         steps[static_cast<std::size_t>(p)] = n == 0u ? Step::empty : Step::doubly;
         occ_paths_rec(
-            occ, p + 1, norb, spin, target_spin, steps, std::forward<Visit>(visit)
+            occ, suffix, p + 1, norb, spin, target_spin, steps, std::forward<Visit>(visit)
         );
         return;
     }
 
     steps[static_cast<std::size_t>(p)] = Step::up;
     occ_paths_rec(
-        occ, p + 1, norb, spin + 1, target_spin, steps, std::forward<Visit>(visit)
+        occ, suffix, p + 1, norb, spin + 1, target_spin, steps, std::forward<Visit>(visit)
     );
 
     if (spin > 0) {
         steps[static_cast<std::size_t>(p)] = Step::down;
         occ_paths_rec(
-            occ, p + 1, norb, spin - 1, target_spin, steps, std::forward<Visit>(visit)
+            occ, suffix, p + 1, norb, spin - 1, target_spin, steps, std::forward<Visit>(visit)
         );
     }
 }
@@ -132,101 +107,152 @@ inline void visit_occ_paths(
     std::span<const unsigned char> occ,
     Sector sector,
     std::vector<Step>& steps,
+    std::vector<int>& suffix,
     Visit&& visit
 ) {
     steps.resize(static_cast<std::size_t>(sector.norb));
+    suffix.assign(static_cast<std::size_t>(sector.norb + 1), 0);
+    for (int p = sector.norb - 1; p >= 0; --p) {
+        suffix[static_cast<std::size_t>(p)] = suffix[static_cast<std::size_t>(p + 1)]
+            + (occ[static_cast<std::size_t>(p)] == 1u ? 1 : 0);
+    }
     occ_paths_rec(
-        occ, 0, sector.norb, 0, sector.spin_twice, steps, std::forward<Visit>(visit)
+        occ, suffix, 0, sector.norb, 0, sector.spin_twice, steps, std::forward<Visit>(visit)
     );
 }
 
 template <class Emit>
-inline void visit_bras_state(
+inline void visit_external_state(
     KetScratch& scratch,
     const Integral& ints,
+    const Seg2Table& seg2,
     Sector sector,
-    const Screen& screen,
+    const ScreenTable* table,
     PathRef ket_words,
     const PathState& ket,
-    AbsWindow win,
+    double eps,
     bool include_diag,
     Emit&& emit
 ) {
-    if (win.hi <= win.lo) return;
+    scratch.elem.load_single(ints, ket);
 
     if (include_diag) {
-        const double h = hij(scratch.elem, ints, ket, ket, OccMove{});
-        if (in_window(h, win)) emit(ket_words, h);
+        const double h = diag(scratch.elem, seg2, ints, ket);
+        if (keep_h(h, eps)) emit(ket_words, h);
     }
 
     auto add_bra = [&](std::span<const Step> steps, const OccMove& move) {
         const PathRef bra_ref = scratch.encode(steps, sector.nword);
         if (path_equal(bra_ref, ket_words)) return;
 
-        load_path(steps, sector, "visit_bras(bra)", scratch.bra_scratch, scratch.bra);
-        const double h = hij(scratch.elem, ints, scratch.bra, ket, move);
-        if (in_window(h, win)) emit(bra_ref, h);
+        load_path(steps, sector, "visit_external(bra)", scratch.bra_work, scratch.bra);
+        const PathDiff diff = path_diff(ket, scratch.bra, move);
+        double h = 0.0;
+        if (move.degree == 0) {
+            h = same_ocfg(scratch.elem, seg2, ints, scratch.bra, ket, diff);
+        } else if (move.degree == 1) {
+            const int p = move.add[0];
+            const int q = move.remove[0];
+            h = single_move(scratch.elem, seg2, ints, scratch.bra, ket, diff, move, scratch.elem.single_coulomb(p, q));
+        } else {
+            h = double_move(scratch.elem, seg2, ints, scratch.bra, ket, diff, move);
+        }
+        if (keep_h(h, eps)) emit(bra_ref, h);
     };
 
     auto add_occ = [&](Occ occ, const OccMove& move) {
-        visit_occ_paths(occ, sector, scratch.steps, [&](const std::vector<Step>& steps) {
+        visit_occ_paths(occ, sector, scratch.step, scratch.suffix, [&](const std::vector<Step>& steps) {
             add_bra(std::span<const Step>(steps.data(), steps.size()), move);
         });
     };
 
-    if (win.lo == 0.0 || screen.same(ket.occ) >= win.lo) {
+    if (table == nullptr || eps == 0.0 || table->same_bound(ket) >= eps) {
         add_occ(ket.occ, OccMove{});
     }
 
-    for (const Move& move : screen.one(win.lo)) {
-        if (!detail::apply_move(ket.occ, move, scratch.removed, scratch.occ)) continue;
-        if (win.lo > 0.0 && screen.bound(ket.occ, move) < win.lo) continue;
-        add_occ(scratch.occ, move.occ_move());
+    auto add_move = [&](const OccMove& move) {
+        if (!detail::apply_move(ket.occ, move, scratch.work, scratch.occ)) return;
+        if (table != nullptr && eps > 0.0 && table->bound(ket, move) < eps) return;
+        add_occ(scratch.occ, move);
+    };
+
+    if (table != nullptr) {
+        for (const ScreenMove& cand : table->singles(eps)) add_move(cand.move);
+        for (const ScreenMove& cand : table->doubles(eps)) add_move(cand.move);
+        return;
     }
 
-    for (const Move& move : screen.two(win.lo)) {
-        if (!detail::apply_move(ket.occ, move, scratch.removed, scratch.occ)) continue;
-        if (win.lo > 0.0 && screen.bound(ket.occ, move) < win.lo) continue;
-        add_occ(scratch.occ, move.occ_move());
+    for (int q = 0; q < sector.norb; ++q) {
+        for (int p = 0; p < sector.norb; ++p) {
+            if (p == q) continue;
+            OccMove move;
+            move.degree = 1;
+            move.remove = {q, -1};
+            move.add = {p, -1};
+            add_move(move);
+        }
+    }
+
+    for (int q = 0; q < sector.norb; ++q) {
+        for (int s = q; s < sector.norb; ++s) {
+            for (int p = 0; p < sector.norb; ++p) {
+                for (int r = p; r < sector.norb; ++r) {
+                    if (p == q || p == s || r == q || r == s) continue;
+                    OccMove move;
+                    move.degree = 2;
+                    move.remove = {q, s};
+                    move.add = {p, r};
+                    add_move(move);
+                }
+            }
+        }
     }
 }
 
 template <class Emit>
-inline void visit_bras(
+inline void visit_external(
     KetScratch& scratch,
     const Integral& ints,
+    const Seg2Table& seg2,
     Sector sector,
-    const Screen& screen,
+    const ScreenTable* table,
     PathRef ket_words,
-    AbsWindow win,
+    double eps,
     bool include_diag,
     Emit&& emit
 ) {
-    decode_path(ket_words, sector, "visit_bras(ket)", scratch.ket_scratch, scratch.ket);
-    visit_bras_state(
+    decode_path(ket_words, sector, "visit_external(ket)", scratch.ket_work, scratch.ket);
+    visit_external_state(
         scratch,
         ints,
+        seg2,
         sector,
-        screen,
+        table,
         ket_words,
         scratch.ket,
-        win,
+        eps,
         include_diag,
         std::forward<Emit>(emit)
     );
 }
 
+} // namespace libdet::guga
+
+#include <libdet/guga/sample.hpp>
+
+namespace libdet::guga {
+
 inline double Hamiltonian::hij(PathRef bra, PathRef ket) const {
     check_one(bra, "hij(bra)");
     check_one(ket, "hij(ket)");
-    PathScratch bra_scratch;
-    PathScratch ket_scratch;
+    PathScratch bra_work;
+    PathScratch ket_work;
     PathState bra_state;
     PathState ket_state;
-    decode_path(bra, sector_, "hij(bra)", bra_scratch, bra_state);
-    decode_path(ket, sector_, "hij(ket)", ket_scratch, ket_state);
+    decode_path(bra, sector_, "hij(bra)", bra_work, bra_state);
+    decode_path(ket, sector_, "hij(ket)", ket_work, ket_state);
     ElementScratch elem_scratch(sector_.norb);
-    return guga::hij(elem_scratch, ints_, bra_state, ket_state);
+    return guga::hij(elem_scratch, seg2_, ints_, bra_state, ket_state);
 }
 
 inline std::vector<double> Hamiltonian::diags(PathBatchView paths) const {
@@ -238,31 +264,32 @@ inline std::vector<double> Hamiltonian::diags(PathBatchView paths) const {
     PathState item;
     for (std::size_t ipath = 0; ipath < paths.n_paths; ++ipath) {
         decode_path(paths[ipath], sector_, "diags", scratch, item);
-        out[ipath] = guga::hij(elem_scratch, ints_, item, item, OccMove{});
+        out[ipath] = guga::diag(elem_scratch, seg2_, ints_, item);
     }
     return out;
 }
 
-inline std::shared_ptr<const Conns> Hamiltonian::build_conns(
+inline std::shared_ptr<const Conns> Hamiltonian::make_conns(
     PathRef ket,
     double eps,
-    const Screen& screen,
+    const ScreenTable* table,
     KetScratch& scratch
 ) const {
     auto out = std::make_shared<Conns>();
     out->cutoff = eps;
 
-    decode_path(ket, sector_, "ket_conns(ket)", scratch.ket_scratch, scratch.ket);
-    out->diag = guga::hij(scratch.elem, ints_, scratch.ket, scratch.ket, OccMove{});
+    decode_path(ket, sector_, "cached_conns(ket)", scratch.ket_work, scratch.ket);
+    out->diag = guga::diag(scratch.elem, seg2_, ints_, scratch.ket);
 
-    visit_bras_state(
+    visit_external_state(
         scratch,
         ints_,
+        seg2_,
         sector_,
-        screen,
+        table,
         ket,
         scratch.ket,
-        AbsWindow{eps, std::numeric_limits<double>::infinity()},
+        eps,
         false,
         [&](PathRef bra, double h) {
             out->add(bra, h);
@@ -273,18 +300,23 @@ inline std::shared_ptr<const Conns> Hamiltonian::build_conns(
     return out;
 }
 
-inline std::shared_ptr<const Conns> Hamiltonian::ket_conns(
+inline std::shared_ptr<const Conns> Hamiltonian::cached_conns(
     PathRef ket,
     double eps
 ) const {
+    const auto screen_table_ptr = screen_table(eps);
+    if (eps <= 0.0) {
+        KetScratch scratch(sector_.norb);
+        return make_conns(ket, eps, screen_table_ptr.get(), scratch);
+    }
+
     {
         std::lock_guard<std::mutex> lock(conn_cache_mutex_);
         if (auto hit = conn_cache_.find(ket, eps)) return hit;
     }
 
-    const auto screen_ptr = screen(eps);
     KetScratch scratch(sector_.norb);
-    auto fresh = build_conns(ket, eps, *screen_ptr, scratch);
+    auto fresh = make_conns(ket, eps, screen_table_ptr.get(), scratch);
 
     std::lock_guard<std::mutex> lock(conn_cache_mutex_);
     if (auto hit = conn_cache_.find(ket, eps)) return hit;
@@ -293,11 +325,26 @@ inline std::shared_ptr<const Conns> Hamiltonian::ket_conns(
 }
 
 inline std::vector<std::shared_ptr<const Conns>>
-Hamiltonian::ket_conns(PathBatchView kets, double eps) const {
-    check_paths(kets, "ket_conns(kets)");
+Hamiltonian::cached_conns(PathBatchView kets, double eps) const {
+    check_paths(kets, "cached_conns(kets)");
     check_eps(eps);
 
+    const auto screen_table_ptr = screen_table(eps);
     std::vector<std::shared_ptr<const Conns>> out(kets.n_paths);
+
+    if (eps <= 0.0) {
+#pragma omp parallel
+        {
+            KetScratch scratch(sector_.norb);
+#pragma omp for schedule(guided)
+            for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
+                const std::size_t iket = static_cast<std::size_t>(ii);
+                out[iket] = make_conns(kets[iket], eps, screen_table_ptr.get(), scratch);
+            }
+        }
+        return out;
+    }
+
     std::vector<std::size_t> misses;
     misses.reserve(kets.n_paths);
 
@@ -310,30 +357,19 @@ Hamiltonian::ket_conns(PathBatchView kets, double eps) const {
     }
     if (misses.empty()) return out;
 
-    const auto screen_ptr = screen(eps);
-
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         KetScratch scratch(sector_.norb);
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(misses.size()); ++ii) {
             const std::size_t iket = misses[static_cast<std::size_t>(ii)];
-            out[iket] = build_conns(kets[iket], eps, *screen_ptr, scratch);
+            out[iket] = make_conns(kets[iket], eps, screen_table_ptr.get(), scratch);
         }
     }
-#else
-    KetScratch scratch(sector_.norb);
-    for (std::size_t iket : misses) {
-        out[iket] = build_conns(kets[iket], eps, *screen_ptr, scratch);
-    }
-#endif
 
     {
         std::lock_guard<std::mutex> lock(conn_cache_mutex_);
-        for (std::size_t iket : misses) {
-            conn_cache_.insert(kets[iket], out[iket]);
-        }
+        for (std::size_t iket : misses) conn_cache_.insert(kets[iket], out[iket]);
     }
     return out;
 }
@@ -355,17 +391,12 @@ inline std::vector<u64> Hamiltonian::expand(
     check_paths(base, "expand(exclude)");
     const PathIndex exclude_index(base);
     const double max_scale = scale.empty() ? 1.0 : max_abs(scale);
-    const auto screen_ptr = screen(screen_cutoff(eps, max_scale));
+    const auto screen_table_ptr = screen_table(screen_table_cutoff(eps, max_scale));
 
-#if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-#else
-    const int nthread = 1;
-#endif
 
     std::vector<std::vector<u64>> local(static_cast<std::size_t>(nthread));
 
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -375,23 +406,18 @@ inline std::vector<u64> Hamiltonian::expand(
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-    {
-        auto& words = local[0];
-        KetScratch scratch(sector_.norb);
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-#endif
             const double scale_i = scale.empty() ? 1.0 : std::abs(scale[iket]);
             if (scale_i == 0.0) continue;
 
-            const double lo = eps == 0.0 ? 0.0 : eps / scale_i;
-            visit_bras(
+            const double h_eps = eps == 0.0 ? 0.0 : eps / scale_i;
+            visit_external(
                 scratch,
                 ints_,
+                seg2_,
                 sector_,
-                *screen_ptr,
+                screen_table_ptr.get(),
                 kets[iket],
-                AbsWindow{lo, std::numeric_limits<double>::infinity()},
+                h_eps,
                 false,
                 [&](PathRef bra, double) {
                     if (exclude_index.find(bra) < 0) append_path(words, bra);
@@ -422,19 +448,14 @@ inline Projection Hamiltonian::project(
     check_paths(base, "project(exclude)");
     const PathIndex exclude_index(base);
     const double max_scale = scale.empty() ? 1.0 : max_abs(scale);
-    const auto screen_ptr = screen(screen_cutoff(eps, max_scale));
+    const auto screen_table_ptr = screen_table(screen_table_cutoff(eps, max_scale));
 
-#if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-#else
-    const int nthread = 1;
-#endif
 
     std::vector<detail::ProjectBuffer> local;
     local.reserve(static_cast<std::size_t>(nthread));
     for (int t = 0; t < nthread; ++t) local.emplace_back(sector_.nword);
 
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -444,24 +465,19 @@ inline Projection Hamiltonian::project(
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-    {
-        auto& part = local[0];
-        KetScratch scratch(sector_.norb);
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-#endif
             const double scale_i = scale[iket];
             const double abs_scale = std::abs(scale_i);
             if (abs_scale == 0.0) continue;
 
-            const double lo = eps == 0.0 ? 0.0 : eps / abs_scale;
-            visit_bras(
+            const double h_eps = eps == 0.0 ? 0.0 : eps / abs_scale;
+            visit_external(
                 scratch,
                 ints_,
+                seg2_,
                 sector_,
-                *screen_ptr,
+                screen_table_ptr.get(),
                 kets[iket],
-                AbsWindow{lo, std::numeric_limits<double>::infinity()},
+                h_eps,
                 false,
                 [&](PathRef bra, double h) {
                     if (exclude_index.find(bra) >= 0) return;
@@ -514,51 +530,36 @@ inline Projection Hamiltonian::project(
 
 inline ::libdet::Conns Hamiltonian::conn(
     PathBatchView kets,
-    double eps,
-    const PathBatchView* include
+    double eps
 ) const {
     check_paths(kets, "conn(kets)");
     check_eps(eps);
 
-    if (include != nullptr) {
-        check_paths(*include, "conn(include)");
-        if (include->n_paths < kets.n_paths) {
-            throw std::invalid_argument("conn: include must start with kets");
-        }
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-            if (!path_equal((*include)[iket], kets[iket])) {
-                throw std::invalid_argument("conn: include must start with kets");
-            }
-        }
-    }
-
-    const auto all = ket_conns(kets, eps);
+    const auto all = cached_conns(kets, eps);
 
     ::libdet::Conns out;
     out.nword = sector_.nword;
     out.n_kets = kets.n_paths;
     out.diag.reserve(kets.n_paths);
-    out.weight.reserve(kets.n_paths);
+    out.degree.reserve(kets.n_paths);
     out.ptr.assign(1, 0);
 
-    PathPool pool(include == nullptr ? kets : *include);
+    PathPool pool(kets);
 
     for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
         const Conns& ket_conn = *all[iket];
-        double weight = 0.0;
-
         out.diag.push_back(ket_conn.diag);
 
-        const ConnWindow win = ket_conn.window(AbsWindow{eps, std::numeric_limits<double>::infinity()});
-        weight = win.weight;
+        const ConnSpan win = ket_conn.span(std::numeric_limits<double>::infinity(), eps);
+        const double degree = win.degree;
         for (std::size_t k = win.begin; k < win.end; ++k) {
             const PathRef bra = ket_conn.bra(k, sector_.nword);
-            out.bra.push_back(pool.find_or_add(bra));
+            out.idx.push_back(pool.find_or_add(bra));
             out.h.push_back(ket_conn.h[k]);
         }
 
-        out.weight.push_back(weight);
-        out.ptr.push_back(to_i32(out.bra.size()));
+        out.degree.push_back(degree);
+        out.ptr.push_back(to_i32(out.idx.size()));
     }
 
     out.bra_words = std::move(pool.words());

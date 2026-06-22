@@ -104,7 +104,7 @@ def main():
         sampler=sampler,
         chain_init="random",
         key=jax.random.key(0),
-        screen_eps=1e-3,
+        eps1=1e-3,
     )
 
     optimizer = optax.chain(

@@ -25,7 +25,11 @@ class Chains:
 
 @dataclass(frozen=True, slots=True)
 class MCSampler:
-    """Metropolis sampler for Fock-space chains."""
+    """Metropolis sampler for Fock-space chains.
+
+    Hamiltonian proposals target the degree-tilted law
+    ``rho_alpha(x) s(x)``, so no reverse ket degree is needed.
+    """
 
     n_samples: int = 1024
     n_chains: int = 1024
@@ -53,7 +57,7 @@ class MCSampler:
         model: Any,
         *,
         key: jax.Array,
-        screen_eps: float,
+        eps1: float,
         chain_init: str | Any = "hf",
         alpha: float | None = None,
         alpha_step: int = 0,
@@ -111,7 +115,7 @@ class MCSampler:
         )
 
         for _ in range(max(0, int(self.thermal_steps))):
-            state, _, _, _ = self._step(theta, H, model, state, screen_eps=screen_eps)
+            state, _, _, _ = self._step(theta, H, model, state, eps1=eps1)
 
         return state
 
@@ -122,7 +126,7 @@ class MCSampler:
         model: Any,
         state: Chains,
         *,
-        screen_eps: float,
+        eps1: float,
     ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, float]]:
         """Advance chains and return observed configurations.
 
@@ -152,7 +156,7 @@ class MCSampler:
                 H,
                 model,
                 state,
-                screen_eps=screen_eps,
+                eps1=eps1,
                 timer=timer,
             )
             accepted += info["accepted"]
@@ -172,7 +176,7 @@ class MCSampler:
                 H,
                 model,
                 state,
-                screen_eps=screen_eps,
+                eps1=eps1,
                 n_observe=take,
                 timer=timer,
             )
@@ -191,7 +195,7 @@ class MCSampler:
                     H,
                     model,
                     state,
-                    screen_eps=screen_eps,
+                    eps1=eps1,
                     timer=timer,
                 )
                 accepted += info["accepted"]
@@ -213,7 +217,7 @@ class MCSampler:
         model: Any,
         state: Chains,
         *,
-        screen_eps: float,
+        eps1: float,
         n_observe: int = 0,
         timer: utils.Timer | None = None,
     ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, int]]:
@@ -260,12 +264,11 @@ class MCSampler:
         candidate = np.ascontiguousarray(state.x.copy())
         active = np.zeros(n_chain, dtype=bool)
         candidate_pos = np.full(n_chain, -1, dtype=np.int64)
-        log_q = np.zeros(n_chain, dtype=rdtype)
 
-        conn_x = None
-        conn_ptr = None
         conn_bra = None
-        conn_weight = None
+        conn_ptr = None
+        conn_idx = None
+        conn_degree = None
         n_conn = 0
 
         if self.proposal == "ham":
@@ -285,19 +288,12 @@ class MCSampler:
                     ket,
                     np.ascontiguousarray(counts),
                     eps1=np.inf,
-                    eps2=float(screen_eps),
+                    eps2=float(eps1),
                     seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
-                    bra_weight=True,
                 )
-                conn_x = np.asarray(conn.x, dtype=np.uint64)
+                conn_bra = np.asarray(conn.bra, dtype=np.uint64)
                 conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
-                conn_bra = np.asarray(conn.bra, dtype=np.int64)
-                conn_weight = precision.asarray(
-                    np.asarray(conn.weight),
-                    "calc",
-                    "real",
-                    host=True,
-                )
+                conn_idx = np.asarray(conn.idx, dtype=np.int64)
                 n_conn = int(np.asarray(conn.h).size)
 
             with timer("sample"):
@@ -310,18 +306,11 @@ class MCSampler:
 
                 records = np.arange(proposal_ptr[0], proposal_ptr[-1], dtype=np.int64)
                 if records.size:
-                    candidate[active_order] = conn_x[conn_bra[records]]
-                    candidate_pos[active_order] = conn_bra[records]
+                    candidate[active_order] = conn_bra[conn_idx[records]]
+                    candidate_pos[active_order] = conn_idx[records]
 
                 active = candidate_pos >= 0
-                if active.any():
-                    tiny = rdtype(precision.tiny("calc"))
-                    ket_w = conn_weight[ket_index[active]]
-                    bra_w = conn_weight[candidate_pos[active]]
-                    log_q[active] = (
-                        np.log(np.maximum(ket_w, tiny))
-                        - np.log(np.maximum(bra_w, tiny))
-                    )
+                # Degree-tilted target cancels the heat-bath ket degree.
 
         else:
             with timer("sample"):
@@ -381,14 +370,14 @@ class MCSampler:
                         ket,
                         np.ascontiguousarray(blur_counts),
                         eps1=np.inf,
-                        eps2=float(screen_eps),
+                        eps2=float(eps1),
                         seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
                     )
-                    conn_x = np.asarray(conn.x, dtype=np.uint64)
+                    conn_bra = np.asarray(conn.bra, dtype=np.uint64)
                     conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
-                    conn_bra = np.asarray(conn.bra, dtype=np.int64)
-                    conn_weight = precision.asarray(
-                        np.asarray(conn.weight),
+                    conn_idx = np.asarray(conn.idx, dtype=np.int64)
+                    conn_degree = precision.asarray(
+                        np.asarray(conn.degree),
                         "calc",
                         "real",
                         host=True,
@@ -409,14 +398,16 @@ class MCSampler:
 
                     records = np.arange(blur_ptr[0], blur_ptr[-1], dtype=np.int64)
                     if records.size:
-                        observed[active_pick] = conn_x[conn_bra[records]]
+                        observed[active_pick] = conn_bra[conn_idx[records]]
 
-                obs_weight = conn_weight[obs_ket]
-                obs_mass = np.where(
-                    obs_weight > 0.0,
-                    obs_weight,
-                    rdtype(1.0),
-                )
+                if self.proposal != "ham":
+                    # Single-move chains need the blur degree as sample mass.
+                    obs_degree = conn_degree[obs_ket]
+                    obs_mass = np.where(
+                        obs_degree > 0.0,
+                        obs_degree,
+                        rdtype(1.0),
+                    )
 
         proposed = int(np.count_nonzero(active))
         accepted = 0
@@ -427,7 +418,7 @@ class MCSampler:
             logabs_candidate[~active] = state.logabs[~active]
 
             if self.proposal == "ham":
-                pool_logabs = np.empty(conn_x.shape[0], dtype=rdtype)
+                pool_logabs = np.empty(conn_bra.shape[0], dtype=rdtype)
                 pool_logabs[:n_ket] = ket_logabs
 
                 needed = np.unique(candidate_pos[active])
@@ -437,7 +428,7 @@ class MCSampler:
                         value = utils.apply(
                             model.logabs,
                             theta,
-                            np.ascontiguousarray(conn_x[new]),
+                            np.ascontiguousarray(conn_bra[new]),
                         )
                         jax.block_until_ready(value)
 
@@ -483,9 +474,8 @@ class MCSampler:
                 logabs_candidate[active] = unique_logabs[inverse]
 
             with timer("sample"):
-                log_accept = (
-                    rdtype(state.alpha) * (logabs_candidate - state.logabs)
-                    + log_q
+                log_accept = rdtype(state.alpha) * (
+                    logabs_candidate - state.logabs
                 )
                 accept = active & (
                     np.log(rng.random(n_chain)) < np.minimum(rdtype(0.0), log_accept)

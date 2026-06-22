@@ -13,6 +13,7 @@
 #include <ankerl/unordered_dense.h>
 
 #include <libdet/bit.hpp>
+#include <libdet/hash.hpp>
 
 namespace libdet::rhf {
 
@@ -256,52 +257,35 @@ struct DetLess {
     }
 };
 
-[[nodiscard]] inline u64 splitmix64(u64 x) noexcept {
-    x += 0x9e3779b97f4a7c15ULL;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
-}
-
-[[nodiscard]] inline u64 hash_words(u64 seed, std::span<const u64> words) noexcept {
-    u64 h = splitmix64(seed ^ (0x9e3779b97f4a7c15ULL + static_cast<u64>(words.size())));
-
-    for (u64 x : words) {
-        h = splitmix64(h ^ splitmix64(x + 0x517cc1b727220a95ULL));
-    }
-
-    return h;
-}
-
 struct DetHash {
     [[nodiscard]] std::size_t operator()(DetRef det) const noexcept {
         if (det.nword() == 1) {
             const u64 h =
                 det.alpha()[0]
-                ^ splitmix64(det.beta()[0] + 0x517cc1b727220a95ULL);
+                ^ mix64(det.beta()[0] + 0x517cc1b727220a95ULL);
 
-            return static_cast<std::size_t>(splitmix64(h));
+            return static_cast<std::size_t>(mix64(h));
         }
 
         u64 h = 0x9e3779b97f4a7c15ULL ^ static_cast<u64>(det.nword());
 
-        for (u64 x : det.alpha()) h = splitmix64(h ^ x);
-        for (u64 x : det.beta()) h = splitmix64(h ^ (x + 0x517cc1b727220a95ULL));
+        for (u64 x : det.alpha()) h = mix64(h ^ x);
+        for (u64 x : det.beta()) h = mix64(h ^ (x + 0x517cc1b727220a95ULL));
 
         return static_cast<std::size_t>(h);
     }
 };
 
 [[nodiscard]] inline u64 det_fingerprint(DetRef det, u64 seed = 0) noexcept {
-    u64 h = splitmix64(seed ^ 0x6465746b65747331ULL);
+    u64 h = mix64(seed ^ 0x6465746b65747331ULL);
 
     if (det.nword() == 1) {
-        h = splitmix64(h ^ det.alpha()[0]);
-        return splitmix64(h ^ (det.beta()[0] + 0x517cc1b727220a95ULL));
+        h = mix64(h ^ det.alpha()[0]);
+        return mix64(h ^ (det.beta()[0] + 0x517cc1b727220a95ULL));
     }
 
-    for (u64 x : det.alpha()) h = splitmix64(h ^ x);
-    for (u64 x : det.beta()) h = splitmix64(h ^ (x + 0x517cc1b727220a95ULL));
+    for (u64 x : det.alpha()) h = mix64(h ^ x);
+    for (u64 x : det.beta()) h = mix64(h ^ (x + 0x517cc1b727220a95ULL));
 
     return h;
 }
@@ -345,8 +329,6 @@ inline void sort_unique_dets(std::vector<u64>& packed, u32 nword) {
 
     packed.swap(out);
 }
-
-namespace detail {
 
 [[nodiscard]] inline double sign_single(std::span<const u64> occ, int i, int a) noexcept {
     return bits::parity_between(occ, i, a) ? -1.0 : 1.0;
@@ -414,18 +396,11 @@ namespace detail {
     return (p & 1) ? -1.0 : 1.0;
 }
 
-} // namespace detail
-
-struct DetDiff {
-    int deg = 0;
+struct DetExcitation {
+    int degree = 0;
     int na = 0;
     int nb = 0;
-
-    std::array<int, 2> occ_a{0, 0};
-    std::array<int, 2> vir_a{0, 0};
-    std::array<int, 2> occ_b{0, 0};
-    std::array<int, 2> vir_b{0, 0};
-
+    Excitation excitation{};
     double sign = 1.0;
 };
 
@@ -470,78 +445,90 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     bits::fill_prefix(det.beta(), norb, work.pref_b);
 }
 
-[[nodiscard]] inline DetDiff det_diff(DetRef bra, DetRef ket) noexcept {
-    DetDiff ex;
+[[nodiscard]] inline DetExcitation excitation(DetRef ket, DetRef bra) noexcept {
+    DetExcitation ex;
 
-    const int dx_a = bits::popcount_xor(bra.alpha(), ket.alpha());
-    const int dx_b = bits::popcount_xor(bra.beta(), ket.beta());
+    const int dx_a = bits::popcount_xor(ket.alpha(), bra.alpha());
+    const int dx_b = bits::popcount_xor(ket.beta(), bra.beta());
 
     if ((dx_a & 1) || (dx_b & 1)) {
-        ex.deg = 3;
+        ex.degree = 3;
         return ex;
     }
 
     ex.na = dx_a >> 1;
     ex.nb = dx_b >> 1;
-    ex.deg = ex.na + ex.nb;
+    ex.degree = ex.na + ex.nb;
 
-    if (ex.deg > 2) return ex;
+    if (ex.degree > 2) return ex;
+
+    std::array<int, 2> rem_a{0, 0};
+    std::array<int, 2> add_a{0, 0};
+    std::array<int, 2> rem_b{0, 0};
+    std::array<int, 2> add_b{0, 0};
 
     auto fill_one = [](
-        std::span<const u64> bra_bits,
         std::span<const u64> ket_bits,
-        std::array<int, 2>& occ,
-        std::array<int, 2>& vir,
+        std::span<const u64> bra_bits,
+        std::array<int, 2>& rem,
+        std::array<int, 2>& add,
         int n
     ) {
-        int io = 0;
-        int iv = 0;
+        int ir = 0;
+        int ia = 0;
 
-        for (std::size_t w = 0; w < bra_bits.size(); ++w) {
-            u64 gone = bra_bits[w] & ~ket_bits[w];
-            u64 come = ket_bits[w] & ~bra_bits[w];
+        for (std::size_t w = 0; w < ket_bits.size(); ++w) {
+            u64 gone = ket_bits[w] & ~bra_bits[w];
+            u64 come = bra_bits[w] & ~ket_bits[w];
 
-            while (gone != 0u && io < n) {
+            while (gone != 0u && ir < n) {
                 const unsigned b = std::countr_zero(gone);
-                occ[io++] = static_cast<int>((w << 6) + b);
+                rem[ir++] = static_cast<int>((w << 6) + b);
                 gone &= (gone - 1u);
             }
 
-            while (come != 0u && iv < n) {
+            while (come != 0u && ia < n) {
                 const unsigned b = std::countr_zero(come);
-                vir[iv++] = static_cast<int>((w << 6) + b);
+                add[ia++] = static_cast<int>((w << 6) + b);
                 come &= (come - 1u);
             }
         }
     };
 
-    fill_one(bra.alpha(), ket.alpha(), ex.occ_a, ex.vir_a, ex.na);
-    fill_one(bra.beta(), ket.beta(), ex.occ_b, ex.vir_b, ex.nb);
+    fill_one(ket.alpha(), bra.alpha(), rem_a, add_a, ex.na);
+    fill_one(ket.beta(), bra.beta(), rem_b, add_b, ex.nb);
 
-    if (ex.deg == 1) {
-        ex.sign = ex.na == 1
-            ? detail::sign_single(bra.alpha(), ex.occ_a[0], ex.vir_a[0])
-            : detail::sign_single(bra.beta(), ex.occ_b[0], ex.vir_b[0]);
+    if (ex.degree == 1) {
+        if (ex.na == 1) {
+            ex.excitation = alpha1(rem_a[0], add_a[0]);
+            ex.sign = sign_single(ket.alpha(), rem_a[0], add_a[0]);
+        } else {
+            ex.excitation = beta1(rem_b[0], add_b[0]);
+            ex.sign = sign_single(ket.beta(), rem_b[0], add_b[0]);
+        }
     } else if (ex.na == 2) {
-        ex.sign = detail::sign_double(
-            bra.alpha(),
-            ex.occ_a[0],
-            ex.occ_a[1],
-            ex.vir_a[0],
-            ex.vir_a[1]
+        ex.excitation = alpha2(rem_a[0], rem_a[1], add_a[0], add_a[1]);
+        ex.sign = sign_double(
+            ket.alpha(),
+            rem_a[0],
+            rem_a[1],
+            add_a[0],
+            add_a[1]
         );
     } else if (ex.nb == 2) {
-        ex.sign = detail::sign_double(
-            bra.beta(),
-            ex.occ_b[0],
-            ex.occ_b[1],
-            ex.vir_b[0],
-            ex.vir_b[1]
+        ex.excitation = beta2(rem_b[0], rem_b[1], add_b[0], add_b[1]);
+        ex.sign = sign_double(
+            ket.beta(),
+            rem_b[0],
+            rem_b[1],
+            add_b[0],
+            add_b[1]
         );
-    } else if (ex.deg == 2) {
+    } else if (ex.degree == 2) {
+        ex.excitation = mixed2(rem_a[0], rem_b[0], add_a[0], add_b[0]);
         ex.sign =
-            detail::sign_single(bra.alpha(), ex.occ_a[0], ex.vir_a[0])
-            * detail::sign_single(bra.beta(), ex.occ_b[0], ex.vir_b[0]);
+            sign_single(ket.alpha(), rem_a[0], add_a[0])
+            * sign_single(ket.beta(), rem_b[0], add_b[0]);
     }
 
     return ex;
@@ -581,9 +568,9 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
         }
 
         if (ex.deg == 1) {
-            ex.sign = detail::sign_single(bra_bits, ex.occ[0], ex.vir[0]);
+            ex.sign = sign_single(bra_bits, ex.occ[0], ex.vir[0]);
         } else if (ex.deg == 2) {
-            ex.sign = detail::sign_double(
+            ex.sign = sign_double(
                 bra_bits,
                 ex.occ[0],
                 ex.occ[1],
@@ -626,9 +613,9 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
     }
 
     if (ex.deg == 1) {
-        ex.sign = detail::sign_single(bra_bits, ex.occ[0], ex.vir[0]);
+        ex.sign = sign_single(bra_bits, ex.occ[0], ex.vir[0]);
     } else if (ex.deg == 2) {
-        ex.sign = detail::sign_double(
+        ex.sign = sign_double(
             bra_bits,
             ex.occ[0],
             ex.occ[1],
@@ -645,51 +632,42 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
 class DetIndex {
 public:
     explicit DetIndex(DetBatchView dets) : dets_(dets) {
-        std::size_t capacity = 8;
-        while (capacity < dets.n_dets * 2u + 1u) capacity <<= 1u;
-
-        slots_.assign(capacity, -1);
-        mask_ = capacity - 1u;
+        index_.reserve(dets.n_dets);
         for (std::size_t i = 0; i < dets.n_dets; ++i) {
             insert(static_cast<i32>(i));
         }
     }
 
     [[nodiscard]] i32 find(DetRef det) const noexcept {
-        std::size_t slot = DetHash{}(det) & mask_;
-        for (;;) {
-            const i32 idx = slots_[slot];
-            if (idx < 0) return -1;
+        const auto it = index_.find(det_fingerprint(det));
+        if (it == index_.end()) return -1;
+
+        for (i32 idx : it->second) {
             if (det_equal(dets_[static_cast<std::size_t>(idx)], det)) {
                 return idx;
             }
-            slot = (slot + 1u) & mask_;
         }
+
+        return -1;
     }
 
 private:
     DetBatchView dets_;
-    std::vector<i32> slots_;
-    std::size_t mask_ = 0;
+    ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
 
     void insert(i32 idx) {
-        std::size_t slot =
-            DetHash{}(dets_[static_cast<std::size_t>(idx)]) & mask_;
-        while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
-        slots_[slot] = idx;
+        index_[det_fingerprint(dets_[static_cast<std::size_t>(idx)])].push_back(idx);
     }
 };
 
 // Owning determinant pool with stable integer indices.
 class DetPool {
 public:
-    explicit DetPool(u32 nword = 0) : nword_(nword) {
-        rehash(8);
-    }
+    explicit DetPool(u32 nword = 0) : nword_(nword) {}
 
     explicit DetPool(DetBatchView dets) : nword_(dets.nword) {
         copy_batch(words_, dets);
-        rehash(std::max<std::size_t>(8, dets.n_dets * 2u + 1u));
+        build_index();
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -709,42 +687,32 @@ public:
     }
 
     [[nodiscard]] i32 find_or_add(DetRef det) {
-        if ((size() + 1u) * 2u >= slots_.size()) {
-            rehash(slots_.size() * 2u);
+        const u64 fingerprint = det_fingerprint(det);
+        const auto it = index_.find(fingerprint);
+        if (it != index_.end()) {
+            for (i32 idx : it->second) {
+                if (det_equal(get(static_cast<std::size_t>(idx)), det)) {
+                    return idx;
+                }
+            }
         }
 
-        std::size_t slot = DetHash{}(det) & mask_;
-        for (;;) {
-            const i32 idx = slots_[slot];
-            if (idx < 0) {
-                const i32 fresh = to_i32(size());
-                append_det(words_, det);
-                slots_[slot] = fresh;
-                return fresh;
-            }
-            if (det_equal(get(static_cast<std::size_t>(idx)), det)) {
-                return idx;
-            }
-            slot = (slot + 1u) & mask_;
-        }
+        const i32 fresh = to_i32(size());
+        append_det(words_, det);
+        index_[fingerprint].push_back(fresh);
+        return fresh;
     }
 
 private:
     u32 nword_ = 0;
     std::vector<u64> words_;
-    std::vector<i32> slots_;
-    std::size_t mask_ = 0;
+    ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
 
-    void rehash(std::size_t capacity) {
-        std::size_t size = 8;
-        while (size < capacity) size <<= 1u;
-        slots_.assign(size, -1);
-        mask_ = size - 1u;
-
-        for (std::size_t i = 0; i < this->size(); ++i) {
-            std::size_t slot = DetHash{}(get(i)) & mask_;
-            while (slots_[slot] >= 0) slot = (slot + 1u) & mask_;
-            slots_[slot] = static_cast<i32>(i);
+    void build_index() {
+        index_.clear();
+        index_.reserve(size());
+        for (std::size_t i = 0; i < size(); ++i) {
+            index_[det_fingerprint(get(i))].push_back(static_cast<i32>(i));
         }
     }
 };
@@ -759,7 +727,7 @@ private:
  */
 
 [[nodiscard]] inline u64 orb_fp(int p) noexcept {
-    return splitmix64(0xd1b54a32d192ed03ULL ^ static_cast<u64>(p + 1));
+    return mix64(0xd1b54a32d192ed03ULL ^ static_cast<u64>(p + 1));
 }
 
 [[nodiscard]] inline u64 spin_fp(std::span<const u64> words) noexcept {

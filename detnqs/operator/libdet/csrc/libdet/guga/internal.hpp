@@ -10,15 +10,13 @@
 
 #include <libdet/guga/hamiltonian.hpp>
 
-#if defined(_OPENMP)
 #include <omp.h>
-#endif
 
 namespace libdet::guga {
 
 namespace detail {
 
-struct MatTerm {
+struct Term {
     i32 ibra = 0;
     i32 iket = 0;
     double h = 0.0;
@@ -38,16 +36,16 @@ inline Projection Hamiltonian::project(
         throw std::invalid_argument("project: scale size must match kets");
     }
     check_eps(eps);
-    return project_impl(bras, kets, scale, eps);
+    return project_internal(bras, kets, scale, eps);
 }
 
-inline Projection Hamiltonian::project_impl(
+inline Projection Hamiltonian::project_internal(
     PathBatchView bras,
     PathBatchView kets,
     std::span<const double> scale,
     double eps
 ) const {
-    const auto path_space = cached_space(bras);
+    const PathSpace path_space(bras, sector_);
 
     Projection out;
     out.nword = sector_.nword;
@@ -55,19 +53,14 @@ inline Projection Hamiltonian::project_impl(
     out.diags = diags(bras);
 
     const double max_scale = eps == 0.0 ? 0.0 : max_abs(scale);
-    const auto screen_ptr = (eps > 0.0 && max_scale > 0.0)
-        ? screen(screen_cutoff(eps, max_scale))
-        : std::shared_ptr<const Screen>{};
+    const auto screen_table_ptr = (eps > 0.0 && max_scale > 0.0)
+        ? screen_table(screen_table_cutoff(eps, max_scale))
+        : std::shared_ptr<const ScreenTable>{};
 
-#if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-#else
-    const int nthread = 1;
-#endif
     const std::size_t stride = bras.n_paths;
     std::vector<double> local(static_cast<std::size_t>(nthread) * stride, 0.0);
 
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -80,32 +73,36 @@ inline Projection Hamiltonian::project_impl(
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-    {
-        double* hpsi = local.data();
-        PathScratch ket_scratch;
-        ElementScratch elem_scratch(sector_.norb);
-        PathState ket;
-        VisitScratch visit_scratch;
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-#endif
-            const double coeff = scale[iket];
-            if (coeff == 0.0) continue;
+            const double s = scale[iket];
+            if (s == 0.0) continue;
 
-            const double lo = eps == 0.0 ? 0.0 : eps / std::abs(coeff);
+            const double h_eps = eps == 0.0 ? 0.0 : eps / std::abs(s);
             decode_path(kets[iket], sector_, "project(ket)", ket_scratch, ket);
-            path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
-                const PathState& bra = path_space->state(ibra);
-                if (screen_ptr) {
+            elem_scratch.load_single(ints_, ket);
+            path_space.visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
+                const PathState& bra = path_space.state(ibra);
+                if (screen_table_ptr) {
                     if (move.degree == 0) {
-                        if (!same_path(bra, ket) && screen_ptr->same(ket.occ) < lo) return;
-                    } else if (screen_ptr->bound(ket.occ, Move::from(move)) < lo) {
+                        if (!same_path(bra, ket) && screen_table_ptr->same_bound(ket) < h_eps) return;
+                    } else if (screen_table_ptr->bound(ket, move) < h_eps) {
                         return;
                     }
                 }
 
-                const double h = guga::hij(elem_scratch, ints_, bra, ket, move);
-                const double term = h * coeff;
+                const PathDiff diff = path_diff(ket, bra, move);
+                double h = 0.0;
+                if (move.degree == 0) {
+                    h = diff.same_path()
+                        ? diag(elem_scratch, seg2_, ints_, ket)
+                        : same_ocfg(elem_scratch, seg2_, ints_, bra, ket, diff);
+                } else if (move.degree == 1) {
+                    const int p = move.add[0];
+                    const int q = move.remove[0];
+                    h = single_move(elem_scratch, seg2_, ints_, bra, ket, diff, move, elem_scratch.single_coulomb(p, q));
+                } else {
+                    h = double_move(elem_scratch, seg2_, ints_, bra, ket, diff, move);
+                }
+                const double term = h * s;
                 if (term != 0.0 && std::abs(term) >= eps) {
                     hpsi[static_cast<std::size_t>(ibra)] += term;
                 }
@@ -125,16 +122,11 @@ inline Matrix Hamiltonian::matrix(PathBatchView bras, PathBatchView kets) const 
     check_paths(bras, "matrix(bras)");
     check_paths(kets, "matrix(kets)");
 
-    const auto path_space = cached_space(bras);
+    const PathSpace path_space(bras, sector_);
 
-#if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-#else
-    const int nthread = 1;
-#endif
-    std::vector<std::vector<detail::MatTerm>> local(static_cast<std::size_t>(nthread));
+    std::vector<std::vector<detail::Term>> local(static_cast<std::size_t>(nthread));
 
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -147,18 +139,23 @@ inline Matrix Hamiltonian::matrix(PathBatchView bras, PathBatchView kets) const 
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-    {
-        auto& terms = local[0];
-        PathScratch ket_scratch;
-        ElementScratch elem_scratch(sector_.norb);
-        PathState ket;
-        VisitScratch visit_scratch;
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-#endif
             decode_path(kets[iket], sector_, "matrix(ket)", ket_scratch, ket);
-            path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
-                const double h = guga::hij(elem_scratch, ints_, path_space->state(ibra), ket, move);
+            elem_scratch.load_single(ints_, ket);
+            path_space.visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
+                const PathState& bra = path_space.state(ibra);
+                const PathDiff diff = path_diff(ket, bra, move);
+                double h = 0.0;
+                if (move.degree == 0) {
+                    h = diff.same_path()
+                        ? diag(elem_scratch, seg2_, ints_, ket)
+                        : same_ocfg(elem_scratch, seg2_, ints_, bra, ket, diff);
+                } else if (move.degree == 1) {
+                    const int p = move.add[0];
+                    const int q = move.remove[0];
+                    h = single_move(elem_scratch, seg2_, ints_, bra, ket, diff, move, elem_scratch.single_coulomb(p, q));
+                } else {
+                    h = double_move(elem_scratch, seg2_, ints_, bra, ket, diff, move);
+                }
                 if (h != 0.0) terms.push_back({ibra, to_i32(iket), h});
             });
         }
@@ -167,11 +164,11 @@ inline Matrix Hamiltonian::matrix(PathBatchView bras, PathBatchView kets) const 
     std::size_t nnz = 0;
     for (const auto& part : local) nnz += part.size();
 
-    std::vector<detail::MatTerm> terms;
+    std::vector<detail::Term> terms;
     terms.reserve(nnz);
     for (auto& part : local) {
         terms.insert(terms.end(), part.begin(), part.end());
-        std::vector<detail::MatTerm>().swap(part);
+        std::vector<detail::Term>().swap(part);
     }
     std::sort(terms.begin(), terms.end(), [](const auto& lhs, const auto& rhs) {
         if (lhs.ibra != rhs.ibra) return lhs.ibra < rhs.ibra;
@@ -207,15 +204,10 @@ inline std::vector<double> Hamiltonian::matvec(
 
     const auto path_space = cached_space(bras);
 
-#if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-#else
-    const int nthread = 1;
-#endif
     const std::size_t stride = bras.n_paths;
     std::vector<double> local(static_cast<std::size_t>(nthread) * stride, 0.0);
 
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -228,22 +220,27 @@ inline std::vector<double> Hamiltonian::matvec(
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-    {
-        double* out = local.data();
-        PathScratch ket_scratch;
-        ElementScratch elem_scratch(sector_.norb);
-        PathState ket;
-        VisitScratch visit_scratch;
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-#endif
-            const double coeff = x[iket];
-            if (coeff == 0.0) continue;
+            const double s = x[iket];
+            if (s == 0.0) continue;
 
             decode_path(kets[iket], sector_, "matvec(ket)", ket_scratch, ket);
+            elem_scratch.load_single(ints_, ket);
             path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
-                const double h = guga::hij(elem_scratch, ints_, path_space->state(ibra), ket, move);
-                if (h != 0.0) out[static_cast<std::size_t>(ibra)] += h * coeff;
+                const PathState& bra = path_space->state(ibra);
+                const PathDiff diff = path_diff(ket, bra, move);
+                double h = 0.0;
+                if (move.degree == 0) {
+                    h = diff.same_path()
+                        ? diag(elem_scratch, seg2_, ints_, ket)
+                        : same_ocfg(elem_scratch, seg2_, ints_, bra, ket, diff);
+                } else if (move.degree == 1) {
+                    const int p = move.add[0];
+                    const int q = move.remove[0];
+                    h = single_move(elem_scratch, seg2_, ints_, bra, ket, diff, move, elem_scratch.single_coulomb(p, q));
+                } else {
+                    h = double_move(elem_scratch, seg2_, ints_, bra, ket, diff, move);
+                }
+                if (h != 0.0) out[static_cast<std::size_t>(ibra)] += h * s;
             });
         }
     }
@@ -270,15 +267,10 @@ inline std::vector<double> Hamiltonian::matmat(
 
     const auto path_space = cached_space(bras);
 
-#if defined(_OPENMP)
     const int nthread = std::max(1, omp_get_max_threads());
-#else
-    const int nthread = 1;
-#endif
     const std::size_t stride = bras.n_paths * nrhs;
     std::vector<double> local(static_cast<std::size_t>(nthread) * stride, 0.0);
 
-#if defined(_OPENMP)
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -291,15 +283,6 @@ inline std::vector<double> Hamiltonian::matmat(
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
-#else
-    {
-        double* out = local.data();
-        PathScratch ket_scratch;
-        ElementScratch elem_scratch(sector_.norb);
-        PathState ket;
-        VisitScratch visit_scratch;
-        for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-#endif
             const double* xket = x.data() + iket * nrhs;
             bool any = false;
             for (std::size_t j = 0; j < nrhs; ++j) {
@@ -311,8 +294,22 @@ inline std::vector<double> Hamiltonian::matmat(
             if (!any) continue;
 
             decode_path(kets[iket], sector_, "matmat(ket)", ket_scratch, ket);
+            elem_scratch.load_single(ints_, ket);
             path_space->visit(ket, visit_scratch, [&](i32 ibra, const OccMove& move) {
-                const double h = guga::hij(elem_scratch, ints_, path_space->state(ibra), ket, move);
+                const PathState& bra = path_space->state(ibra);
+                const PathDiff diff = path_diff(ket, bra, move);
+                double h = 0.0;
+                if (move.degree == 0) {
+                    h = diff.same_path()
+                        ? diag(elem_scratch, seg2_, ints_, ket)
+                        : same_ocfg(elem_scratch, seg2_, ints_, bra, ket, diff);
+                } else if (move.degree == 1) {
+                    const int p = move.add[0];
+                    const int q = move.remove[0];
+                    h = single_move(elem_scratch, seg2_, ints_, bra, ket, diff, move, elem_scratch.single_coulomb(p, q));
+                } else {
+                    h = double_move(elem_scratch, seg2_, ints_, bra, ket, diff, move);
+                }
                 if (h == 0.0) return;
 
                 double* y = out + static_cast<std::size_t>(ibra) * nrhs;

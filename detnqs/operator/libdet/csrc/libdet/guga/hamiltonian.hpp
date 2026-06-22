@@ -15,10 +15,29 @@
 #include <libdet/guga/cache.hpp>
 #include <libdet/guga/element.hpp>
 #include <libdet/guga/screen.hpp>
+#include <libdet/results.hpp>
 
 namespace libdet::guga {
 
-struct KetScratch;
+struct KetScratch {
+    explicit KetScratch(int norb) : elem(norb) {}
+
+    ElementScratch elem;
+    PathScratch ket_work;
+    PathScratch bra_work;
+    PathState ket;
+    PathState bra;
+    std::vector<Step> step;
+    std::vector<u64> word;
+    std::vector<unsigned char> occ;
+    std::vector<unsigned char> work;
+    std::vector<int> suffix;
+
+    [[nodiscard]] PathRef encode(std::span<const Step> steps, u32 nword) {
+        encode_path(steps, nword, word);
+        return PathRef(word.data(), word.data() + static_cast<std::size_t>(nword), nword);
+    }
+};
 
 class Hamiltonian {
 public:
@@ -66,8 +85,15 @@ public:
 
     [[nodiscard]] ::libdet::Conns conn(
         PathBatchView kets,
-        double eps = 0.0,
-        const PathBatchView* include = nullptr
+        double eps = 0.0
+    ) const;
+
+    [[nodiscard]] ::libdet::LocalConns local_conn(
+        PathBatchView kets,
+        double eps1,
+        double eps2,
+        std::span<const i64> counts,
+        u64 seed = 0
     ) const;
 
     [[nodiscard]] ::libdet::Conns sample_conn(
@@ -76,9 +102,7 @@ public:
         std::size_t n_streams,
         double eps1,
         double eps2,
-        u64 seed = 0,
-        bool bra_weight = false,
-        const PathBatchView* include = nullptr
+        u64 seed = 0
     ) const;
 
     [[nodiscard]] Projections sample_project(
@@ -114,9 +138,10 @@ private:
     int n_alpha_ = 0;
     int n_beta_ = 0;
     Sector sector_;
+    Seg2Table seg2_;
 
     mutable std::mutex screen_mutex_;
-    mutable std::shared_ptr<const Screen> screen_;
+    mutable std::shared_ptr<const ScreenTable> screen_table_;
     mutable std::mutex conn_cache_mutex_;
     mutable ConnCache conn_cache_;
     mutable std::mutex space_cache_mutex_;
@@ -125,38 +150,38 @@ private:
     void check_one(PathRef path_ref, const char* where) const;
     void check_paths(PathBatchView paths, const char* where) const;
     static void check_eps(double eps);
-    static void check_window_eps(double eps1, double eps2);
+    static void check_sample_eps(double eps1, double eps2);
 
     [[nodiscard]] static double max_abs(std::span<const double> values) noexcept;
-    [[nodiscard]] static double screen_cutoff(
+    [[nodiscard]] static double screen_table_cutoff(
         double eps,
         double max_scale
     ) noexcept;
 
-    [[nodiscard]] std::shared_ptr<const Screen> screen(double cutoff) const;
+    [[nodiscard]] std::shared_ptr<const ScreenTable> screen_table(double cutoff) const;
 
     [[nodiscard]] std::shared_ptr<const PathSpace> cached_space(
         PathBatchView paths
     ) const;
 
-    [[nodiscard]] std::shared_ptr<const Conns> build_conns(
+    [[nodiscard]] std::shared_ptr<const Conns> make_conns(
         PathRef ket,
         double eps,
-        const Screen& screen,
+        const ScreenTable* table,
         KetScratch& scratch
     ) const;
 
-    [[nodiscard]] std::shared_ptr<const Conns> ket_conns(
+    [[nodiscard]] std::shared_ptr<const Conns> cached_conns(
         PathRef ket,
         double eps
     ) const;
 
-    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> ket_conns(
+    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> cached_conns(
         PathBatchView kets,
         double eps
     ) const;
 
-    [[nodiscard]] Projection project_impl(
+    [[nodiscard]] Projection project_internal(
         PathBatchView bras,
         PathBatchView kets,
         std::span<const double> scale,
@@ -164,7 +189,11 @@ private:
     ) const;
 };
 
-inline Hamiltonian::Hamiltonian(Integral ints, int n_alpha, int n_beta)
+inline Hamiltonian::Hamiltonian(
+    Integral ints,
+    int n_alpha,
+    int n_beta
+)
     : ints_(std::move(ints)),
       n_alpha_(n_alpha),
       n_beta_(n_beta),
@@ -174,13 +203,16 @@ inline Hamiltonian::Hamiltonian(Integral ints, int n_alpha, int n_beta)
           n_alpha - n_beta,
           bits::words_for(ints_.norb())
       },
-      conn_cache_(sector_.nword) {}
+      conn_cache_(sector_.nword) {
+    build_seg2(seg2_, sector_.norb);
+}
 
 inline Hamiltonian::Hamiltonian(const Hamiltonian& other)
     : ints_(other.ints_),
       n_alpha_(other.n_alpha_),
       n_beta_(other.n_beta_),
       sector_(other.sector_),
+      seg2_(other.seg2_),
       conn_cache_(sector_.nword) {}
 
 inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
@@ -189,7 +221,8 @@ inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
         n_alpha_ = other.n_alpha_;
         n_beta_ = other.n_beta_;
         sector_ = other.sector_;
-        screen_.reset();
+        seg2_ = other.seg2_;
+        screen_table_.reset();
         conn_cache_ = ConnCache(sector_.nword);
         space_cache_ = SpaceCache();
     }
@@ -201,7 +234,8 @@ inline Hamiltonian::Hamiltonian(Hamiltonian&& other) noexcept
       n_alpha_(other.n_alpha_),
       n_beta_(other.n_beta_),
       sector_(other.sector_),
-      screen_(std::move(other.screen_)),
+      seg2_(std::move(other.seg2_)),
+      screen_table_(std::move(other.screen_table_)),
       conn_cache_(sector_.nword) {}
 
 inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
@@ -210,7 +244,8 @@ inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
         n_alpha_ = other.n_alpha_;
         n_beta_ = other.n_beta_;
         sector_ = other.sector_;
-        screen_ = std::move(other.screen_);
+        seg2_ = std::move(other.seg2_);
+        screen_table_ = std::move(other.screen_table_);
         conn_cache_ = ConnCache(sector_.nword);
         space_cache_ = SpaceCache();
     }
@@ -262,7 +297,7 @@ inline void Hamiltonian::check_eps(double eps) {
     if (eps < 0.0) throw std::invalid_argument("eps must be nonnegative");
 }
 
-inline void Hamiltonian::check_window_eps(double eps1, double eps2) {
+inline void Hamiltonian::check_sample_eps(double eps1, double eps2) {
     check_eps(eps1);
     check_eps(eps2);
     if (eps2 > eps1) throw std::invalid_argument("eps2 must be <= eps1");
@@ -276,7 +311,7 @@ inline double Hamiltonian::max_abs(
     return out;
 }
 
-inline double Hamiltonian::screen_cutoff(
+inline double Hamiltonian::screen_table_cutoff(
     double eps,
     double max_scale
 ) noexcept {
@@ -285,14 +320,14 @@ inline double Hamiltonian::screen_cutoff(
     return eps / max_scale;
 }
 
-inline std::shared_ptr<const Screen> Hamiltonian::screen(double cutoff) const {
-    if (cutoff < 0.0) cutoff = 0.0;
+inline std::shared_ptr<const ScreenTable> Hamiltonian::screen_table(double cutoff) const {
+    if (cutoff <= 0.0) return {};
 
     std::lock_guard<std::mutex> lock(screen_mutex_);
-    if (!screen_ || cutoff < screen_->cutoff()) {
-        screen_ = std::make_shared<Screen>(ints_, cutoff);
+    if (!screen_table_ || cutoff < screen_table_->base_eps()) {
+        screen_table_ = std::make_shared<ScreenTable>(ints_, cutoff);
     }
-    return screen_;
+    return screen_table_;
 }
 
 inline std::shared_ptr<const PathSpace> Hamiltonian::cached_space(
@@ -312,6 +347,5 @@ inline std::shared_ptr<const PathSpace> Hamiltonian::cached_space(
 
 } // namespace libdet::guga
 
-#include <libdet/guga/sample.hpp>
 #include <libdet/guga/external.hpp>
 #include <libdet/guga/internal.hpp>

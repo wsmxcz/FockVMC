@@ -36,8 +36,18 @@ pip install -e ".[dev]"
 
 ## Testing
 
+Python tests:
+
 ```bash
 python -m pytest
+```
+
+C++ libdet tests without building the Python extension:
+
+```bash
+cmake -S . -B build-cpp -DDETNQS_BUILD_PYTHON=OFF -DDETNQS_BUILD_CPP_TESTS=ON
+cmake --build build-cpp
+ctest --test-dir build-cpp --output-on-failure
 ```
 
 ## Citation

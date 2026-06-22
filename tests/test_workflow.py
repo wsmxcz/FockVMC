@@ -53,7 +53,7 @@ def test_h2_workflow() -> None:
         H=H,
         sampler=sampler,
         key=jax.random.key(5),
-        screen_eps=1.0e-8,
+        eps1=1.0e-3,
         eloc_sample=8,
     )
     _, stats = state.expect()

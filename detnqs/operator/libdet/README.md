@@ -170,7 +170,7 @@ $$
 ```text
 conn(eps > 0)
 sample_conn(eps2 > 0)
-local_conn(counts == 0)
+local_conn strong part for counts == 0
 ```
 
 It never stores full `eps == 0` graphs, stochastic samples, one-shot projector
@@ -207,8 +207,9 @@ then ket-major. It has no sorting guarantee, and duplicates are allowed.
 If `eps2 > 0`, the sampler uses cached sorted connections. If `eps2 == 0`, it
 uses direct enumeration and does not write `ConnCache`.
 
-`local_conn(kets, eps1, eps2, counts, seed)` returns deterministic strong
-connections and sampled weak connections with one shared bra pool.
+`local_conn(kets, eps1, eps2, counts, seed, assemble_mode)` returns deterministic
+strong connections and sampled weak connections. `assemble_mode` is either
+`unique` or `flat`.
 
 Strong part:
 
@@ -232,9 +233,10 @@ $$
 H_{bk}\frac{\psi(b)}{\psi(k)}.
 $$
 
-If all counts are zero, `local_conn` assembles the strong part from cached
-deterministic connections. If some counts are positive, those kets are directly
-enumerated once and split into strong and weak contributions.
+For kets with zero weak draws, `local_conn` reads the strong part from cached
+deterministic connections. For kets with positive weak draws, it directly
+enumerates once and splits the result into strong and weak contributions.
+Both cases share the same assembly interface.
 
 Other action primitives use the same backend components:
 
@@ -257,7 +259,7 @@ The backend separates three concepts:
 ```text
 candidate generation   ScreenTable or direct enumeration
 exact evaluation       element kernels
-result assembly        shared pools, CSR arrays, sampled records
+result assembly        evaluation batches, CSR arrays, sampled records
 ```
 
 This separation keeps the hot paths short:
@@ -273,7 +275,7 @@ finite-space action
     internal search space -> element -> dense/vector output
 
 local strong/weak action
-    cached strong graph or direct enumeration -> shared pool -> CSR output
+    cached strong graph or direct enumeration -> local assembly -> CSR output
 ```
 
 `ScreenTable` is global and integral-driven.
@@ -281,18 +283,32 @@ local strong/weak action
 `SpaceCache` is batch-dependent and finite-space specific.
 Scratch objects are local or thread-local.
 
-Python-facing result pools always start with the input kets, and every index
-array refers to that pool. Python code should pass the pool directly to model
-evaluation and avoid additional deduplication or pool merging.
+Python-facing local evaluation batches always start with the input kets, and every index array refers to this batch. Python code should pass the batch directly to model evaluation and should not perform additional deduplication or merging.
 
-The dominant cost for large systems is usually connection generation and exact
-element evaluation. Window slicing, sampling target generation, and small CSR
-post-processing are secondary. The design therefore prioritizes:
+For local batches, `assemble_mode` controls the tradeoff between hash work and model evaluation:
+
+$$
+T_{\mathrm{unique}}
+=
+T_{\mathrm{hash}}
++
+T_{\mathrm{model}}(n_{\mathrm{ket}}+U),
+\qquad
+T_{\mathrm{flat}}
+=
+T_{\mathrm{copy}}
++
+T_{\mathrm{model}}(n_{\mathrm{ket}}+N).
+$$
+
+Here (U) is the number of unique connected bras, and (N) is the number of strong plus sampled weak records. `unique` uses sharded exact deduplication: bras are routed by fingerprint, deduplicated within independent shards, and gathered after the input-ket prefix. `flat` skips global deduplication and appends every recorded bra directly. Both modes return the same `LocalConn` layout.
+
+The design prioritizes:
 
 ```text
 tight candidate tables
 positive-cutoff graph caching
-single-pass local strong/weak assembly
+parallel local strong/weak assembly
 minimal Python-side graph manipulation
 ```
 

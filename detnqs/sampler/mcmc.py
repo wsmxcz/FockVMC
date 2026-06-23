@@ -58,7 +58,7 @@ class MCSampler:
         *,
         key: jax.Array,
         eps1: float,
-        chain_init: str | Any = "hf",
+        chains: Any,
         alpha: float | None = None,
         alpha_step: int = 0,
     ) -> Chains:
@@ -75,24 +75,11 @@ class MCSampler:
             else float(self.alpha)
         )
 
-        key, init_key = jax.random.split(key)
-
-        if isinstance(chain_init, str):
-            if chain_init in {"hf", "reference"}:
-                x = H.sector.reference(n_chains)
-            elif chain_init == "random":
-                seed = int(jax.random.bits(init_key, (), dtype=jnp.uint32))
-                x = H.sector.random(n_chains, seed)
-            else:
-                raise ValueError("chain_init must be 'hf', 'reference', 'random', or x")
-        else:
-            x = H.sector.asarray(chain_init)
-            if x.shape[0] == 0:
-                raise ValueError("chain_init must be non-empty")
-            if x.shape[0] != n_chains:
-                reps = (n_chains + x.shape[0] - 1) // x.shape[0]
-                x = np.tile(x, (reps, 1, 1))[:n_chains]
-            x = np.ascontiguousarray(x)
+        key, _ = jax.random.split(key)
+        x = H.sector.asarray(chains)
+        if x.shape[0] != n_chains:
+            raise ValueError("chains size must equal sampler.n_chains")
+        x = np.ascontiguousarray(x)
 
         unique, _, inv = H.sector.unique(x)
         value = utils.apply(model.logabs, theta, unique)
@@ -286,7 +273,7 @@ class MCSampler:
             with timer("conns"):
                 conn = H.sample_conn(
                     ket,
-                    np.ascontiguousarray(counts),
+                    counts,
                     eps1=np.inf,
                     eps2=float(eps1),
                     seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
@@ -294,7 +281,7 @@ class MCSampler:
                 conn_bra = np.asarray(conn.bra, dtype=np.uint64)
                 conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
                 conn_idx = np.asarray(conn.idx, dtype=np.int64)
-                n_conn = int(np.asarray(conn.h).size)
+                n_conn = int(conn_idx.size)
 
             with timer("sample"):
                 proposal_ptr = conn_ptr[: n_ket + 1]
@@ -368,7 +355,7 @@ class MCSampler:
                 with timer("conns"):
                     conn = H.sample_conn(
                         ket,
-                        np.ascontiguousarray(blur_counts),
+                        blur_counts,
                         eps1=np.inf,
                         eps2=float(eps1),
                         seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
@@ -382,7 +369,7 @@ class MCSampler:
                         "real",
                         host=True,
                     )
-                    n_conn += int(np.asarray(conn.h).size)
+                    n_conn += int(conn_idx.size)
 
             with timer("sample"):
                 if blur.any():

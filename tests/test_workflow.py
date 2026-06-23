@@ -48,10 +48,12 @@ def test_h2_workflow() -> None:
     assert actual == pytest.approx(float(energy), abs=1.0e-10)
 
     sampler = MCSampler(n_samples=16, n_chains=8, thermal_steps=1, blur=0.5)
+    chains = H.sector.reference(sampler.n_chains)
     state = MCState.init(
         model=RBM(norb=norb, alpha=1),
         H=H,
         sampler=sampler,
+        chains=chains,
         key=jax.random.key(5),
         eps1=1.0e-3,
         eloc_sample=8,

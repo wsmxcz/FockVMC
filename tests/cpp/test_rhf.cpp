@@ -14,8 +14,10 @@ int main() {
     check_matrix(ham, basis);
     check_conn(ham, basis, 0.10);
     check_sample(ham, basis, 0.20, 0.04);
-    check_local(ham, basis, 0.20, 0.04, 0);
-    check_local(ham, basis, 0.20, 0.04, 5);
+    check_local(ham, basis, 0.20, 0.04, 0, LocalMode::unique);
+    check_local(ham, basis, 0.20, 0.04, 5, LocalMode::unique);
+    check_local(ham, basis, 0.20, 0.04, 0, LocalMode::flat);
+    check_local(ham, basis, 0.20, 0.04, 5, LocalMode::flat);
 
     return 0;
 }

@@ -16,6 +16,7 @@
 
 using libdet::Hamiltonian;
 using libdet::i64;
+using libdet::LocalMode;
 using libdet::StateBatchView;
 using libdet::StateRef;
 using libdet::u32;
@@ -366,13 +367,14 @@ inline void check_local(
     const Basis& basis,
     double eps1,
     double eps2,
-    i64 n_draw
+    i64 n_draw,
+    LocalMode mode = LocalMode::unique
 ) {
     const std::size_t n = basis.size();
     const auto mat = dense(ham, basis);
     std::vector<i64> count(n, n_draw);
-    const auto con = ham.local_conn(basis.view(), eps1, eps2, count, 31);
-    const auto pool = pool_view(con.nword, con.bra_words);
+    const auto con = ham.local_conn(basis.view(), eps1, eps2, count, 31, mode);
+    const auto pool = pool_view(con.nword, con.bra);
 
     if (con.nword != basis.nword || con.n_kets != n) throw std::runtime_error("local shape");
     if (con.diag.size() != n || con.strong_degree.size() != n || con.weak_degree.size() != n) {
@@ -381,7 +383,7 @@ inline void check_local(
     if (con.strong_ptr.size() != n + 1u || con.weak_ptr.size() != n + 1u) {
         throw std::runtime_error("local ptr");
     }
-    if (con.weak_idx.size() != con.weak_h.size() || con.weak_idx.size() != con.weak_count.size()) {
+    if (con.weak_bra.size() != con.weak_h.size() || con.weak_bra.size() != con.weak_count.size()) {
         throw std::runtime_error("weak size");
     }
 
@@ -398,7 +400,7 @@ inline void check_local(
         std::vector<double> got(n, 0.0);
         for (int p = con.strong_ptr[ik]; p < con.strong_ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.strong_idx[t])]);
+            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.strong_bra[t])]);
             if (ib < 0) throw std::runtime_error("strong bra");
             const double h = con.strong_h[t];
             if (!(std::abs(h) >= eps1)) throw std::runtime_error("strong eps");
@@ -415,7 +417,7 @@ inline void check_local(
         i64 seen = 0;
         for (int p = con.weak_ptr[ik]; p < con.weak_ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.weak_idx[t])]);
+            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.weak_bra[t])]);
             if (ib < 0) throw std::runtime_error("weak bra");
             const double h = con.weak_h[t];
             const double a = std::abs(h);

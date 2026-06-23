@@ -56,10 +56,11 @@ def main():
 
     # variational state and optimizer.
     model = Backflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
+    basis = H.sector.reference(1)
     state = SelectedState.init(
         model=model,
         H=H,
-        init="hf",
+        basis=basis,
         key=jax.random.key(0),
     )
 

@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-cpp/
 dist/
 _skbuild/
 *.egg-info/

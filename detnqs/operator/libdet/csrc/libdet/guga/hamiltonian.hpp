@@ -88,12 +88,13 @@ public:
         double eps = 0.0
     ) const;
 
-    [[nodiscard]] ::libdet::LocalConns local_conn(
+    [[nodiscard]] ::libdet::LocalConn local_conn(
         PathBatchView kets,
         double eps1,
         double eps2,
         std::span<const i64> counts,
-        u64 seed = 0
+        u64 seed = 0,
+        ::libdet::LocalMode mode = ::libdet::LocalMode::unique
     ) const;
 
     [[nodiscard]] ::libdet::Conns sample_conn(

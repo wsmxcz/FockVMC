@@ -28,21 +28,9 @@ def main():
 
     # problem and integral tensors.
     mol = gto.M(
-        atom="""
-        H    3.23606798    0.00000000    0.00000000
-        H    2.61803399    1.90211303    0.00000000
-        H    1.00000000    3.07768354    0.00000000
-        H   -1.00000000    3.07768354    0.00000000
-        H   -2.61803399    1.90211303    0.00000000
-        H   -3.23606798    0.00000000    0.00000000
-        H   -2.61803399   -1.90211303    0.00000000
-        H   -1.00000000   -3.07768354    0.00000000
-        H    1.00000000   -3.07768354    0.00000000
-        H    2.61803399   -1.90211303    0.00000000
-        """,
-        basis="sto-3g",
+        atom="; ".join(f"H 0 0 {i * 2.00}" for i in range(16)),
+        basis="sto-6g",
         unit="Angstrom",
-        spin=0,
         verbose=0,
     )
 
@@ -73,13 +61,17 @@ def main():
     ref_mat[:n_alpha, :norb] = mo_oao[:, :n_alpha].T
     ref_mat[n_alpha:, norb:] = mo_oao[:, :n_beta].T
 
-    solver = fci.direct_spin0.FCI(mol)
-    e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
-    s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
+    e_fci = -7.66653 # H16_2.00A
+    # e_fci = -14.46061 # H30_3.60Bohr
+    # e_fci = -24.10276	# H50_3.60Bohr
 
-    print(f"SCF energy : {mf.e_tot:.12f}")
-    print(f"FCI energy : {e_fci:.12f}")
-    print(f"S^2        : {s2:.6f}")
+    # solver = fci.direct_spin0.FCI(mol)
+    # e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
+    # s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
+
+    # print(f"SCF energy : {mf.e_tot:.12f}")
+    # print(f"FCI energy : {e_fci:.12f}")
+    # print(f"S^2        : {s2:.6f}")
 
     # variational state and optimizer.
     model = RBackflow(
@@ -98,11 +90,12 @@ def main():
         blur=0.5,
     )
 
+    chains = H.sector.random(sampler.n_chains, 0)
     state = MCState.init(
         model=model,
         H=H,
         sampler=sampler,
-        chain_init="random",
+        chains=chains,
         key=jax.random.key(0),
         eps1=1e-3,
     )

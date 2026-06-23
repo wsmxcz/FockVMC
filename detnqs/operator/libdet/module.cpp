@@ -2,12 +2,14 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 
 #include <libdet/hamiltonian.hpp>
 
@@ -105,6 +107,13 @@ struct Counts {
     std::size_t n_stream = 0;
 };
 
+
+[[nodiscard]] libdet::LocalMode local_mode(const std::string& name) {
+    if (name == "unique") return libdet::LocalMode::unique;
+    if (name == "flat") return libdet::LocalMode::flat;
+    throw std::invalid_argument("local_conn: assemble_mode must be 'unique' or 'flat'");
+}
+
 [[nodiscard]] Counts counts(const I64Array& x, std::size_t n_ket) {
     if (x.ndim() != 1 && x.ndim() != 2) {
         throw std::invalid_argument("counts must have shape (N,) or (S, N)");
@@ -200,21 +209,21 @@ NB_MODULE(libdet, m) {
         .def_prop_ro("degree", [](const libdet::Conns& x) { return view(x.degree); }, nb::rv_policy::reference_internal);
 
 
-    nb::class_<libdet::LocalConns>(m, "LocalConns")
-        .def_prop_ro("n_kets", [](const libdet::LocalConns& x) { return x.n_kets; })
-        .def_prop_ro("bra", [](const libdet::LocalConns& x) {
-            return view_states(x.bra_words, x.nword);
+    nb::class_<libdet::LocalConn>(m, "LocalConn")
+        .def_prop_ro("n_kets", [](const libdet::LocalConn& x) { return x.n_kets; })
+        .def_prop_ro("bra", [](const libdet::LocalConn& x) {
+            return view_states(x.bra, x.nword);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::LocalConns& x) { return view(x.diag); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_ptr", [](const libdet::LocalConns& x) { return view(x.strong_ptr); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_idx", [](const libdet::LocalConns& x) { return view(x.strong_idx); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_h", [](const libdet::LocalConns& x) { return view(x.strong_h); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_degree", [](const libdet::LocalConns& x) { return view(x.strong_degree); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_ptr", [](const libdet::LocalConns& x) { return view(x.weak_ptr); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_idx", [](const libdet::LocalConns& x) { return view(x.weak_idx); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_h", [](const libdet::LocalConns& x) { return view(x.weak_h); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_count", [](const libdet::LocalConns& x) { return view(x.weak_count); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_degree", [](const libdet::LocalConns& x) { return view(x.weak_degree); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("diag", [](const libdet::LocalConn& x) { return view(x.diag); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_ptr", [](const libdet::LocalConn& x) { return view(x.strong_ptr); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_bra", [](const libdet::LocalConn& x) { return view(x.strong_bra); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_h", [](const libdet::LocalConn& x) { return view(x.strong_h); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_degree", [](const libdet::LocalConn& x) { return view(x.strong_degree); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_ptr", [](const libdet::LocalConn& x) { return view(x.weak_ptr); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_bra", [](const libdet::LocalConn& x) { return view(x.weak_bra); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_h", [](const libdet::LocalConn& x) { return view(x.weak_h); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_count", [](const libdet::LocalConn& x) { return view(x.weak_count); }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_degree", [](const libdet::LocalConn& x) { return view(x.weak_degree); }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projection>(m, "Projection")
         .def_prop_ro("bra", [](const libdet::Projection& x) {
@@ -345,17 +354,19 @@ NB_MODULE(libdet, m) {
             double eps1,
             double eps2,
             const I64Array& counts_arr,
-            std::uint64_t seed
+            std::uint64_t seed,
+            const std::string& assemble_mode
         ) {
             const auto kv = states(kets);
             const auto cv = counts(counts_arr, kv.n_states);
+            const auto mode = local_mode(assemble_mode);
             if (cv.n_stream != 1u) {
                 throw std::invalid_argument("local_conn: counts must have shape (N,)");
             }
             return no_gil([&] {
-                return ham.local_conn(kv, eps1, eps2, cv.data, seed);
+                return ham.local_conn(kv, eps1, eps2, cv.data, seed, mode);
             });
-        }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "counts"_a.noconvert(), "seed"_a = std::uint64_t{0})
+        }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "counts"_a.noconvert(), "seed"_a = std::uint64_t{0}, "assemble_mode"_a = "unique")
 
         .def("sample_project", [](
             const libdet::Hamiltonian& ham,

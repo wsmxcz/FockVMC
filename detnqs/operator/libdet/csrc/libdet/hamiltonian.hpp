@@ -229,19 +229,20 @@ public:
     }
 
 
-    [[nodiscard]] LocalConns local_conn(
+    [[nodiscard]] LocalConn local_conn(
         StateBatchView kets,
         double eps1,
         double eps2,
         std::span<const i64> counts,
-        u64 seed = 0
+        u64 seed = 0,
+        LocalMode mode = LocalMode::unique
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.local_conn(detail::as_dets(kets), eps1, eps2, counts, seed);
+                return ham.local_conn(detail::as_dets(kets), eps1, eps2, counts, seed, mode);
             } else {
-                return ham.local_conn(detail::as_paths(kets), eps1, eps2, counts, seed);
+                return ham.local_conn(detail::as_paths(kets), eps1, eps2, counts, seed, mode);
             }
         });
     }

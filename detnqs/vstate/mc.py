@@ -42,11 +42,12 @@ class MCState(VState):
     sampler: MCSampler
     sampler_state: Chains
 
-    chain_init: str | Any = "hf"
+    chains: np.ndarray
 
     eps1: float = 1.0e-3
     eps2: float = 1.0e-6
     eloc_sample: int = 256
+    assemble_mode: str = "unique"
 
     @classmethod
     def init(
@@ -56,10 +57,11 @@ class MCState(VState):
         *,
         sampler: MCSampler,
         key: jax.Array,
-        chain_init: str | Any = "hf",
+        chains: Any | None = None,
         eps1: float = 1.0e-3,
         eps2: float = 1.0e-6,
         eloc_sample: int = 256,
+        assemble_mode: str = "unique",
     ) -> MCState:
         """Initialize a Monte Carlo variational state."""
         eps1 = float(eps1)
@@ -76,10 +78,20 @@ class MCState(VState):
 
         if int(eloc_sample) < 0:
             raise ValueError("eloc_sample must be nonnegative")
+        if assemble_mode not in {"unique", "flat"}:
+            raise ValueError("assemble_mode must be 'unique' or 'flat'")
 
         _, init_key, sample_key = jax.random.split(key, 3)
 
         params = model.init(init_key, H.sector.zeros(1))["params"]
+
+        if chains is None:
+            chains_arr = H.sector.reference(sampler.n_chains)
+        else:
+            chains_arr = H.sector.asarray(chains)
+        if chains_arr.shape[0] != int(sampler.n_chains):
+            raise ValueError("chains size must equal sampler.n_chains")
+        chains_arr = np.ascontiguousarray(chains_arr)
 
         sampler_state = sampler.init(
             params,
@@ -87,7 +99,7 @@ class MCState(VState):
             model,
             key=sample_key,
             eps1=eps1,
-            chain_init=chain_init,
+            chains=chains_arr,
         )
 
         return cls(
@@ -96,10 +108,11 @@ class MCState(VState):
             H=H,
             sampler=sampler,
             sampler_state=sampler_state,
-            chain_init=chain_init,
+            chains=chains_arr,
             eps1=eps1,
             eps2=eps2,
             eloc_sample=int(eloc_sample),
+            assemble_mode=assemble_mode,
         )
 
     def replace(self, **updates: Any) -> MCState:
@@ -125,7 +138,7 @@ class MCState(VState):
                     self.model,
                     key=sampler_state.key,
                     eps1=float(self.eps1),
-                    chain_init=self.chain_init,
+                    chains=self.chains,
                     alpha=(
                         float(sampler_state.alpha)
                         if self.sampler.alpha is None
@@ -217,13 +230,16 @@ class MCState(VState):
                 float(self.eps2),
                 int(self.eloc_sample),
                 seed=seed,
+                assemble_mode=self.assemble_mode,
             )
-
-            pool = np.asarray(conn.bra, dtype=np.uint64)
-
+            bra = np.asarray(conn.bra, dtype=np.uint64)
             strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
-            strong_bra = np.asarray(conn.strong_idx, dtype=np.int64)
-            strong_h = precision.asarray(np.asarray(conn.strong_h), "calc", host=True)
+            strong_bra = np.asarray(conn.strong_bra, dtype=np.int64)
+            strong_h = precision.asarray(
+                np.asarray(conn.strong_h),
+                "calc",
+                host=True,
+            )
             strong_w = precision.asarray(
                 np.asarray(conn.strong_degree),
                 "calc",
@@ -231,9 +247,8 @@ class MCState(VState):
                 host=True,
             )
             diag = precision.asarray(np.asarray(conn.diag), "calc", host=True)
-
             weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
-            weak_bra = np.asarray(conn.weak_idx, dtype=np.int64)
+            weak_bra = np.asarray(conn.weak_bra, dtype=np.int64)
             weak_h = precision.asarray(np.asarray(conn.weak_h), "calc", host=True)
             weak_count = precision.asarray(
                 np.asarray(conn.weak_count),
@@ -249,24 +264,24 @@ class MCState(VState):
             )
 
         with timer("forward"):
-            pool_logpsi_jax = utils.apply(
+            bra_logpsi_jax = utils.apply(
                 self.model.logpsi,
                 self.params,
-                pool,
+                bra,
             )
-            jax.block_until_ready(pool_logpsi_jax)
-            pool_logpsi = utils.host(pool_logpsi_jax)
+            jax.block_until_ready(bra_logpsi_jax)
+            bra_logpsi = utils.host(bra_logpsi_jax)
 
         with timer("reduce"):
-            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], pool_logpsi)
+            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
 
-            pool_logabs = precision.asarray(
-                np.asarray(to_logabs(pool_logpsi)).reshape(-1),
+            bra_logabs = precision.asarray(
+                np.asarray(to_logabs(bra_logpsi)).reshape(-1),
                 "calc",
                 "real",
                 host=True,
             )
-            ket_logabs = pool_logabs[:n_ket]
+            ket_logabs = bra_logabs[:n_ket]
 
             rdtype = precision.dtype("calc", "real", host=True)
             tiny = rdtype(precision.tiny("calc"))
@@ -290,8 +305,8 @@ class MCState(VState):
                 ratio = precision.asarray(
                     np.asarray(
                         to_ratio(
-                            jax.tree.map(lambda a: a[strong_bra], pool_logpsi),
-                            jax.tree.map(lambda a: a[ket_idx], pool_logpsi),
+                            jax.tree.map(lambda a: a[strong_bra], bra_logpsi),
+                            jax.tree.map(lambda a: a[ket_idx], bra_logpsi),
                         )
                     ),
                     "calc",
@@ -320,7 +335,7 @@ class MCState(VState):
 
                 if beta > 0.0 and strong_h.size:
                     terms = (
-                        alpha_r * pool_logabs[strong_bra]
+                        alpha_r * bra_logabs[strong_bra]
                         + np.log(np.maximum(np.abs(strong_h), tiny))
                     )
                     log_blur = (
@@ -345,8 +360,8 @@ class MCState(VState):
                 ratio = precision.asarray(
                     np.asarray(
                         to_ratio(
-                            jax.tree.map(lambda a: a[weak_bra], pool_logpsi),
-                            jax.tree.map(lambda a: a[weak_ket], pool_logpsi),
+                            jax.tree.map(lambda a: a[weak_bra], bra_logpsi),
+                            jax.tree.map(lambda a: a[weak_ket], bra_logpsi),
                         )
                     ),
                     "calc",
@@ -441,7 +456,7 @@ class MCState(VState):
         n_strong = int(strong_bra.size)
         n_weak = int(weak_bra.size)
         n_forward_raw = n_ket + n_strong + n_weak
-        forward_frac = float(pool.shape[0]) / max(1, n_forward_raw)
+        forward_frac = float(bra.shape[0]) / max(1, n_forward_raw)
 
         unique_frac = 1.0 - float(n_ket) / max(1, n_sample)
         n_conn = (
@@ -458,7 +473,7 @@ class MCState(VState):
             "ess_frac": float(ess / max(1, n_sample)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),
-            "n_forward": float(pool.shape[0]),
+            "n_forward": float(bra.shape[0]),
             "unique_frac": float(unique_frac),
             "forward_frac": float(forward_frac),
             "n_conn": n_conn,

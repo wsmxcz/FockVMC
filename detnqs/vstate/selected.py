@@ -29,17 +29,13 @@ class SelectedState:
         cls,
         model: Model,
         H: Any,
-        init: Any = "hf",
         *,
         key: jax.Array,
+        basis: Any | None = None,
     ) -> Self:
         """Initialize from a selected basis."""
-        basis = (
-            H.sector.reference(1)
-            if isinstance(init, str) and init == "hf"
-            else H.sector.asarray(init)
-        )
-        if basis.shape[0] == 0:
+        basis_arr = H.sector.reference(1) if basis is None else H.sector.asarray(basis)
+        if basis_arr.shape[0] == 0:
             raise ValueError("selected basis must be non-empty")
 
         params = model.init(key, H.sector.zeros(1))["params"]
@@ -48,8 +44,8 @@ class SelectedState:
             model=model,
             params=params,
             H=H,
-            basis=basis,
-            hmat=H.matrix(basis),
+            basis=basis_arr,
+            hmat=H.matrix(basis_arr),
         )
 
     @property

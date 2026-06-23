@@ -7,6 +7,11 @@
 
 namespace libdet {
 
+enum class LocalMode : unsigned char {
+    unique,
+    flat,
+};
+
 struct Matrix {
     std::size_t n_bra = 0;
     std::size_t n_ket = 0;
@@ -27,17 +32,17 @@ struct Conns {
     std::vector<double> degree;
 };
 
-struct LocalConns {
+struct LocalConn {
     u32 nword = 0;
     std::size_t n_kets = 0;
-    std::vector<u64> bra_words;
+    std::vector<u64> bra;
     std::vector<double> diag;
     std::vector<i32> strong_ptr;
-    std::vector<i32> strong_idx;
+    std::vector<i32> strong_bra;
     std::vector<double> strong_h;
     std::vector<double> strong_degree;
     std::vector<i32> weak_ptr;
-    std::vector<i32> weak_idx;
+    std::vector<i32> weak_bra;
     std::vector<double> weak_h;
     std::vector<i64> weak_count;
     std::vector<double> weak_degree;

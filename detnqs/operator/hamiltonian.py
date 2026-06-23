@@ -11,7 +11,7 @@ FloatArray = NDArray[np.float64]
 UInt64Array = NDArray[np.uint64]
 
 Conns = libdet.Conns
-LocalConns = libdet.LocalConns
+LocalConn = libdet.LocalConn
 Projection = libdet.Projection
 Projections = libdet.Projections
 
@@ -173,8 +173,11 @@ class Hamiltonian:
         counts: ArrayLike | int,
         *,
         seed: int = 0,
-    ) -> LocalConns:
+        assemble_mode: str = "unique",
+    ) -> LocalConn:
         """Return strong connections and weak-window samples for local energy."""
+        if assemble_mode not in {"unique", "flat"}:
+            raise ValueError("assemble_mode must be 'unique' or 'flat'")
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
         counts_arr = (
             np.full(kets_arr.shape[0], int(counts), dtype=np.int64)
@@ -186,7 +189,8 @@ class Hamiltonian:
             float(eps1),
             float(eps2),
             counts_arr,
-            int(seed),
+            seed=int(seed),
+            assemble_mode=assemble_mode,
         )
 
     def sample_project(

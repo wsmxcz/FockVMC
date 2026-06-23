@@ -21,30 +21,30 @@ import utils as run_utils
 def main():
     # numerical defaults.
     dq_utils.batch.configure(chunk=8192)
-    dq_utils.precision.configure("single")
+    dq_utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
     # problem and integral tensors.
     mol = gto.M(
-        # atom=
-        # '''
-        # N   0.53920000,  0.00000000,  0.0000000
-        # N   -0.539200000,  0.00000000,  0.0000000
-        # ''',
         atom=
         '''
-        O   0.00000000,  0.00000000,  0.00000000
-        H   0.75700000,  0.00000000,  0.58590000
-        H  -0.75700000,  0.00000000,  0.58590000
+        N   0.53920000,  0.00000000,  0.0000000
+        N   -0.539200000,  0.00000000,  0.0000000
         ''',
+        # atom=
+        # '''
+        # O   0.00000000,  0.00000000,  0.00000000
+        # H   0.75700000,  0.00000000,  0.58590000
+        # H  -0.75700000,  0.00000000,  0.58590000
+        # ''',
         # atom=
         # '''
         # Li   3.732, 0.25, 0.0
         # Li   2.0, 0.25, 0.0
         # O  2.866, -0.25, 0.0
         # ''',
-        basis="6-31g",
+        basis="sto-3g",
         unit="Angstrom",
         spin=0,
         verbose=0,
@@ -79,19 +79,21 @@ def main():
     sampler = MCSampler(
         n_samples=4096,
         n_chains=4096,
-        thermal_steps=128,
-        proposal="single",
+        thermal_steps=0,
+        proposal="ham",
         blur=0.5,
     )
 
+    chains = H.sector.reference(sampler.n_chains)
     state = MCState.init(
         model=model,
         H=H,
         sampler=sampler,
-        chain_init="hf",
+        chains=chains,
         key=jax.random.key(0),
         eps1=1e-3,
         eloc_sample=1024,
+        assemble_mode="flat",
     )
 
     optimizer = optax.chain(
@@ -118,7 +120,7 @@ def main():
 
     history = []
     total_times = defaultdict(float)
-    steps = 500
+    steps = 1000
 
     # optimization loop.
     for step in range(steps):

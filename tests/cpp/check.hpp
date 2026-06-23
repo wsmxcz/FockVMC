@@ -1,43 +1,13 @@
 #pragma once
 
-#include <algorithm>
-#include <bit>
+#include "basis.hpp"
+
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <iostream>
 #include <limits>
-#include <span>
 #include <stdexcept>
-#include <string>
 #include <vector>
-
-#include <libdet/hamiltonian.hpp>
-
-using libdet::Hamiltonian;
-using libdet::i64;
-using libdet::LocalMode;
-using libdet::StateBatchView;
-using libdet::StateRef;
-using libdet::u32;
-using libdet::u64;
-
-struct Basis {
-    u32 nword = 0;
-    std::vector<u64> words;
-
-    [[nodiscard]] std::size_t size() const noexcept {
-        return words.size() / libdet::word_pair_size(nword);
-    }
-
-    [[nodiscard]] StateBatchView view() const noexcept {
-        return StateBatchView{words.data(), size(), nword};
-    }
-
-    [[nodiscard]] StateRef get(std::size_t i) const noexcept {
-        return view()[i];
-    }
-};
 
 inline void near(double x, double y, const char* msg) {
     const double tol = 4.0e-12 * (1.0 + std::abs(y));
@@ -47,137 +17,7 @@ inline void near(double x, double y, const char* msg) {
     }
 }
 
-inline std::size_t pair_id(int p, int q) {
-    const int hi = std::max(p, q);
-    const int lo = std::min(p, q);
-    return static_cast<std::size_t>(hi * (hi + 1) / 2 + lo);
-}
-
-inline std::size_t eri_id(int p, int q, int r, int s) {
-    return pair_id(
-        static_cast<int>(pair_id(p, q)),
-        static_cast<int>(pair_id(r, s))
-    );
-}
-
-inline std::vector<double> make_h1(int n) {
-    std::vector<double> h(static_cast<std::size_t>(n * n), 0.0);
-    for (int p = 0; p < n; ++p) {
-        for (int q = 0; q <= p; ++q) {
-            const double v = 0.11 + 0.07 * (p + 1) - 0.03 * (q + 2)
-                + 0.015 * ((p + 2 * q) % 5);
-            h[static_cast<std::size_t>(p * n + q)] = v;
-            h[static_cast<std::size_t>(q * n + p)] = v;
-        }
-    }
-    return h;
-}
-
-inline std::vector<double> make_eri(int n) {
-    const int npair = n * (n + 1) / 2;
-    std::vector<double> eri(static_cast<std::size_t>(npair * (npair + 1) / 2), 0.0);
-    for (int p = 0; p < n; ++p) {
-        for (int q = 0; q < n; ++q) {
-            for (int r = 0; r < n; ++r) {
-                for (int s = 0; s < n; ++s) {
-                    eri[eri_id(p, q, r, s)] =
-                        0.012 * (1 + ((3 * p + 5 * q + 7 * r + 11 * s) % 23));
-                }
-            }
-        }
-    }
-    return eri;
-}
-
-template <class F>
-void choose(int n, int k, int first, u64 bits, F&& visit) {
-    if (k == 0) {
-        visit(bits);
-        return;
-    }
-    for (int p = first; p <= n - k; ++p) {
-        choose(n, k - 1, p + 1, bits | (u64{1} << p), visit);
-    }
-}
-
-inline Basis det_basis(int norb, int na, int nb, u32 nword) {
-    Basis basis{nword, {}};
-    choose(norb, na, 0, u64{0}, [&](u64 a) {
-        choose(norb, nb, 0, u64{0}, [&](u64 b) {
-            basis.words.push_back(a);
-            for (u32 w = 1; w < nword; ++w) basis.words.push_back(0);
-            basis.words.push_back(b);
-            for (u32 w = 1; w < nword; ++w) basis.words.push_back(0);
-        });
-    });
-    return basis;
-}
-
-inline void put_path(Basis& basis, std::span<const int> step) {
-    std::vector<u64> word(libdet::word_pair_size(basis.nword), 0u);
-    for (int p = 0; p < static_cast<int>(step.size()); ++p) {
-        const std::size_t w = static_cast<std::size_t>(p >> 6);
-        const u64 bit = u64{1} << static_cast<unsigned>(p & 63);
-        if (step[static_cast<std::size_t>(p)] == 2 || step[static_cast<std::size_t>(p)] == 3) {
-            word[w] |= bit;
-        }
-        if (step[static_cast<std::size_t>(p)] == 1 || step[static_cast<std::size_t>(p)] == 3) {
-            word[static_cast<std::size_t>(basis.nword) + w] |= bit;
-        }
-    }
-    basis.words.insert(basis.words.end(), word.begin(), word.end());
-}
-
-inline void path_rec(
-    Basis& basis,
-    std::vector<int>& step,
-    int p,
-    int nelec,
-    int spin,
-    int target_e,
-    int target_s
-) {
-    const int norb = static_cast<int>(step.size());
-    if (p == norb) {
-        if (nelec == target_e && spin == target_s) put_path(basis, step);
-        return;
-    }
-
-    const int rem = norb - p - 1;
-    for (int st : {0, 1, 2, 3}) {
-        const int occ = st == 3 ? 2 : (st == 0 ? 0 : 1);
-        const int ds = st == 2 ? 1 : (st == 1 ? -1 : 0);
-        const int e1 = nelec + occ;
-        const int s1 = spin + ds;
-        if (s1 < 0) continue;
-        if (e1 > target_e) continue;
-        if (e1 + 2 * rem < target_e) continue;
-        step[static_cast<std::size_t>(p)] = st;
-        path_rec(basis, step, p + 1, e1, s1, target_e, target_s);
-    }
-}
-
-inline Basis spin_basis(int norb, int na, int nb, u32 nword) {
-    Basis basis{nword, {}};
-    std::vector<int> step(static_cast<std::size_t>(norb), 0);
-    path_rec(basis, step, 0, 0, 0, na + nb, na - nb);
-    return basis;
-}
-
-inline bool same_state(StateRef a, StateRef b) noexcept {
-    if (a.nword() != b.nword()) return false;
-    const std::size_t n = libdet::word_pair_size(a.nword());
-    return std::equal(a.data(), a.data() + n, b.data());
-}
-
-inline int find_state(StateBatchView x, StateRef y) {
-    for (std::size_t i = 0; i < x.n_states; ++i) {
-        if (same_state(x[i], y)) return static_cast<int>(i);
-    }
-    return -1;
-}
-
-inline StateBatchView pool_view(u32 nword, const std::vector<u64>& words) {
+inline StateBatchView batch_view(u32 nword, const std::vector<u64>& words) {
     return StateBatchView{
         words.data(),
         words.size() / libdet::word_pair_size(nword),
@@ -220,7 +60,7 @@ inline void check_diag(const Hamiltonian& ham, const Basis& basis) {
     }
 }
 
-inline void check_matrix(const Hamiltonian& ham, const Basis& basis) {
+inline void check_action(const Hamiltonian& ham, const Basis& basis) {
     const std::size_t n = basis.size();
     const auto mat = dense(ham, basis);
     const auto csr = ham.matrix(basis.view(), basis.view());
@@ -229,13 +69,13 @@ inline void check_matrix(const Hamiltonian& ham, const Basis& basis) {
     }
 
     for (std::size_t ib = 0; ib < n; ++ib) {
-        std::vector<double> row(n, 0.0);
+        std::vector<double> values(n, 0.0);
         for (int t = csr.indptr[ib]; t < csr.indptr[ib + 1u]; ++t) {
-            row[static_cast<std::size_t>(csr.indices[static_cast<std::size_t>(t)])] =
+            values[static_cast<std::size_t>(csr.indices[static_cast<std::size_t>(t)])] =
                 csr.data[static_cast<std::size_t>(t)];
         }
         for (std::size_t ik = 0; ik < n; ++ik) {
-            near(row[ik], mat[ib * n + ik], "matrix");
+            near(values[ik], mat[ib * n + ik], "matrix");
         }
     }
 
@@ -268,21 +108,63 @@ inline void check_matrix(const Hamiltonian& ham, const Basis& basis) {
             near(yy[ib * nrhs + j], ref, "matmat");
         }
     }
+
+    const Basis bras = take_basis(basis, std::min<std::size_t>(4u, n));
+    const Basis kets = take_basis(basis, std::min<std::size_t>(5u, n));
+    const std::size_t nb = bras.size();
+    const std::size_t nk = kets.size();
+
+    const auto csr2 = ham.matrix(bras.view(), kets.view());
+    if (csr2.n_bra != nb || csr2.n_ket != nk || csr2.indptr.size() != nb + 1u) {
+        throw std::runtime_error("rect matrix shape");
+    }
+    for (std::size_t ib = 0; ib < nb; ++ib) {
+        std::vector<double> values(nk, 0.0);
+        for (int t = csr2.indptr[ib]; t < csr2.indptr[ib + 1u]; ++t) {
+            values[static_cast<std::size_t>(csr2.indices[static_cast<std::size_t>(t)])] =
+                csr2.data[static_cast<std::size_t>(t)];
+        }
+        for (std::size_t ik = 0; ik < nk; ++ik) {
+            near(values[ik], ham.hij(bras.get(ib), kets.get(ik)), "rect matrix");
+        }
+    }
+
+    std::vector<double> x2(nk, 0.0);
+    for (std::size_t ik = 0; ik < nk; ++ik) x2[ik] = 0.19 - 0.031 * static_cast<double>(ik % 5);
+    const auto y2 = ham.matvec(bras.view(), kets.view(), x2);
+    const auto p2 = ham.project(bras.view(), kets.view(), x2, 0.0);
+    if (y2.size() != nb || p2.hpsi.size() != nb || p2.diag.size() != nb) {
+        throw std::runtime_error("rect action size");
+    }
+    const auto pbras = batch_view(p2.nword, p2.bra);
+    for (std::size_t ib = 0; ib < nb; ++ib) {
+        if (!same_state(pbras[ib], bras.get(ib))) throw std::runtime_error("project bra");
+        double ref = 0.0;
+        for (std::size_t ik = 0; ik < nk; ++ik) ref += ham.hij(bras.get(ib), kets.get(ik)) * x2[ik];
+        near(y2[ib], ref, "rect matvec");
+        near(p2.hpsi[ib], ref, "rect project");
+        near(p2.diag[ib], ham.hij(bras.get(ib), bras.get(ib)), "rect project diag");
+    }
 }
 
-inline void check_conn(const Hamiltonian& ham, const Basis& basis, double eps) {
+inline void check_conn(
+    const Hamiltonian& ham,
+    const Basis& basis,
+    double eps,
+    AssembleMode mode = AssembleMode::unique
+) {
     const std::size_t n = basis.size();
     const auto mat = dense(ham, basis);
-    const auto con = ham.conn(basis.view(), eps);
-    const auto pool = pool_view(con.nword, con.bra_words);
+    const auto con = ham.conn(basis.view(), eps, mode);
+    const auto batch = batch_view(con.nword, con.bra);
 
     if (con.nword != basis.nword || con.n_kets != n || con.ptr.size() != n + 1u) {
         throw std::runtime_error("conn shape");
     }
     if (con.diag.size() != n || con.degree.size() != n) throw std::runtime_error("conn meta");
-    if (pool.n_states < n) throw std::runtime_error("conn pool");
+    if (batch.n_states < n) throw std::runtime_error("conn batch");
     for (std::size_t i = 0; i < n; ++i) {
-        if (!same_state(pool[i], basis.get(i))) throw std::runtime_error("conn prefix");
+        if (!same_state(batch[i], basis.get(i))) throw std::runtime_error("conn prefix");
     }
 
     for (std::size_t ik = 0; ik < n; ++ik) {
@@ -293,7 +175,7 @@ inline void check_conn(const Hamiltonian& ham, const Basis& basis, double eps) {
         double last = std::numeric_limits<double>::infinity();
         for (int p = con.ptr[ik]; p < con.ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.idx[t])]);
+            const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.idx[t])]);
             if (ib < 0) throw std::runtime_error("conn bra");
             if (got[static_cast<std::size_t>(ib)] != 0.0) throw std::runtime_error("conn dup");
             const double h = con.h[t];
@@ -318,7 +200,8 @@ inline void check_sample(
     const Hamiltonian& ham,
     const Basis& basis,
     double eps1,
-    double eps2
+    double eps2,
+    AssembleMode mode = AssembleMode::unique
 ) {
     const std::size_t n = basis.size();
     const std::size_t ns = 2;
@@ -328,8 +211,8 @@ inline void check_sample(
         for (std::size_t i = 0; i < n; ++i) count[s * n + i] = static_cast<i64>(2 + s);
     }
 
-    const auto con = ham.sample_conn(basis.view(), count, ns, eps1, eps2, 17);
-    const auto pool = pool_view(con.nword, con.bra_words);
+    const auto con = ham.sample_conn(basis.view(), count, ns, eps1, eps2, 17, mode);
+    const auto batch = batch_view(con.nword, con.bra);
     if (con.nword != basis.nword || con.n_kets != n || con.n_streams != ns) {
         throw std::runtime_error("sample shape");
     }
@@ -344,14 +227,14 @@ inline void check_sample(
 
     for (std::size_t s = 0; s < ns; ++s) {
         for (std::size_t ik = 0; ik < n; ++ik) {
-            const std::size_t row = s * n + ik;
-            const i64 want = con.degree[ik] > 0.0 ? count[row] : 0;
-            const i64 have = static_cast<i64>(con.ptr[row + 1u] - con.ptr[row]);
+            const std::size_t pos = s * n + ik;
+            const i64 want = con.degree[ik] > 0.0 ? count[pos] : 0;
+            const i64 have = static_cast<i64>(con.ptr[pos + 1u] - con.ptr[pos]);
             if (have != want) throw std::runtime_error("sample count");
 
-            for (int p = con.ptr[row]; p < con.ptr[row + 1u]; ++p) {
+            for (int p = con.ptr[pos]; p < con.ptr[pos + 1u]; ++p) {
                 const std::size_t t = static_cast<std::size_t>(p);
-                const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.idx[t])]);
+                const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.idx[t])]);
                 if (ib < 0) throw std::runtime_error("sample bra");
                 const double h = con.h[t];
                 const double a = std::abs(h);
@@ -368,13 +251,13 @@ inline void check_local(
     double eps1,
     double eps2,
     i64 n_draw,
-    LocalMode mode = LocalMode::unique
+    AssembleMode mode = AssembleMode::unique
 ) {
     const std::size_t n = basis.size();
     const auto mat = dense(ham, basis);
     std::vector<i64> count(n, n_draw);
     const auto con = ham.local_conn(basis.view(), eps1, eps2, count, 31, mode);
-    const auto pool = pool_view(con.nword, con.bra);
+    const auto batch = batch_view(con.nword, con.bra);
 
     if (con.nword != basis.nword || con.n_kets != n) throw std::runtime_error("local shape");
     if (con.diag.size() != n || con.strong_degree.size() != n || con.weak_degree.size() != n) {
@@ -388,7 +271,7 @@ inline void check_local(
     }
 
     for (std::size_t i = 0; i < n; ++i) {
-        if (!same_state(pool[i], basis.get(i))) throw std::runtime_error("local prefix");
+        if (!same_state(batch[i], basis.get(i))) throw std::runtime_error("local prefix");
     }
 
     for (std::size_t ik = 0; ik < n; ++ik) {
@@ -400,7 +283,7 @@ inline void check_local(
         std::vector<double> got(n, 0.0);
         for (int p = con.strong_ptr[ik]; p < con.strong_ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.strong_bra[t])]);
+            const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.strong_bra[t])]);
             if (ib < 0) throw std::runtime_error("strong bra");
             const double h = con.strong_h[t];
             if (!(std::abs(h) >= eps1)) throw std::runtime_error("strong eps");
@@ -417,7 +300,7 @@ inline void check_local(
         i64 seen = 0;
         for (int p = con.weak_ptr[ik]; p < con.weak_ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), pool[static_cast<std::size_t>(con.weak_bra[t])]);
+            const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.weak_bra[t])]);
             if (ib < 0) throw std::runtime_error("weak bra");
             const double h = con.weak_h[t];
             const double a = std::abs(h);
@@ -428,5 +311,74 @@ inline void check_local(
         }
         const i64 want = con.weak_degree[ik] > 0.0 ? n_draw : 0;
         if (seen != want) throw std::runtime_error("weak draw");
+    }
+}
+
+inline void check_project(const Hamiltonian& ham, const Basis& basis, double eps) {
+    const std::size_t n = basis.size();
+    const Basis kets = take_basis(basis, std::min<std::size_t>(3u, n));
+    const std::size_t nk = kets.size();
+    std::vector<double> scale(nk, 0.0);
+    for (std::size_t i = 0; i < nk; ++i) scale[i] = 0.23 - 0.04 * static_cast<double>(i % 5);
+
+    const StateBatchView exclude = kets.view();
+    const auto out = ham.project(kets.view(), scale, eps, &exclude);
+    const auto batch = batch_view(out.nword, out.bra);
+    if (out.nword != basis.nword || out.hpsi.size() != batch.n_states) {
+        throw std::runtime_error("project shape");
+    }
+    if (!out.diag.empty() && out.diag.size() != batch.n_states) {
+        throw std::runtime_error("project diag shape");
+    }
+
+    std::vector<double> ref(n, 0.0);
+    for (std::size_t ib = 0; ib < n; ++ib) {
+        if (find_state(exclude, basis.get(ib)) >= 0) continue;
+        for (std::size_t ik = 0; ik < nk; ++ik) {
+            const double term = ham.hij(basis.get(ib), kets.get(ik)) * scale[ik];
+            if (std::abs(term) >= eps) ref[ib] += term;
+        }
+    }
+
+    std::vector<double> got(n, 0.0);
+    for (std::size_t ibra = 0; ibra < batch.n_states; ++ibra) {
+        const int ib = find_state(basis.view(), batch[ibra]);
+        if (ib < 0) throw std::runtime_error("project bra");
+        if (find_state(exclude, batch[ibra]) >= 0) throw std::runtime_error("project exclude");
+        if (got[static_cast<std::size_t>(ib)] != 0.0) throw std::runtime_error("project dup");
+        got[static_cast<std::size_t>(ib)] = out.hpsi[ibra];
+        near(out.hpsi[ibra], ref[static_cast<std::size_t>(ib)], "project hpsi");
+    }
+    for (std::size_t ib = 0; ib < n; ++ib) near(got[ib], ref[ib], "project exact");
+}
+
+inline void check_sample_project(const Hamiltonian& ham, const Basis& basis) {
+    const std::size_t n = basis.size();
+    const Basis kets = take_basis(basis, std::min<std::size_t>(3u, n));
+    const std::size_t nk = kets.size();
+    const std::size_t ns = 2;
+    std::vector<double> scale(nk, 0.0);
+    for (std::size_t i = 0; i < nk; ++i) scale[i] = 0.21 - 0.03 * static_cast<double>(i % 3);
+    std::vector<i64> counts(ns * nk, 3);
+
+    const StateBatchView exclude = kets.view();
+    const auto out = ham.sample_project(kets.view(), scale, counts, ns, 0.30, 0.02, &exclude, 19);
+    const auto batch = batch_view(out.nword, out.bra);
+    if (out.nword != basis.nword || out.n_streams != ns) throw std::runtime_error("sample project shape");
+    if (out.hpsi.size() != ns * batch.n_states) throw std::runtime_error("sample project hpsi");
+    if (!out.diag.empty() && out.diag.size() != batch.n_states) {
+        throw std::runtime_error("sample project diag");
+    }
+
+    for (std::size_t ibra = 0; ibra < batch.n_states; ++ibra) {
+        if (find_state(basis.view(), batch[ibra]) < 0) throw std::runtime_error("sample project bra");
+        if (find_state(exclude, batch[ibra]) >= 0) throw std::runtime_error("sample project exclude");
+        for (std::size_t jb = ibra + 1u; jb < batch.n_states; ++jb) {
+            if (same_state(batch[ibra], batch[jb])) throw std::runtime_error("sample project dup");
+        }
+        for (std::size_t s = 0; s < ns; ++s) {
+            const double value = out.hpsi[s * batch.n_states + ibra];
+            if (!std::isfinite(value)) throw std::runtime_error("sample project finite");
+        }
     }
 }

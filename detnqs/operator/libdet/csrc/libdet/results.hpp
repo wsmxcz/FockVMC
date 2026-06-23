@@ -7,7 +7,7 @@
 
 namespace libdet {
 
-enum class LocalMode : unsigned char {
+enum class AssembleMode : unsigned char {
     unique,
     flat,
 };
@@ -24,7 +24,7 @@ struct Conns {
     u32 nword = 0;
     std::size_t n_kets = 0;
     std::size_t n_streams = 1;
-    std::vector<u64> bra_words;
+    std::vector<u64> bra;
     std::vector<double> diag;
     std::vector<i32> ptr;
     std::vector<i32> idx;
@@ -50,17 +50,17 @@ struct LocalConn {
 
 struct Projection {
     u32 nword = 0;
-    std::vector<u64> bra_words;
+    std::vector<u64> bra;
     std::vector<double> hpsi;
-    std::vector<double> diags;
+    std::vector<double> diag;
 };
 
 struct Projections {
     u32 nword = 0;
     std::size_t n_streams = 0;
-    std::vector<u64> bra_words;
+    std::vector<u64> bra;
     std::vector<double> hpsi;
-    std::vector<double> diags;
+    std::vector<double> diag;
 };
 
 } // namespace libdet

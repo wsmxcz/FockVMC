@@ -39,23 +39,230 @@ namespace libdet::rhf {
 
 namespace detail {
 
-struct SampleBuffer {
-    SampleBuffer(u32 nword, std::size_t streams)
-        : n_streams(streams), bras(nword) {}
+struct Term {
+    Excitation excitation;
+    double h = 0.0;
+};
 
-    std::size_t n_streams = 0;
-    DetPool bras;
-    std::vector<double> hpsi;
+struct Item {
+    std::vector<Term> term;
+};
 
-    void add(std::size_t stream, DetRef bra, double value) {
-        const i32 idx = bras.find_or_add(bra);
-        const std::size_t pos = static_cast<std::size_t>(idx);
-        if ((pos + 1u) * n_streams > hpsi.size()) {
-            hpsi.resize((pos + 1u) * n_streams, 0.0);
+
+struct Bin {
+    std::vector<i32> slot;
+    std::vector<u64> words;
+    std::vector<i32> bra;
+};
+
+struct Part {
+    explicit Part(std::size_t n) : bin(n) {}
+    std::vector<Bin> bin;
+};
+
+struct Shard {
+    Shard(u32 nw, DetBatchView ks) : nword(nw), kets(ks) {}
+
+    u32 nword = 0;
+    DetBatchView kets{};
+    std::vector<u64> words;
+    ankerl::unordered_dense::map<u64, std::vector<i32>> map;
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return words.size() / det_size(nword);
+    }
+
+    void add_ket(i32 iket) {
+        map[det_fingerprint(kets[static_cast<std::size_t>(iket)])].push_back(iket);
+    }
+
+    [[nodiscard]] bool same(i32 code, DetRef det) const noexcept {
+        if (code >= 0) {
+            return det_equal(kets[static_cast<std::size_t>(code)], det);
         }
-        hpsi[pos * n_streams + stream] += value;
+        const std::size_t idx = static_cast<std::size_t>(-1 - code);
+        return det_equal(det_at(words, nword, idx), det);
+    }
+
+    [[nodiscard]] i32 find_add(DetRef det) {
+        const u64 fingerprint = det_fingerprint(det);
+        auto& hits = map[fingerprint];
+        for (i32 code : hits) {
+            if (same(code, det)) return code;
+        }
+
+        const i32 code = -1 - to_i32(size());
+        append_det(words, det);
+        hits.push_back(code);
+        return code;
     }
 };
+
+inline void copy_det_to(std::vector<u64>& words, std::size_t idet, DetRef det) {
+    const std::size_t stride = det_size(det.nword());
+    u64* dst = words.data() + idet * stride;
+    std::copy(det.alpha().begin(), det.alpha().end(), dst);
+    std::copy(det.beta().begin(), det.beta().end(), dst + det.nword());
+}
+
+[[nodiscard]] inline ::libdet::Conns assemble_conn(
+    DetBatchView kets,
+    std::span<const Item> items,
+    std::span<const double> diag,
+    std::span<const double> degree,
+    std::size_t n_streams,
+    ::libdet::AssembleMode mode
+) {
+    const u32 nword = kets.nword;
+    const std::size_t n_kets = kets.n_dets;
+    if (items.size() != n_streams * n_kets) {
+        throw std::invalid_argument("assemble_conn: item shape mismatch");
+    }
+    if (diag.size() != n_kets || degree.size() != n_kets) {
+        throw std::invalid_argument("assemble_conn: meta shape mismatch");
+    }
+
+    ::libdet::Conns out;
+    out.nword = nword;
+    out.n_kets = n_kets;
+    out.n_streams = n_streams;
+    out.diag.assign(diag.begin(), diag.end());
+    out.degree.assign(degree.begin(), degree.end());
+    out.ptr.resize(items.size() + 1u, 0);
+
+    std::size_t n_term = 0;
+    for (std::size_t row = 0; row < items.size(); ++row) {
+        out.ptr[row] = to_i32(n_term);
+        n_term += items[row].term.size();
+    }
+    out.ptr[items.size()] = to_i32(n_term);
+    out.idx.resize(n_term);
+    out.h.resize(n_term);
+
+    if (mode == ::libdet::AssembleMode::flat) {
+        const std::size_t stride = det_size(nword);
+        copy_batch(out.bra, kets);
+        out.bra.resize((n_kets + n_term) * stride);
+
+#pragma omp parallel
+        {
+            DetScratch scratch(nword);
+
+#pragma omp for schedule(guided)
+            for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
+                const std::size_t row = static_cast<std::size_t>(rr);
+                const std::size_t iket = row % n_kets;
+                const DetRef ket = kets[iket];
+                const Item& item = items[row];
+
+                for (std::size_t k = 0; k < item.term.size(); ++k) {
+                    const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
+                    const std::size_t ibra = n_kets + slot;
+                    const Term& term = item.term[k];
+                    const DetRef bra = apply(ket, term.excitation, scratch);
+                    copy_det_to(out.bra, ibra, bra);
+                    out.idx[slot] = to_i32(ibra);
+                    out.h[slot] = term.h;
+                }
+            }
+        }
+        return out;
+    }
+
+    const int nthread = std::max(1, omp_get_max_threads());
+    const std::size_t n_shard = ceil_pow2(2u * static_cast<std::size_t>(nthread));
+    const std::size_t mask = n_shard - 1u;
+
+    std::vector<Part> parts;
+    parts.reserve(static_cast<std::size_t>(nthread));
+    for (int t = 0; t < nthread; ++t) parts.emplace_back(n_shard);
+
+#pragma omp parallel
+    {
+        const int tid = omp_get_thread_num();
+        Part& part = parts[static_cast<std::size_t>(tid)];
+        DetScratch scratch(nword);
+
+#pragma omp for schedule(guided)
+        for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
+            const std::size_t row = static_cast<std::size_t>(rr);
+            const std::size_t iket = row % n_kets;
+            const DetRef ket = kets[iket];
+            const Item& item = items[row];
+
+            for (std::size_t k = 0; k < item.term.size(); ++k) {
+                const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
+                const Term& term = item.term[k];
+                const DetRef bra = apply(ket, term.excitation, scratch);
+                Bin& bin = part.bin[det_fingerprint(bra) & mask];
+                bin.slot.push_back(to_i32(slot));
+                append_det(bin.words, bra);
+                out.h[slot] = term.h;
+            }
+        }
+    }
+
+    std::vector<std::vector<i32>> ket_bin(n_shard);
+    for (std::size_t iket = 0; iket < n_kets; ++iket) {
+        ket_bin[det_fingerprint(kets[iket]) & mask].push_back(to_i32(iket));
+    }
+
+    std::vector<Shard> shard;
+    shard.reserve(n_shard);
+    for (std::size_t s = 0; s < n_shard; ++s) shard.emplace_back(nword, kets);
+
+#pragma omp parallel for schedule(static)
+    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
+        const std::size_t s = static_cast<std::size_t>(ss);
+        Shard& unique = shard[s];
+        std::size_t n_route = ket_bin[s].size();
+        for (const Part& part : parts) n_route += part.bin[s].slot.size();
+        unique.map.reserve(n_route);
+        unique.words.reserve(n_route * det_size(nword));
+
+        for (i32 iket : ket_bin[s]) unique.add_ket(iket);
+
+        for (Part& part : parts) {
+            Bin& bin = part.bin[s];
+            const std::size_t n = bin.slot.size();
+            bin.bra.resize(n);
+            for (std::size_t k = 0; k < n; ++k) {
+                bin.bra[k] = unique.find_add(det_at(bin.words, nword, k));
+            }
+        }
+    }
+
+    std::vector<std::size_t> start(n_shard + 1u, 0u);
+    start[0] = n_kets;
+    for (std::size_t s = 0; s < n_shard; ++s) start[s + 1u] = start[s] + shard[s].size();
+
+    copy_batch(out.bra, kets);
+    out.bra.resize(start.back() * det_size(nword));
+
+#pragma omp parallel for schedule(static)
+    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
+        const std::size_t s = static_cast<std::size_t>(ss);
+        const std::size_t stride = det_size(nword);
+        std::copy(
+            shard[s].words.begin(),
+            shard[s].words.end(),
+            out.bra.begin() + static_cast<std::ptrdiff_t>(start[s] * stride)
+        );
+
+        for (const Part& part : parts) {
+            const Bin& bin = part.bin[s];
+            for (std::size_t k = 0; k < bin.slot.size(); ++k) {
+                const i32 code = bin.bra[k];
+                const i32 ibra = code >= 0
+                    ? code
+                    : to_i32(start[s] + static_cast<std::size_t>(-1 - code));
+                out.idx[static_cast<std::size_t>(bin.slot[k])] = ibra;
+            }
+        }
+    }
+
+    return out;
+}
 
 } // namespace detail
 
@@ -65,7 +272,8 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
     std::size_t n_streams,
     double eps1,
     double eps2,
-    u64 seed
+    u64 seed,
+    ::libdet::AssembleMode mode
 ) const {
     check_dets(kets, "sample_conn(kets)");
     check_sample_eps(eps1, eps2);
@@ -80,6 +288,8 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
     if (std::any_of(counts.begin(), counts.end(), [](i64 n) { return n < 0; })) {
         throw std::invalid_argument("sample_conn: counts must be nonnegative");
     }
+
+    std::vector<double> ket_diag(kets.n_dets, 0.0);
     std::vector<double> ket_degree(kets.n_dets, 0.0);
     std::vector<std::vector<::libdet::sample::Hit>> hits(n_streams * kets.n_dets);
 
@@ -103,6 +313,7 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
                 const std::size_t iket = static_cast<std::size_t>(ii);
                 const Conns& conns = *all[iket];
                 const ConnSpan win = conns.span(eps1, eps2);
+                ket_diag[iket] = conns.diag;
                 ket_degree[iket] = win.degree;
                 if (!(win.degree > 0.0)) continue;
 
@@ -149,6 +360,7 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
                         degree += abs_h;
                     }
                 );
+                ket_diag[iket] = element.diag();
                 ket_degree[iket] = degree;
                 if (!(degree > 0.0)) continue;
 
@@ -170,46 +382,44 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
         }
     }
 
-    ::libdet::Conns out;
-    out.nword = nword_;
-    out.n_kets = kets.n_dets;
-    out.n_streams = n_streams;
-    out.ptr.assign(1, 0);
+    std::vector<detail::Item> items(n_streams * kets.n_dets);
+#pragma omp parallel for schedule(guided)
+    for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
+        const std::size_t row = static_cast<std::size_t>(rr);
+        const std::size_t iket = row % kets.n_dets;
+        const auto& row_hits = hits[row];
+        detail::Item& item = items[row];
+        std::size_t n_term = 0;
+        for (const auto& hit : row_hits) n_term += static_cast<std::size_t>(hit.count);
+        item.term.reserve(n_term);
 
-    DetPool pool(kets);
-    DetScratch bra_scratch(nword_);
-    for (std::size_t stream = 0; stream < n_streams; ++stream) {
-        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-            const DetRef ket = kets[iket];
-            for (const auto& hit : hits[stream * kets.n_dets + iket]) {
-                Excitation excitation;
-                double h = 0.0;
-                if (use_cache) {
-                    const Conn& term = all[iket]->terms[hit.conn];
-                    excitation = term.excitation;
-                    h = term.h;
-                } else {
-                    const Candidate& term = direct[iket][hit.conn];
-                    excitation = term.excitation;
-                    h = term.h;
-                }
-                const DetRef bra = apply(ket, excitation, bra_scratch);
-                const i32 idx = pool.find_or_add(bra);
-                for (i64 n = 0; n < hit.count; ++n) {
-                    out.idx.push_back(idx);
-                    out.h.push_back(h);
-                }
+        for (const auto& hit : row_hits) {
+            Excitation excitation;
+            double h = 0.0;
+            if (use_cache) {
+                const Conn& term = all[iket]->terms[hit.conn];
+                excitation = term.excitation;
+                h = term.h;
+            } else {
+                const Candidate& term = direct[iket][hit.conn];
+                excitation = term.excitation;
+                h = term.h;
             }
-            out.ptr.push_back(to_i32(out.idx.size()));
+            for (i64 n = 0; n < hit.count; ++n) {
+                item.term.push_back(detail::Term{excitation, h});
+            }
         }
     }
 
-    out.bra_words = std::move(pool.words());
-    out.degree.assign(kets.n_dets, 0.0);
-    for (std::size_t iket = 0; iket < kets.n_dets; ++iket) out.degree[iket] = ket_degree[iket];
-    return out;
+    return detail::assemble_conn(
+        kets,
+        items,
+        ket_diag,
+        ket_degree,
+        n_streams,
+        mode
+    );
 }
-
 
 inline ::libdet::LocalConn Hamiltonian::local_conn(
     DetBatchView kets,
@@ -217,7 +427,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     double eps2,
     std::span<const i64> counts,
     u64 seed,
-    ::libdet::LocalMode mode
+    ::libdet::AssembleMode mode
 ) const {
     check_dets(kets, "local_conn(kets)");
     check_sample_eps(eps1, eps2);
@@ -395,14 +605,9 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         }
     };
 
-    const auto pow2 = [](std::size_t n) {
-        std::size_t p = 1;
-        while (p < n) p <<= 1u;
-        return p;
-    };
 
     const int nthread = std::max(1, omp_get_max_threads());
-    const std::size_t n_shard = pow2(2u * static_cast<std::size_t>(nthread));
+    const std::size_t n_shard = ceil_pow2(2u * static_cast<std::size_t>(nthread));
     const std::size_t mask = n_shard - 1u;
 
     ::libdet::LocalConn out;
@@ -435,7 +640,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     out.weak_h.resize(n_weak);
     out.weak_count.resize(n_weak);
 
-    if (mode == ::libdet::LocalMode::flat) {
+    if (mode == ::libdet::AssembleMode::flat) {
         const std::size_t stride = det_size(nword_);
         copy_batch(out.bra, kets);
         out.bra.resize((kets.n_dets + n_strong + n_weak) * stride);
@@ -444,7 +649,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         {
             DetScratch scratch(nword_);
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
             for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
                 const std::size_t iket = static_cast<std::size_t>(ii);
                 const DetRef ket = kets[iket];
@@ -498,7 +703,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         auto& part = parts[static_cast<std::size_t>(tid)];
         DetScratch scratch(nword_);
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
             const DetRef ket = kets[iket];
@@ -559,14 +764,14 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         }
     }
 
-    std::vector<std::size_t> base(n_shard + 1u, 0u);
-    base[0] = kets.n_dets;
+    std::vector<std::size_t> start(n_shard + 1u, 0u);
+    start[0] = kets.n_dets;
     for (std::size_t s = 0; s < n_shard; ++s) {
-        base[s + 1u] = base[s] + shard[s].size();
+        start[s + 1u] = start[s] + shard[s].size();
     }
 
     copy_batch(out.bra, kets);
-    out.bra.resize(base.back() * det_size(nword_));
+    out.bra.resize(start.back() * det_size(nword_));
 
 #pragma omp parallel for schedule(static)
     for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
@@ -575,7 +780,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         std::copy(
             shard[s].words.begin(),
             shard[s].words.end(),
-            out.bra.begin() + static_cast<std::ptrdiff_t>(base[s] * stride)
+            out.bra.begin() + static_cast<std::ptrdiff_t>(start[s] * stride)
         );
 
         for (const Part& part : parts) {
@@ -584,7 +789,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
                 const i32 code = bin.bra[k];
                 const i32 ibra = code >= 0
                     ? code
-                    : to_i32(base[s] + static_cast<std::size_t>(-1 - code));
+                    : to_i32(start[s] + static_cast<std::size_t>(-1 - code));
                 const i32 slot = bin.slot[k];
                 if (slot >= 0) {
                     out.strong_bra[static_cast<std::size_t>(slot)] = ibra;
@@ -639,31 +844,72 @@ inline Projections Hamiltonian::sample_project(
     const double scale_max = max_abs(scale);
     const auto screen_table_ptr = screen_table(screen_table_cutoff(eps2, scale_max));
 
-    Projections out;
-    out.nword = nword_;
-    out.n_streams = n_streams;
+    struct Bin {
+        std::vector<u64> words;
+        std::vector<i32> stream;
+        std::vector<double> value;
+    };
+
+    struct Part {
+        explicit Part(std::size_t n) : bin(n) {}
+        std::vector<Bin> bin;
+    };
+
+    struct Shard {
+        Shard(u32 nw, std::size_t ns) : nword(nw), n_streams(ns) {}
+
+        u32 nword = 0;
+        std::size_t n_streams = 0;
+        std::vector<u64> words;
+        std::vector<double> hpsi;
+        ankerl::unordered_dense::map<u64, std::vector<i32>> map;
+
+        [[nodiscard]] std::size_t size() const noexcept {
+            return words.size() / det_size(nword);
+        }
+
+        [[nodiscard]] i32 find_add(DetRef det) {
+            const u64 fingerprint = det_fingerprint(det);
+            auto& hits = map[fingerprint];
+            for (i32 idx : hits) {
+                if (det_equal(det_at(words, nword, static_cast<std::size_t>(idx)), det)) {
+                    return idx;
+                }
+            }
+
+            const i32 idx = to_i32(size());
+            append_det(words, det);
+            hpsi.resize((static_cast<std::size_t>(idx) + 1u) * n_streams, 0.0);
+            hits.push_back(idx);
+            return idx;
+        }
+    };
+
     const int nthread = std::max(1, omp_get_max_threads());
-    std::vector<detail::SampleBuffer> parts;
+    const std::size_t n_shard = ceil_pow2(2u * static_cast<std::size_t>(nthread));
+    const std::size_t mask = n_shard - 1u;
+
+    std::vector<Part> parts;
     parts.reserve(static_cast<std::size_t>(nthread));
-    for (int t = 0; t < nthread; ++t) {
-        parts.emplace_back(nword_, n_streams);
-    }
+    for (int t = 0; t < nthread; ++t) parts.emplace_back(n_shard);
 
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& part = parts[static_cast<std::size_t>(tid)];
+        Part& part = parts[static_cast<std::size_t>(tid)];
+
         struct Candidate {
             Excitation excitation;
             double h = 0.0;
         };
+
         std::vector<std::vector<double>> targets(n_streams);
         std::vector<Candidate> conns;
         std::vector<std::size_t> pos(n_streams, 0u);
-        DetScratch bra_scratch(nword_);
+        DetScratch scratch(nword_);
         ElementScratch element(ints_.norb());
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
             const std::size_t iket = static_cast<std::size_t>(ii);
             const double s = scale[iket];
@@ -672,10 +918,10 @@ inline Projections Hamiltonian::sample_project(
 
             const double h_eps2 = eps2 <= 0.0 ? 0.0 : eps2 / abs_s;
             const double h_eps1 = std::isfinite(eps1) ? eps1 / abs_s : eps1;
+            const DetRef ket = kets[iket];
 
             conns.clear();
             double degree = 0.0;
-            const DetRef ket = kets[iket];
             visit_external(
                 ints_,
                 screen_table_ptr.get(),
@@ -685,7 +931,7 @@ inline Projections Hamiltonian::sample_project(
                 [&](Excitation excitation, double h) {
                     const double abs_h = std::abs(h);
                     if (!(abs_h > 0.0) || abs_h >= h_eps1) return;
-                    const DetRef bra = apply(ket, excitation, bra_scratch);
+                    const DetRef bra = apply(ket, excitation, scratch);
                     if (exclude_index.find(bra) >= 0) return;
                     conns.push_back(Candidate{excitation, h});
                     degree += abs_h;
@@ -695,7 +941,7 @@ inline Projections Hamiltonian::sample_project(
 
             bool any = false;
             for (std::size_t stream = 0; stream < n_streams; ++stream) {
-                ::libdet::sample::Rng rng(sample_seed(seed, kets[iket], 0, static_cast<int>(stream)));
+                ::libdet::sample::Rng rng(sample_seed(seed, ket, 0, static_cast<int>(stream)));
                 ::libdet::sample::make_targets(
                     rng,
                     counts[stream * kets.n_dets + iket],
@@ -713,7 +959,9 @@ inline Projections Hamiltonian::sample_project(
                 cdf += abs_h;
                 if (!(abs_h > 0.0)) continue;
 
-                const DetRef bra = apply(kets[iket], term.excitation, bra_scratch);
+                const DetRef bra = apply(ket, term.excitation, scratch);
+                Bin& bin = part.bin[det_fingerprint(bra) & mask];
+
                 for (std::size_t stream = 0; stream < n_streams; ++stream) {
                     i64 count = 0;
                     while (
@@ -729,43 +977,71 @@ inline Projections Hamiltonian::sample_project(
                     const double value =
                         static_cast<double>(count) * s * term.h * degree
                         / (static_cast<double>(draws) * abs_h);
-                    part.add(stream, bra, value);
+                    append_det(bin.words, bra);
+                    bin.stream.push_back(to_i32(stream));
+                    bin.value.push_back(value);
                 }
             }
         }
     }
 
-    std::vector<u64> bra_words;
-    for (const auto& part : parts) {
-        bra_words.insert(
-            bra_words.end(),
-            part.bras.words().begin(),
-            part.bras.words().end()
-        );
-    }
-    sort_unique_dets(bra_words, nword_);
+    std::vector<Shard> shard;
+    shard.reserve(n_shard);
+    for (std::size_t s = 0; s < n_shard; ++s) shard.emplace_back(nword_, n_streams);
 
-    const DetBatchView bras{
-        bra_words.data(),
-        bra_words.size() / det_size(nword_),
-        nword_
-    };
-    const DetIndex bra_index(bras);
-    out.bra_words = std::move(bra_words);
-    out.hpsi.assign(n_streams * bras.n_dets, 0.0);
+#pragma omp parallel for schedule(static)
+    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
+        const std::size_t s = static_cast<std::size_t>(ss);
+        Shard& acc = shard[s];
+        std::size_t n_route = 0;
+        for (const Part& part : parts) n_route += part.bin[s].value.size();
+        acc.map.reserve(n_route);
+        acc.words.reserve(n_route * det_size(nword_));
 
-    for (const auto& part : parts) {
-        for (std::size_t i = 0; i < part.bras.size(); ++i) {
-            const i32 ibra = bra_index.find(part.bras.get(i));
-            if (ibra < 0) continue;
-            for (std::size_t stream = 0; stream < n_streams; ++stream) {
-                out.hpsi[stream * bras.n_dets + static_cast<std::size_t>(ibra)] +=
-                    part.hpsi[i * n_streams + stream];
+        for (const Part& part : parts) {
+            const Bin& bin = part.bin[s];
+            for (std::size_t k = 0; k < bin.value.size(); ++k) {
+                const i32 ibra = acc.find_add(det_at(bin.words, nword_, k));
+                const std::size_t pos =
+                    static_cast<std::size_t>(ibra) * n_streams
+                    + static_cast<std::size_t>(bin.stream[k]);
+                acc.hpsi[pos] += bin.value[k];
             }
         }
     }
 
-    if (bras.n_dets > 0) out.diags = diags(bras);
+    std::vector<std::size_t> start(n_shard + 1u, 0u);
+    for (std::size_t s = 0; s < n_shard; ++s) start[s + 1u] = start[s] + shard[s].size();
+
+    Projections out;
+    out.nword = nword_;
+    out.n_streams = n_streams;
+    out.bra.resize(start.back() * det_size(nword_));
+    out.hpsi.assign(n_streams * start.back(), 0.0);
+
+#pragma omp parallel for schedule(static)
+    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
+        const std::size_t s = static_cast<std::size_t>(ss);
+        const std::size_t stride = det_size(nword_);
+        std::copy(
+            shard[s].words.begin(),
+            shard[s].words.end(),
+            out.bra.begin() + static_cast<std::ptrdiff_t>(start[s] * stride)
+        );
+
+        for (std::size_t ibra = 0; ibra < shard[s].size(); ++ibra) {
+            const std::size_t dst = start[s] + ibra;
+            for (std::size_t stream = 0; stream < n_streams; ++stream) {
+                out.hpsi[stream * start.back() + dst] =
+                    shard[s].hpsi[ibra * n_streams + stream];
+            }
+        }
+    }
+
+    if (start.back() > 0) {
+        const DetBatchView bras{out.bra.data(), start.back(), nword_};
+        out.diag = diags(bras);
+    }
     return out;
 }
 

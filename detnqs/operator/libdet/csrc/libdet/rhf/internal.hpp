@@ -181,7 +181,7 @@ inline std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
     {
         DetOcc occ(ints_.norb());
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(dets.n_dets); ++ii) {
             const std::size_t idet = static_cast<std::size_t>(ii);
             fill_occ(dets[idet], ints_.norb(), occ);
@@ -229,7 +229,7 @@ inline Matrix Hamiltonian::matrix(
         VisitScratch scratch;
         ElementScratch element(ints_.norb());
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(nbras); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
@@ -255,7 +255,7 @@ inline Matrix Hamiltonian::matrix(
             out.data.resize(nnz);
         }
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(nbras); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
@@ -305,7 +305,7 @@ inline std::vector<double> Hamiltonian::matvec(
         VisitScratch scratch;
         ElementScratch element(ints_.norb());
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
@@ -353,7 +353,7 @@ inline std::vector<double> Hamiltonian::matmat(
         VisitScratch scratch;
         ElementScratch element(ints_.norb());
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
@@ -397,23 +397,23 @@ inline Projection Hamiltonian::project_internal(
 
     Projection out;
     out.nword = nword_;
-    copy_batch(out.bra_words, bras);
+    copy_batch(out.bra, bras);
     out.hpsi.assign(bras.n_dets, 0.0);
-    out.diags.assign(bras.n_dets, 0.0);
+    out.diag.assign(bras.n_dets, 0.0);
 
 #pragma omp parallel
     {
         VisitScratch scratch;
         ElementScratch element(ints_.norb());
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
             element.load(ints_, bra);
             const double h_bra_bra = element.diag();
             double value = 0.0;
-            out.diags[ibra] = h_bra_bra;
+            out.diag[ibra] = h_bra_bra;
 
             const i32 diag_idx = find_det(ket_space, bra);
             if (diag_idx >= 0) {

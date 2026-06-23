@@ -137,11 +137,14 @@ class Hamiltonian:
         self,
         kets: ArrayLike,
         eps: float = 0.0,
+        *,
+        assemble_mode: str = "unique",
     ) -> Conns:
         """Return screened off-diagonal connections for each ket."""
         return self._raw.conn(
             np.ascontiguousarray(kets, dtype=np.uint64),
             float(eps),
+            assemble_mode=assemble_mode,
         )
 
     def sample_conn(
@@ -152,6 +155,7 @@ class Hamiltonian:
         eps1: float = np.inf,
         eps2: float = 0.0,
         seed: int = 0,
+        assemble_mode: str = "unique",
     ) -> Conns:
         """Sample connections in the screened span `eps2 <= |H| < eps1`."""
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
@@ -161,7 +165,12 @@ class Hamiltonian:
             else np.ascontiguousarray(counts, dtype=np.int64)
         )
         return self._raw.sample_conn(
-            kets_arr, counts_arr, float(eps1), float(eps2), int(seed)
+            kets_arr,
+            counts_arr,
+            float(eps1),
+            float(eps2),
+            int(seed),
+            assemble_mode=assemble_mode,
         )
 
 
@@ -176,8 +185,6 @@ class Hamiltonian:
         assemble_mode: str = "unique",
     ) -> LocalConn:
         """Return strong connections and weak-window samples for local energy."""
-        if assemble_mode not in {"unique", "flat"}:
-            raise ValueError("assemble_mode must be 'unique' or 'flat'")
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
         counts_arr = (
             np.full(kets_arr.shape[0], int(counts), dtype=np.int64)

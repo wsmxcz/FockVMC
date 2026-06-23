@@ -22,7 +22,7 @@ struct ConnSpan {
 struct Conns {
     double cutoff = 0.0;
     double diag = 0.0;
-    std::vector<u64> bra_words;
+    std::vector<u64> words;
     std::vector<double> h;
     std::vector<double> prefix_abs;
 
@@ -31,17 +31,17 @@ struct Conns {
     }
 
     [[nodiscard]] PathRef bra(std::size_t idx, u32 nword) const noexcept {
-        return path_at(bra_words, nword, idx);
+        return path_at(words, nword, idx);
     }
 
     void add(PathRef bra, double value) {
-        append_path(bra_words, bra);
+        append_path(words, bra);
         h.push_back(value);
     }
 
     void finish(u32 nword) {
         if (h.empty()) {
-            bra_words.clear();
+            words.clear();
             prefix_abs.assign(1u, 0.0);
             return;
         }
@@ -65,8 +65,8 @@ struct Conns {
 
                 if (a != b) return a > b;
                 return PathLess{}(
-                    path_at(bra_words, nword, lhs),
-                    path_at(bra_words, nword, rhs)
+                    path_at(words, nword, lhs),
+                    path_at(words, nword, rhs)
                 );
             }
         );
@@ -74,15 +74,15 @@ struct Conns {
         std::vector<u64> sorted_words;
         std::vector<double> sorted_h;
 
-        sorted_words.reserve(bra_words.size());
+        sorted_words.reserve(words.size());
         sorted_h.reserve(h.size());
 
         for (std::size_t old : order) {
-            append_path(sorted_words, path_at(bra_words, nword, old));
+            append_path(sorted_words, path_at(words, nword, old));
             sorted_h.push_back(h[old]);
         }
 
-        bra_words.swap(sorted_words);
+        words.swap(sorted_words);
         h.swap(sorted_h);
 
         prefix_abs.resize(h.size() + 1u);

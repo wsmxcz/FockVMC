@@ -186,17 +186,17 @@ data, or scale-dependent/exclude-dependent action data.
 The public primitives are deliberately separate. They represent different
 Hamiltonian actions and should not be merged.
 
-`conn(kets, eps)` returns deterministic screened connections:
+`conn(kets, eps, assemble_mode)` returns deterministic screened connections:
 
 $$
 |H_{bk}|\ge\epsilon.
 $$
 
-It returns a shared bra pool, diagonal elements, CSR pointers, bra indices,
-matrix elements, and Hamiltonian degrees. The output is sorted by decreasing
-`|h|`, because it is backed by sorted backend connection objects.
+It returns a bra evaluation batch, diagonal elements, CSR pointers, bra indices,
+matrix elements, and Hamiltonian degrees. Terms for each ket remain ordered by
+decreasing `|h|`, because they are backed by sorted backend connection objects.
 
-`sample_conn(kets, counts, eps1, eps2, seed)` samples the window
+`sample_conn(kets, counts, eps1, eps2, seed, assemble_mode)` samples the window
 
 $$
 \epsilon_2\le |H_{bk}|<\epsilon_1.
@@ -206,6 +206,10 @@ $$
 then ket-major. It has no sorting guarantee, and duplicates are allowed.
 If `eps2 > 0`, the sampler uses cached sorted connections. If `eps2 == 0`, it
 uses direct enumeration and does not write `ConnCache`.
+
+For both RHF and GUGA, `conn` and `sample_conn` use the same
+`assemble_mode` convention as `local_conn`. `unique` gives an exact shared bra
+batch. `flat` writes one bra per connection record.
 
 `local_conn(kets, eps1, eps2, counts, seed, assemble_mode)` returns deterministic
 strong connections and sampled weak connections. `assemble_mode` is either
@@ -283,40 +287,65 @@ local strong/weak action
 `SpaceCache` is batch-dependent and finite-space specific.
 Scratch objects are local or thread-local.
 
-Python-facing local evaluation batches always start with the input kets, and every index array refers to this batch. Python code should pass the batch directly to model evaluation and should not perform additional deduplication or merging.
+Connection batches start with the input kets, and every index array refers to
+that batch. The caller should evaluate the returned batch directly and avoid
+additional deduplication or merging.
 
-For local batches, `assemble_mode` controls the tradeoff between hash work and model evaluation:
+Assembly has two modes:
 
 $$
-T_{\mathrm{unique}}
-=
-T_{\mathrm{hash}}
-+
-T_{\mathrm{model}}(n_{\mathrm{ket}}+U),
+T_{\rm unique}=T_{\rm hash}+T_{\rm model}(n_{\rm ket}+U),
 \qquad
-T_{\mathrm{flat}}
-=
-T_{\mathrm{copy}}
-+
-T_{\mathrm{model}}(n_{\mathrm{ket}}+N).
+T_{\rm flat}=T_{\rm copy}+T_{\rm model}(n_{\rm ket}+N).
 $$
 
-Here (U) is the number of unique connected bras, and (N) is the number of strong plus sampled weak records. `unique` uses sharded exact deduplication: bras are routed by fingerprint, deduplicated within independent shards, and gathered after the input-ket prefix. `flat` skips global deduplication and appends every recorded bra directly. Both modes return the same `LocalConn` layout.
+Here $U$ is the number of unique connected bras and $N$ is the number of
+connection records. `unique` routes bras by fingerprint, deduplicates them
+inside independent shards, and gathers the shards after the input ket prefix.
+`flat` skips global deduplication and appends every recorded bra directly.
+Both modes preserve the same index semantics.
+
+### Parallel model
+
+Fock-space connection counts can be highly uneven. The backend therefore keeps
+parallel ownership tied to the output form.
+
+Known-space actions own output bras:
+
+```text
+bra -> connected kets -> output value
+```
+
+This gives direct writes for `matvec`, `matmat`, and explicit-bra `project`,
+and CSR assembly for `matrix` without a global term sort or dense thread-local
+reductions.
+
+Connection assembly separates:
+
+```text
+ket work -> pointer prefix -> unique or flat assembly
+```
+
+External projection uses sharded exact accumulation rather than a global
+`sort_unique` followed by serial accumulation. RHF and GUGA keep separate
+backend kernels, but expose the same connection-batch semantics. The invariant
+is that expensive Hamiltonian work is distributed over kets or bras, while
+global assembly is either linear (`flat`) or shard-local (`unique`).
 
 The design prioritizes:
 
 ```text
 tight candidate tables
-positive-cutoff graph caching
-parallel local strong/weak assembly
-minimal Python-side graph manipulation
+positive-cutoff connection caching
+sharded exact assembly
+minimal boundary-side batch manipulation
 ```
 
 ---
 
 ## 5. Naming, ownership, and parallelism
 
-Hamiltonian graph language uses:
+Hamiltonian connection language uses:
 
 ```text
 ket
@@ -325,16 +354,15 @@ connection
 degree
 ```
 
-Avoid `row`, `neighbor`, `source`, and `reverse` for Hamiltonian graph logic.
-Matrix rows, CSR rows, tree nodes, and optimizer objectives may use their
-standard terminology.
+Avoid graph-oriented names such as `node`, `edge`, `source`, and `target` in Hamiltonian logic.
+Use standard matrix terminology only where a matrix or CSR object is being described.
 
 Ownership rules:
 
 ```text
 Integral      immutable Hamiltonian data
 ScreenTable   immutable candidate table
-ConnCache     positive-cutoff exact ket graphs
+ConnCache     positive-cutoff exact connections
 SpaceCache    last finite-space search object
 Scratch       local or thread-local workspace
 Results       owned output arrays

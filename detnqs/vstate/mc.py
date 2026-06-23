@@ -78,8 +78,6 @@ class MCState(VState):
 
         if int(eloc_sample) < 0:
             raise ValueError("eloc_sample must be nonnegative")
-        if assemble_mode not in {"unique", "flat"}:
-            raise ValueError("assemble_mode must be 'unique' or 'flat'")
 
         _, init_key, sample_key = jax.random.split(key, 3)
 

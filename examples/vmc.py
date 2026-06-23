@@ -21,30 +21,30 @@ import utils as run_utils
 def main():
     # numerical defaults.
     dq_utils.batch.configure(chunk=8192)
-    dq_utils.precision.configure("double")
+    dq_utils.precision.configure("single")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
     # problem and integral tensors.
     mol = gto.M(
-        atom=
-        '''
-        N   0.53920000,  0.00000000,  0.0000000
-        N   -0.539200000,  0.00000000,  0.0000000
-        ''',
         # atom=
         # '''
-        # O   0.00000000,  0.00000000,  0.00000000
-        # H   0.75700000,  0.00000000,  0.58590000
-        # H  -0.75700000,  0.00000000,  0.58590000
+        # N   0.53920000,  0.00000000,  0.0000000
+        # N   -0.539200000,  0.00000000,  0.0000000
         # ''',
+        atom=
+        '''
+        O   0.00000000,  0.00000000,  0.00000000
+        H   0.75700000,  0.00000000,  0.58590000
+        H  -0.75700000,  0.00000000,  0.58590000
+        ''',
         # atom=
         # '''
         # Li   3.732, 0.25, 0.0
         # Li   2.0, 0.25, 0.0
         # O  2.866, -0.25, 0.0
         # ''',
-        basis="sto-3g",
+        basis="cc-pvdz",
         unit="Angstrom",
         spin=0,
         verbose=0,
@@ -63,15 +63,15 @@ def main():
 
     # e_fci = -109.099941428008 # N2_631g
     # e_fci = -87.892693 # Li2O_sto3g
-    # e_fci = -76.243769 # H2O_ccpvdz
+    e_fci = -76.243769 # H2O_ccpvdz
 
-    solver = fci.direct_spin0.FCI(mol)
-    e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
-    s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
+    # solver = fci.direct_spin0.FCI(mol)
+    # e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
+    # s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
 
-    print(f"SCF energy : {mf.e_tot:.12f}")
-    print(f"FCI energy : {e_fci:.12f}")
-    print(f"S^2        : {s2:.6f}")
+    # print(f"SCF energy : {mf.e_tot:.12f}")
+    # print(f"FCI energy : {e_fci:.12f}")
+    # print(f"S^2        : {s2:.6f}")
 
     # variational state and optimizer.
     model = RBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
@@ -79,7 +79,7 @@ def main():
     sampler = MCSampler(
         n_samples=4096,
         n_chains=4096,
-        thermal_steps=0,
+        thermal_steps=128,
         proposal="ham",
         blur=0.5,
     )
@@ -120,7 +120,7 @@ def main():
 
     history = []
     total_times = defaultdict(float)
-    steps = 1000
+    steps = 100
 
     # optimization loop.
     for step in range(steps):

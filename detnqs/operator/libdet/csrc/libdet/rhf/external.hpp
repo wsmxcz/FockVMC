@@ -190,26 +190,7 @@ inline void visit_external(
 
 namespace libdet::rhf {
 
-namespace detail {
 
-struct ProjectBuffer {
-    explicit ProjectBuffer(u32 nword) : bras(nword) {}
-
-    DetPool bras;
-    std::vector<double> hpsi;
-
-    void add(DetRef bra, double value) {
-        const i32 idx = bras.find_or_add(bra);
-        const std::size_t pos = static_cast<std::size_t>(idx);
-        if (pos == hpsi.size()) {
-            hpsi.push_back(value);
-        } else {
-            hpsi[pos] += value;
-        }
-    }
-};
-
-} // namespace detail
 
 inline std::vector<u64> Hamiltonian::expand(
     DetBatchView kets,
@@ -297,18 +278,59 @@ inline Projection Hamiltonian::project(
     auto screen_table_ptr = screen_table(screen_table_cutoff(eps, scale_max));
     const DetIndex exclude_index(base);
 
-    const int nthread = std::max(1, omp_get_max_threads());
+    struct Bin {
+        std::vector<u64> words;
+        std::vector<double> value;
+    };
 
-    std::vector<detail::ProjectBuffer> local;
-    local.reserve(static_cast<std::size_t>(nthread));
-    for (int t = 0; t < nthread; ++t) local.emplace_back(nword_);
+    struct Part {
+        explicit Part(std::size_t n) : bin(n) {}
+        std::vector<Bin> bin;
+    };
+
+    struct Shard {
+        explicit Shard(u32 nw) : nword(nw) {}
+
+        u32 nword = 0;
+        std::vector<u64> words;
+        std::vector<double> hpsi;
+        ankerl::unordered_dense::map<u64, std::vector<i32>> map;
+
+        [[nodiscard]] std::size_t size() const noexcept {
+            return words.size() / det_size(nword);
+        }
+
+        [[nodiscard]] i32 find_add(DetRef det) {
+            const u64 fingerprint = det_fingerprint(det);
+            auto& hits = map[fingerprint];
+            for (i32 idx : hits) {
+                if (det_equal(det_at(words, nword, static_cast<std::size_t>(idx)), det)) {
+                    return idx;
+                }
+            }
+
+            const i32 idx = to_i32(size());
+            append_det(words, det);
+            hpsi.push_back(0.0);
+            hits.push_back(idx);
+            return idx;
+        }
+    };
+
+    const int nthread = std::max(1, omp_get_max_threads());
+    const std::size_t n_shard = ceil_pow2(2u * static_cast<std::size_t>(nthread));
+    const std::size_t mask = n_shard - 1u;
+
+    std::vector<Part> parts;
+    parts.reserve(static_cast<std::size_t>(nthread));
+    for (int t = 0; t < nthread; ++t) parts.emplace_back(n_shard);
 
 #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& part = local[static_cast<std::size_t>(tid)];
+        Part& part = parts[static_cast<std::size_t>(tid)];
         ElementScratch element(ints_.norb());
-        DetScratch bra_scratch(nword_);
+        DetScratch scratch(nword_);
 
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
@@ -317,61 +339,75 @@ inline Projection Hamiltonian::project(
             const double abs_scale = std::abs(scale_i);
             if (abs_scale <= 0.0) continue;
             const double h_eps = eps <= 0.0 ? 0.0 : eps / abs_scale;
+            const DetRef ket = kets[iket];
 
             visit_external(
                 ints_,
                 screen_table_ptr.get(),
-                kets[iket],
+                ket,
                 element,
                 h_eps,
                 [&](Excitation excitation, double h) {
-                    const DetRef bra =
-                        apply(kets[iket], excitation, bra_scratch);
-                    if (exclude_index.find(bra) < 0) {
-                        part.add(bra, h * scale_i);
-                    }
+                    const DetRef bra = apply(ket, excitation, scratch);
+                    if (exclude_index.find(bra) >= 0) return;
+                    Bin& bin = part.bin[det_fingerprint(bra) & mask];
+                    append_det(bin.words, bra);
+                    bin.value.push_back(h * scale_i);
                 }
             );
         }
     }
 
-    std::vector<u64> bra_words;
-    for (const auto& part : local) {
-        bra_words.insert(
-            bra_words.end(),
-            part.bras.words().begin(),
-            part.bras.words().end()
-        );
-    }
-    sort_unique_dets(bra_words, nword_);
+    std::vector<Shard> shard;
+    shard.reserve(n_shard);
+    for (std::size_t s = 0; s < n_shard; ++s) shard.emplace_back(nword_);
 
-    const DetBatchView bras{
-        bra_words.data(),
-        bra_words.size() / det_size(nword_),
-        nword_
-    };
-    const DetIndex bra_index(bras);
-    std::vector<double> hpsi(bras.n_dets, 0.0);
+#pragma omp parallel for schedule(static)
+    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
+        const std::size_t s = static_cast<std::size_t>(ss);
+        Shard& acc = shard[s];
+        std::size_t n_route = 0;
+        for (const Part& part : parts) n_route += part.bin[s].value.size();
+        acc.map.reserve(n_route);
+        acc.words.reserve(n_route * det_size(nword_));
 
-    for (const auto& part : local) {
-        for (std::size_t i = 0; i < part.hpsi.size(); ++i) {
-            const i32 ibra = bra_index.find(part.bras.get(i));
-            if (ibra >= 0) {
-                hpsi[static_cast<std::size_t>(ibra)] += part.hpsi[i];
+        for (const Part& part : parts) {
+            const Bin& bin = part.bin[s];
+            for (std::size_t k = 0; k < bin.value.size(); ++k) {
+                const i32 ibra = acc.find_add(det_at(bin.words, nword_, k));
+                acc.hpsi[static_cast<std::size_t>(ibra)] += bin.value[k];
             }
         }
     }
 
+    std::vector<std::size_t> start(n_shard + 1u, 0u);
+    for (std::size_t s = 0; s < n_shard; ++s) start[s + 1u] = start[s] + shard[s].size();
+
     Projection out;
     out.nword = nword_;
-    out.bra_words = std::move(bra_words);
-    out.hpsi = std::move(hpsi);
-    const DetBatchView out_bras{
-        out.bra_words.data(),
-        out.hpsi.size(),
-        nword_
-    };
-    out.diags = diags(out_bras);
+    out.bra.resize(start.back() * det_size(nword_));
+    out.hpsi.assign(start.back(), 0.0);
+
+#pragma omp parallel for schedule(static)
+    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
+        const std::size_t s = static_cast<std::size_t>(ss);
+        const std::size_t stride = det_size(nword_);
+        std::copy(
+            shard[s].words.begin(),
+            shard[s].words.end(),
+            out.bra.begin() + static_cast<std::ptrdiff_t>(start[s] * stride)
+        );
+        std::copy(
+            shard[s].hpsi.begin(),
+            shard[s].hpsi.end(),
+            out.hpsi.begin() + static_cast<std::ptrdiff_t>(start[s])
+        );
+    }
+
+    if (start.back() > 0) {
+        const DetBatchView bras{out.bra.data(), start.back(), nword_};
+        out.diag = diags(bras);
+    }
     return out;
 }
 
@@ -450,43 +486,34 @@ Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
 
 inline ::libdet::Conns Hamiltonian::conn(
     DetBatchView kets,
-    double eps
+    double eps,
+    ::libdet::AssembleMode mode
 ) const {
     check_dets(kets, "conn(kets)");
     check_eps(eps);
 
     const auto all = cached_conns(kets, eps);
+    std::vector<detail::Item> items(kets.n_dets);
+    std::vector<double> diag(kets.n_dets, 0.0);
+    std::vector<double> degree(kets.n_dets, 0.0);
 
-    ::libdet::Conns out;
-    out.nword = nword_;
-    out.n_kets = kets.n_dets;
-    out.diag.reserve(kets.n_dets);
-    out.degree.reserve(kets.n_dets);
-    out.ptr.assign(1, 0);
-
-    DetPool pool(kets);
-    DetScratch bra_scratch(nword_);
-
-    for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-        const DetRef ket = kets[iket];
+#pragma omp parallel for schedule(guided)
+    for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+        const std::size_t iket = static_cast<std::size_t>(ii);
         const Conns& ket_conn = *all[iket];
-        out.diag.push_back(ket_conn.diag);
-
         const ConnSpan win = ket_conn.span(std::numeric_limits<double>::infinity(), eps);
-        const double degree = win.degree;
+        detail::Item& item = items[iket];
+        item.term.reserve(win.end - win.begin);
+        diag[iket] = ket_conn.diag;
+        degree[iket] = win.degree;
+
         for (std::size_t k = win.begin; k < win.end; ++k) {
             const Conn& term = ket_conn.terms[k];
-            const DetRef bra = apply(ket, term.excitation, bra_scratch);
-            out.idx.push_back(pool.find_or_add(bra));
-            out.h.push_back(term.h);
+            item.term.push_back(detail::Term{term.excitation, term.h});
         }
-
-        out.degree.push_back(degree);
-        out.ptr.push_back(to_i32(out.idx.size()));
     }
 
-    out.bra_words = std::move(pool.words());
-    return out;
+    return detail::assemble_conn(kets, items, diag, degree, 1u, mode);
 }
 
 } // namespace libdet::rhf

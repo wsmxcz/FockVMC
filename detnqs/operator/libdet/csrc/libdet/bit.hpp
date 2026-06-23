@@ -24,6 +24,12 @@ using i64 = std::int64_t;
     return static_cast<i32>(n);
 }
 
+[[nodiscard]] inline std::size_t ceil_pow2(std::size_t n) noexcept {
+    std::size_t p = 1;
+    while (p < n) p <<= 1u;
+    return p;
+}
+
 [[nodiscard]] inline constexpr std::size_t word_pair_size(u32 nword) noexcept {
     return 2u * static_cast<std::size_t>(nword);
 }

@@ -63,7 +63,8 @@ public:
 
     [[nodiscard]] ::libdet::Conns conn(
         DetBatchView kets,
-        double eps = 0.0
+        double eps = 0.0,
+        ::libdet::AssembleMode mode = ::libdet::AssembleMode::unique
     ) const;
 
     [[nodiscard]] ::libdet::LocalConn local_conn(
@@ -72,7 +73,7 @@ public:
         double eps2,
         std::span<const i64> counts,
         u64 seed = 0,
-        ::libdet::LocalMode mode = ::libdet::LocalMode::unique
+        ::libdet::AssembleMode mode = ::libdet::AssembleMode::unique
     ) const;
 
     [[nodiscard]] ::libdet::Conns sample_conn(
@@ -81,7 +82,8 @@ public:
         std::size_t n_streams,
         double eps1,
         double eps2,
-        u64 seed = 0
+        u64 seed = 0,
+        ::libdet::AssembleMode mode = ::libdet::AssembleMode::unique
     ) const;
 
     [[nodiscard]] Projections sample_project(

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -198,14 +199,15 @@ public:
 
     [[nodiscard]] Conns conn(
         StateBatchView kets,
-        double eps = 0.0
+        double eps = 0.0,
+        AssembleMode mode = AssembleMode::unique
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.conn(detail::as_dets(kets), eps);
+                return ham.conn(detail::as_dets(kets), eps, mode);
             } else {
-                return ham.conn(detail::as_paths(kets), eps);
+                return ham.conn(detail::as_paths(kets), eps, mode);
             }
         });
     }
@@ -216,14 +218,15 @@ public:
         std::size_t n_streams,
         double eps1,
         double eps2,
-        u64 seed = 0
+        u64 seed = 0,
+        AssembleMode mode = AssembleMode::unique
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed);
+                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed, mode);
             } else {
-                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed);
+                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed, mode);
             }
         });
     }
@@ -235,7 +238,7 @@ public:
         double eps2,
         std::span<const i64> counts,
         u64 seed = 0,
-        LocalMode mode = LocalMode::unique
+        AssembleMode mode = AssembleMode::unique
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;

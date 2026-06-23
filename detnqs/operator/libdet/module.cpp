@@ -108,10 +108,10 @@ struct Counts {
 };
 
 
-[[nodiscard]] libdet::LocalMode local_mode(const std::string& name) {
-    if (name == "unique") return libdet::LocalMode::unique;
-    if (name == "flat") return libdet::LocalMode::flat;
-    throw std::invalid_argument("local_conn: assemble_mode must be 'unique' or 'flat'");
+[[nodiscard]] libdet::AssembleMode parse_mode(const std::string& name) {
+    if (name == "unique") return libdet::AssembleMode::unique;
+    if (name == "flat") return libdet::AssembleMode::flat;
+    throw std::invalid_argument("assemble_mode must be 'unique' or 'flat'");
 }
 
 [[nodiscard]] Counts counts(const I64Array& x, std::size_t n_ket) {
@@ -200,7 +200,7 @@ NB_MODULE(libdet, m) {
         .def_prop_ro("n_kets", [](const libdet::Conns& x) { return x.n_kets; })
         .def_prop_ro("n_streams", [](const libdet::Conns& x) { return x.n_streams; })
         .def_prop_ro("bra", [](const libdet::Conns& x) {
-            return view_states(x.bra_words, x.nword);
+            return view_states(x.bra, x.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("diag", [](const libdet::Conns& x) { return view(x.diag); }, nb::rv_policy::reference_internal)
         .def_prop_ro("ptr", [](const libdet::Conns& x) { return view(x.ptr); }, nb::rv_policy::reference_internal)
@@ -227,21 +227,21 @@ NB_MODULE(libdet, m) {
 
     nb::class_<libdet::Projection>(m, "Projection")
         .def_prop_ro("bra", [](const libdet::Projection& x) {
-            return view_states(x.bra_words, x.hpsi.size(), x.nword);
+            return view_states(x.bra, x.hpsi.size(), x.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi", [](const libdet::Projection& x) { return view(x.hpsi); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::Projection& x) { return view(x.diags); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("diag", [](const libdet::Projection& x) { return view(x.diag); }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projections>(m, "Projections")
         .def_prop_ro("n_streams", [](const libdet::Projections& x) { return x.n_streams; })
         .def_prop_ro("bra", [](const libdet::Projections& x) {
-            return view_states(x.bra_words, x.nword);
+            return view_states(x.bra, x.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi", [](const libdet::Projections& x) {
-            const std::size_t n_bra = x.bra_words.size() / libdet::word_pair_size(x.nword);
+            const std::size_t n_bra = x.bra.size() / libdet::word_pair_size(x.nword);
             return view(x.hpsi, x.n_streams, n_bra);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::Projections& x) { return view(x.diags); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("diag", [](const libdet::Projections& x) { return view(x.diag); }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Hamiltonian>(m, "Hamiltonian")
         .def_static("det", [](const F64Mat& h1, const F64Vec& eri, double ecore) {
@@ -319,11 +319,13 @@ NB_MODULE(libdet, m) {
         .def("conn", [](
             const libdet::Hamiltonian& ham,
             const StateArray& kets,
-            double eps
+            double eps,
+            const std::string& mode_name
         ) {
             const auto kv = states(kets);
-            return no_gil([&] { return ham.conn(kv, eps); });
-        }, "kets"_a.noconvert(), "eps"_a = 0.0)
+            const auto mode = parse_mode(mode_name);
+            return no_gil([&] { return ham.conn(kv, eps, mode); });
+        }, "kets"_a.noconvert(), "eps"_a = 0.0, "assemble_mode"_a = "unique")
 
         .def("sample_conn", [](
             const libdet::Hamiltonian& ham,
@@ -331,10 +333,12 @@ NB_MODULE(libdet, m) {
             const I64Array& counts_arr,
             double eps1,
             double eps2,
-            std::uint64_t seed
+            std::uint64_t seed,
+            const std::string& mode_name
         ) {
             const auto kv = states(kets);
             const auto cv = counts(counts_arr, kv.n_states);
+            const auto mode = parse_mode(mode_name);
             return no_gil([&] {
                 return ham.sample_conn(
                     kv,
@@ -342,10 +346,11 @@ NB_MODULE(libdet, m) {
                     cv.n_stream,
                     eps1,
                     eps2,
-                    seed
+                    seed,
+                    mode
                 );
             });
-        }, "kets"_a.noconvert(), "counts"_a.noconvert(), "eps1"_a, "eps2"_a = 0.0, "seed"_a = std::uint64_t{0})
+        }, "kets"_a.noconvert(), "counts"_a.noconvert(), "eps1"_a, "eps2"_a = 0.0, "seed"_a = std::uint64_t{0}, "assemble_mode"_a = "unique")
 
 
         .def("local_conn", [](
@@ -355,11 +360,11 @@ NB_MODULE(libdet, m) {
             double eps2,
             const I64Array& counts_arr,
             std::uint64_t seed,
-            const std::string& assemble_mode
+            const std::string& mode_name
         ) {
             const auto kv = states(kets);
             const auto cv = counts(counts_arr, kv.n_states);
-            const auto mode = local_mode(assemble_mode);
+            const auto mode = parse_mode(mode_name);
             if (cv.n_stream != 1u) {
                 throw std::invalid_argument("local_conn: counts must have shape (N,)");
             }

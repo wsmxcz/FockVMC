@@ -7,11 +7,9 @@ import jax
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from .. import utils
-from ..model.base import Model
-from ..model.base import to_psi
+from ..model import Model, to_psi
 from ..optimizer import Geometry
-from ..utils import precision
+from ..utils import Timer, batch, precision, tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,17 +57,17 @@ class ExactState:
         return replace(self, **updates)
 
     def _run(self, *, grad: bool, geometry: bool):
-        timer = utils.Timer()
-        rdtype = precision.dtype("calc", "real", host=True)
+        timer = Timer()
+        rdtype = precision.real("calc", host=True)
 
         with timer("forward"):
-            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.x)
+            logpsi_jax = batch.apply(self.model.logpsi, self.params, self.x)
             jax.block_until_ready(logpsi_jax)
-            logpsi_h = utils.host(logpsi_jax)
+            logpsi_h = tree.host(logpsi_jax)
 
         with timer("reduce"):
-            psi = precision.asarray(np.asarray(to_psi(logpsi_h)).reshape(-1), "calc", host=True)
-            hpsi = precision.asarray(np.asarray(self.hmat.dot(psi)).reshape(-1), "calc", host=True)
+            psi = precision.cast(np.asarray(to_psi(logpsi_h)).reshape(-1), "calc", host=True)
+            hpsi = precision.cast(np.asarray(self.hmat.dot(psi)).reshape(-1), "calc", host=True)
 
             norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
             energy = float((np.vdot(psi, hpsi) / norm).real)
@@ -85,16 +83,16 @@ class ExactState:
                 dlogpsi = rdtype(2.0 / norm) * np.conjugate(psi) * residual
                 cot = self.model.cotangent(logpsi_h, dlogpsi)
 
-                gradient = utils.vjp(
+                gradient = batch.vjp(
                     self.model.coord,
                     self.params,
                     self.x,
-                    utils.device(precision.asarray(cot, "model", "real", host=True)),
+                    precision.device(cot, "model", "real"),
                 )
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    w = precision.asarray(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
+                    w = precision.cast(np.abs(psi) ** 2 / norm, "sr", "real", host=True)
                     sqrt_w = np.sqrt(w)
 
                     b_log = np.zeros_like(dlogpsi)
@@ -104,15 +102,8 @@ class ExactState:
                         theta=self.params,
                         coord=self.model.coord,
                         x=self.x,
-                        w=utils.device(w),
-                        b=utils.device(
-                            precision.asarray(
-                                self.model.cotangent(logpsi_h, b_log),
-                                "sr",
-                                "real",
-                                host=True,
-                            )
-                        ),
+                        w=precision.device(w, "sr", "real"),
+                        b=precision.device(self.model.cotangent(logpsi_h, b_log), "sr", "real"),
                     )
 
         stats = {

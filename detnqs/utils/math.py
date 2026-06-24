@@ -33,33 +33,33 @@ def masked_sum(x, mask, axis: int = 0):
 
 
 def masked_logsumexp(x, mask, axis: int = -1) -> jax.Array:
-    """Log-sum-exp over active entries, returning -inf for empty rows."""
+    """Log-sum-exp over active entries, returning -inf for empty segments."""
     x = jnp.asarray(x)
     mask = jnp.asarray(mask, dtype=bool)
     return jax.nn.logsumexp(jnp.where(mask, x, -jnp.inf), axis=axis)
 
 
-def segment_logsumexp(row_ptr: np.ndarray, values: np.ndarray, n_row: int) -> np.ndarray:
-    """CSR row-wise logsumexp on host."""
-    row_ptr = np.asarray(row_ptr, dtype=np.int64)
+def segment_logsumexp(ptr: np.ndarray, values: np.ndarray, n: int) -> np.ndarray:
+    """Host log-sum-exp over contiguous segments."""
+    ptr = np.asarray(ptr, dtype=np.int64)
     values = np.asarray(values)
 
     dtype = values.dtype if np.issubdtype(values.dtype, np.floating) else np.float64
     values = values.astype(dtype, copy=False)
 
-    out = np.full(int(n_row), -np.inf, dtype=dtype)
-    count = np.diff(row_ptr)
-    rows = np.flatnonzero(count > 0)
+    out = np.full(int(n), -np.inf, dtype=dtype)
+    count = np.diff(ptr)
+    active = np.flatnonzero(count > 0)
 
-    if rows.size == 0:
+    if active.size == 0:
         return out
 
-    start = row_ptr[rows]
-    row_max = np.maximum.reduceat(values, start)
+    start = ptr[active]
+    seg_max = np.maximum.reduceat(values, start)
 
-    label = np.repeat(np.arange(rows.size, dtype=np.int64), count[rows])
-    shifted = np.exp(values - row_max[label])
-    row_sum = np.add.reduceat(shifted, start)
+    label = np.repeat(np.arange(active.size, dtype=np.int64), count[active])
+    shifted = np.exp(values - seg_max[label])
+    seg_sum = np.add.reduceat(shifted, start)
 
-    out[rows] = row_max + np.log(row_sum)
+    out[active] = seg_max + np.log(seg_sum)
     return out

@@ -7,9 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .. import utils
 from ..hilbert import DetSector
-from ..utils import precision
+from ..utils import Timer, batch, precision
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,16 +81,11 @@ class MCSampler:
         x = np.ascontiguousarray(x)
 
         unique, _, inv = H.sector.unique(x)
-        value = utils.apply(model.logabs, theta, unique)
+        value = batch.apply(model.logabs, theta, unique)
         jax.block_until_ready(value)
 
-        unique_logabs = precision.asarray(
-            np.asarray(utils.host(value)).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
-        logabs = precision.asarray(unique_logabs[inv], "calc", "real", host=True)
+        unique_logabs = precision.host(value, "calc", "real").reshape(-1)
+        logabs = precision.cast(unique_logabs[inv], "calc", "real", host=True)
 
         state = Chains(
             key=key,
@@ -128,8 +122,8 @@ class MCSampler:
         if state.x.shape[0] != n_chains:
             raise ValueError("chain state size must equal n_chains")
 
-        timer = utils.Timer()
-        rdtype = precision.dtype("calc", "real", host=True)
+        timer = Timer()
+        rdtype = precision.real("calc", host=True)
         alpha = float(state.alpha) if self.alpha is None else float(self.alpha)
         state = replace(state, alpha=alpha)
 
@@ -206,11 +200,11 @@ class MCSampler:
         *,
         eps1: float,
         n_observe: int = 0,
-        timer: utils.Timer | None = None,
+        timer: Timer | None = None,
     ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, int]]:
         """Observe selected chains and make one Metropolis transition."""
-        timer = utils.Timer() if timer is None else timer
-        rdtype = precision.dtype("calc", "real", host=True)
+        timer = Timer() if timer is None else timer
+        rdtype = precision.real("calc", host=True)
         n_chain = int(state.x.shape[0])
         n_observe = int(n_observe)
         beta = float(self.blur)
@@ -230,7 +224,7 @@ class MCSampler:
 
             ket, first, ket_index = H.sector.unique(state.x)
             n_ket = int(ket.shape[0])
-            ket_logabs = precision.asarray(
+            ket_logabs = precision.cast(
                 state.logabs[np.asarray(first, dtype=np.int64)],
                 "calc",
                 "real",
@@ -363,7 +357,7 @@ class MCSampler:
                     conn_bra = np.asarray(conn.bra, dtype=np.uint64)
                     conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
                     conn_idx = np.asarray(conn.idx, dtype=np.int64)
-                    conn_degree = precision.asarray(
+                    conn_degree = precision.cast(
                         np.asarray(conn.degree),
                         "calc",
                         "real",
@@ -412,19 +406,14 @@ class MCSampler:
                 new = needed[needed >= n_ket]
                 if new.size:
                     with timer("forward"):
-                        value = utils.apply(
+                        value = batch.apply(
                             model.logabs,
                             theta,
                             np.ascontiguousarray(conn_bra[new]),
                         )
                         jax.block_until_ready(value)
 
-                    pool_logabs[new] = precision.asarray(
-                        np.asarray(utils.host(value)).reshape(-1),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
+                    pool_logabs[new] = precision.host(value, "calc", "real").reshape(-1)
 
                 logabs_candidate[active] = pool_logabs[candidate_pos[active]]
 
@@ -444,19 +433,14 @@ class MCSampler:
                 unknown = ~known
                 if unknown.any():
                     with timer("forward"):
-                        value = utils.apply(
+                        value = batch.apply(
                             model.logabs,
                             theta,
                             np.ascontiguousarray(unique_candidate[unknown]),
                         )
                         jax.block_until_ready(value)
 
-                    unique_logabs[unknown] = precision.asarray(
-                        np.asarray(utils.host(value)).reshape(-1),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
+                    unique_logabs[unknown] = precision.host(value, "calc", "real").reshape(-1)
 
                 logabs_candidate[active] = unique_logabs[inverse]
 
@@ -475,7 +459,7 @@ class MCSampler:
                     x=np.ascontiguousarray(
                         np.where(accept.reshape((-1, 1, 1)), candidate, state.x)
                     ),
-                    logabs=precision.asarray(
+                    logabs=precision.cast(
                         np.where(accept, logabs_candidate, state.logabs),
                         "calc",
                         "real",

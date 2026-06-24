@@ -8,9 +8,7 @@ import primme
 from scipy.sparse.linalg import LinearOperator
 from pyscf import ao2mo, gto, scf
 
-from detnqs import hilbert, operator
-
-import utils as run_utils
+from detnqs import hilbert, operator, utils
 
 
 @dataclass(slots=True)
@@ -150,18 +148,10 @@ def hci_solve(
     diags = H.diag(dets).reshape(-1)
     energy = float(diags[0])
 
-    metrics = {
-        "cycle": ("Cycle", "d", 6),
-        "n_det": ("Ndet", "d", 9),
-        "n_new": ("Nnew", "d", 9),
-        "energy": ("Energy", ".10f", 16),
-        "time_screen": ("Screen", ".3f", 9),
-        "time_conns": ("Conns", ".3f", 9),
-        "time_solve": ("Solve", ".3f", 9),
-        "time_other": ("Other", ".3f", 9),
-    }
-
-    line = run_utils.print_metrics(metrics)
+    log = utils.Logger(
+        every=1,
+        keys=["step", "n_det", "n_new", "energy", "time_screen", "time_conns", "time_solve", "time_other"],
+    )
 
     for it in range(max_cycle):
         # Select new external configurations above the cutoff.
@@ -186,10 +176,9 @@ def hci_solve(
             mode=davidson_mode,
         )
 
-        run_utils.print_metrics(
-            metrics,
+        log.add(
+            it + 1,
             {
-                "cycle": it + 1,
                 "n_det": len(dets),
                 "n_new": cand.shape[0],
                 "energy": energy,
@@ -200,7 +189,6 @@ def hci_solve(
             },
         )
 
-    print(line)
     print(f"Total time: {time.perf_counter() - t_total:.2f}s")
 
     return HCIState(

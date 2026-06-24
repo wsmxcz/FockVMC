@@ -31,7 +31,7 @@ class RBM(Model):
 
     @nn.compact
     def __call__(self, x: jax.Array) -> jax.Array:
-        dtype = precision.dtype("model", "complex") if self.dtype is None else self.dtype
+        dtype = precision.complex("model") if self.dtype is None else self.dtype
 
         n_sorb = 2 * int(self.norb)
         n_hidden = int(self.alpha) * n_sorb

@@ -5,8 +5,7 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, fci, gto, scf
 
-from detnqs import hilbert
-from detnqs import operator
+from detnqs import hilbert, operator
 from detnqs.model import RBM
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState

@@ -6,8 +6,8 @@ from typing import Any
 
 import jax
 import optax
-import detnqs
 
+from .optimizer import stats as optimizer_stats
 from .utils import Timer
 
 Callback = Callable[[int, dict[str, float], "VMC"], bool | None]
@@ -81,7 +81,7 @@ class VMC:
         out["loss"] = float(loss)
         out["step"] = float(self.step_count)
         out.update(timer.stats())
-        out.update(detnqs.optimizer.stats(self.opt_state))
+        out.update(optimizer_stats(self.opt_state))
 
         self.step_count += 1
         return out

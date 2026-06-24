@@ -5,8 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from ..hilbert import DetSector
-from ..hilbert import SpinSector
+from ..hilbert import DetSector, SpinSector
 
 
 def occupation(x: Any, spin: int, p: int) -> np.ndarray:

@@ -7,11 +7,9 @@ import jax
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from .. import utils
-from ..model.base import Model
-from ..model.base import to_psi
+from ..model import Model, to_psi
 from ..optimizer import Geometry
-from ..utils import precision
+from ..utils import Timer, batch, precision, tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,10 +60,10 @@ class SelectedState:
         basis = self.basis
 
         if eps is not None:
-            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.basis)
+            logpsi_jax = batch.apply(self.model.logpsi, self.params, self.basis)
             jax.block_until_ready(logpsi_jax)
 
-            psi = np.asarray(to_psi(utils.host(logpsi_jax))).reshape(-1)
+            psi = np.asarray(to_psi(tree.host(logpsi_jax))).reshape(-1)
             coeff = np.abs(psi).astype(np.float64, copy=False)
 
             norm = float(np.linalg.norm(coeff))
@@ -81,15 +79,10 @@ class SelectedState:
             if bra.shape[0] > 0:
                 basis = np.ascontiguousarray(np.concatenate([self.basis, bra], axis=0))
 
-        logabs_jax = utils.apply(self.model.logabs, self.params, basis)
+        logabs_jax = batch.apply(self.model.logabs, self.params, basis)
         jax.block_until_ready(logabs_jax)
 
-        logabs = precision.asarray(
-            np.asarray(utils.host(logabs_jax)).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
+        logabs = precision.host(logabs_jax, "calc", "real").reshape(-1)
         basis = self.H.sector.asarray(selector(logabs, basis))
 
         if basis.shape[0] == 0:
@@ -108,21 +101,21 @@ class SelectedState:
         return replace(self, **updates)
 
     def _run(self, *, grad: bool, geometry: bool):
-        timer = utils.Timer()
-        rdtype = precision.dtype("calc", "real", host=True)
+        timer = Timer()
+        rdtype = precision.real("calc", host=True)
 
         with timer("forward"):
-            logpsi_jax = utils.apply(self.model.logpsi, self.params, self.basis)
+            logpsi_jax = batch.apply(self.model.logpsi, self.params, self.basis)
             jax.block_until_ready(logpsi_jax)
-            logpsi_h = utils.host(logpsi_jax)
+            logpsi_h = tree.host(logpsi_jax)
 
         with timer("reduce"):
-            psi = precision.asarray(
+            psi = precision.cast(
                 np.asarray(to_psi(logpsi_h)).reshape(-1),
                 "calc",
                 host=True,
             )
-            hpsi = precision.asarray(
+            hpsi = precision.cast(
                 np.asarray(self.hmat.dot(psi)).reshape(-1),
                 "calc",
                 host=True,
@@ -142,16 +135,16 @@ class SelectedState:
                 dlogpsi = rdtype(2.0 / norm) * np.conjugate(psi) * residual
                 cot = self.model.cotangent(logpsi_h, dlogpsi)
 
-                gradient = utils.vjp(
+                gradient = batch.vjp(
                     self.model.coord,
                     self.params,
                     self.basis,
-                    utils.device(precision.asarray(cot, "model", "real", host=True)),
+                    precision.device(cot, "model", "real"),
                 )
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    w = precision.asarray(
+                    w = precision.cast(
                         np.abs(psi) ** 2 / norm,
                         "sr",
                         "real",
@@ -166,15 +159,8 @@ class SelectedState:
                         theta=self.params,
                         coord=self.model.coord,
                         x=self.basis,
-                        w=utils.device(w),
-                        b=utils.device(
-                            precision.asarray(
-                                self.model.cotangent(logpsi_h, b_log),
-                                "sr",
-                                "real",
-                                host=True,
-                            )
-                        ),
+                        w=precision.device(w, "sr", "real"),
+                        b=precision.device(self.model.cotangent(logpsi_h, b_log), "sr", "real"),
                     )
 
         stats = {

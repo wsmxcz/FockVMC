@@ -10,7 +10,7 @@ from jax import tree_util
 from jax.flatten_util import ravel_pytree
 
 from ..utils import batch
-from ..utils import normalize
+from ..utils import math
 from ..utils import precision
 from . import linalg
 from .base import Geometry
@@ -48,7 +48,7 @@ def minsr(
     def init_fn(params: Tree) -> MinSRState:
         del params
 
-        dtype = precision.dtype("sr", "real")
+        dtype = precision.real("sr")
         zero = jnp.asarray(0.0, dtype=dtype)
 
         return MinSRState(
@@ -75,15 +75,15 @@ def minsr(
             raise ValueError("optimizer.minsr requires geometry")
 
         shift_value = shift(state.step) if callable(shift) else shift
-        shift_t = jnp.asarray(shift_value, dtype=precision.dtype("sr", "real"))
+        shift_t = jnp.asarray(shift_value, dtype=precision.real("sr"))
 
         delta_raw, info = batch.bucket(
             _step,
             geometry.coord,
             geometry.theta,
             geometry.x,
-            precision.asarray(normalize(geometry.w), "model", "real"),
-            precision.asarray(geometry.b, "model", "real"),
+            precision.cast(math.normalize(geometry.w), "model", "real"),
+            precision.cast(geometry.b, "model", "real"),
             shift_t,
             in_axes=(None, None, 0, 0, 0, None),
             out_axes=None,
@@ -96,7 +96,7 @@ def minsr(
             geometry.theta,
         )
 
-        dtype = precision.dtype("sr", "real")
+        dtype = precision.real("sr")
         step_norm2 = sum(
             (
                 jnp.sum(
@@ -170,8 +170,8 @@ def _step(
 
         K = K + O @ O.conj().T
 
-    K = precision.asarray(K, "sr")
-    rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
+    K = precision.cast(K, "sr")
+    rhs = precision.cast(b_flat, "sr").astype(K.dtype)
 
     a, info = linalg.solve_dense(K, rhs, shift)
     a_tree = unravel_b(a.astype(dtype))

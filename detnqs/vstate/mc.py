@@ -7,14 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from detnqs import utils
-from ..model.base import Model
-from ..model.base import to_logabs
-from ..model.base import to_ratio
+from ..model import Model, to_logabs, to_ratio
 from ..optimizer import Geometry
-from ..sampler.mcmc import Chains
-from ..sampler.mcmc import MCSampler
-from ..utils import precision
+from ..sampler import Chains, MCSampler
+from ..utils import Timer, batch, math, precision, tree
 from .base import VState
 
 
@@ -125,7 +121,7 @@ class MCState(VState):
 
     def _run(self, *, grad: bool, geometry: bool):
         """Run one VMC estimator pass."""
-        timer = utils.Timer()
+        timer = Timer()
         sampler_state = self.sampler_state
 
         if self.sampler.reset_chains:
@@ -157,18 +153,13 @@ class MCState(VState):
 
             with timer("forward"):
                 unique, _, inv = self.H.sector.unique(sampler_state.x)
-                value = utils.apply(self.model.logabs, self.params, unique)
+                value = batch.apply(self.model.logabs, self.params, unique)
                 jax.block_until_ready(value)
 
-                unique_logabs = precision.asarray(
-                    np.asarray(utils.host(value)).reshape(-1),
-                    "calc",
-                    "real",
-                    host=True,
-                )
+                unique_logabs = precision.host(value, "calc", "real").reshape(-1)
                 sampler_state = replace(
                     sampler_state,
-                    logabs=precision.asarray(
+                    logabs=precision.cast(
                         unique_logabs[inv],
                         "calc",
                         "real",
@@ -194,7 +185,7 @@ class MCState(VState):
             ket, _, sample_to_ket = self.H.sector.unique(samples)
             n_ket = int(ket.shape[0])
 
-            raw_mass = precision.asarray(
+            raw_mass = precision.cast(
                 sample_mass,
                 "calc",
                 "real",
@@ -212,8 +203,8 @@ class MCState(VState):
                 minlength=n_ket,
             )
 
-            mass = precision.asarray(mass, "calc", "real", host=True)
-            mass2 = precision.asarray(mass2, "calc", "real", host=True)
+            mass = precision.cast(mass, "calc", "real", host=True)
+            mass2 = precision.cast(mass2, "calc", "real", host=True)
 
             seed = 0
             if self.eloc_sample > 0:
@@ -233,28 +224,28 @@ class MCState(VState):
             bra = np.asarray(conn.bra, dtype=np.uint64)
             strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
             strong_bra = np.asarray(conn.strong_bra, dtype=np.int64)
-            strong_h = precision.asarray(
+            strong_h = precision.cast(
                 np.asarray(conn.strong_h),
                 "calc",
                 host=True,
             )
-            strong_w = precision.asarray(
+            strong_w = precision.cast(
                 np.asarray(conn.strong_degree),
                 "calc",
                 "real",
                 host=True,
             )
-            diag = precision.asarray(np.asarray(conn.diag), "calc", host=True)
+            diag = precision.cast(np.asarray(conn.diag), "calc", host=True)
             weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
             weak_bra = np.asarray(conn.weak_bra, dtype=np.int64)
-            weak_h = precision.asarray(np.asarray(conn.weak_h), "calc", host=True)
-            weak_count = precision.asarray(
+            weak_h = precision.cast(np.asarray(conn.weak_h), "calc", host=True)
+            weak_count = precision.cast(
                 np.asarray(conn.weak_count),
                 "calc",
                 "real",
                 host=True,
             )
-            weak_w = precision.asarray(
+            weak_w = precision.cast(
                 np.asarray(conn.weak_degree),
                 "calc",
                 "real",
@@ -262,18 +253,18 @@ class MCState(VState):
             )
 
         with timer("forward"):
-            bra_logpsi_jax = utils.apply(
+            bra_logpsi_jax = batch.apply(
                 self.model.logpsi,
                 self.params,
                 bra,
             )
             jax.block_until_ready(bra_logpsi_jax)
-            bra_logpsi = utils.host(bra_logpsi_jax)
+            bra_logpsi = tree.host(bra_logpsi_jax)
 
         with timer("reduce"):
             ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
 
-            bra_logabs = precision.asarray(
+            bra_logabs = precision.cast(
                 np.asarray(to_logabs(bra_logpsi)).reshape(-1),
                 "calc",
                 "real",
@@ -281,7 +272,7 @@ class MCState(VState):
             )
             ket_logabs = bra_logabs[:n_ket]
 
-            rdtype = precision.dtype("calc", "real", host=True)
+            rdtype = precision.real("calc", host=True)
             tiny = rdtype(precision.tiny("calc"))
             alpha_r = rdtype(alpha)
             beta = rdtype(float(self.sampler.blur))
@@ -290,7 +281,7 @@ class MCState(VState):
                 np.arange(n_ket, dtype=np.int64),
                 np.diff(strong_ptr),
             )
-            logrho = precision.asarray(
+            logrho = precision.cast(
                 alpha_r * ket_logabs,
                 "calc",
                 "real",
@@ -300,7 +291,7 @@ class MCState(VState):
             # Exact strong-window local energy.
             eloc = diag.copy()
             if strong_h.size:
-                ratio = precision.asarray(
+                ratio = precision.cast(
                     np.asarray(
                         to_ratio(
                             jax.tree.map(lambda a: a[strong_bra], bra_logpsi),
@@ -338,9 +329,9 @@ class MCState(VState):
                     )
                     log_blur = (
                         np.log(beta)
-                        + utils.segment_logsumexp(strong_ptr, terms, n_ket)
+                        + math.segment_logsumexp(strong_ptr, terms, n_ket)
                     )
-                    lognu = precision.asarray(
+                    lognu = precision.cast(
                         np.logaddexp(log_stay, log_blur),
                         "calc",
                         "real",
@@ -355,7 +346,7 @@ class MCState(VState):
                     np.arange(n_ket, dtype=np.int64),
                     np.diff(weak_ptr),
                 )
-                ratio = precision.asarray(
+                ratio = precision.cast(
                     np.asarray(
                         to_ratio(
                             jax.tree.map(lambda a: a[weak_bra], bra_logpsi),
@@ -373,7 +364,7 @@ class MCState(VState):
                 eloc = eloc.astype(np.result_type(eloc, contribution), copy=False)
                 np.add.at(eloc, weak_ket, contribution)
 
-            eloc = precision.asarray(eloc, "calc", host=True)
+            eloc = precision.cast(eloc, "calc", host=True)
 
             w, ess = self._weights(
                 mass=mass,
@@ -391,29 +382,23 @@ class MCState(VState):
 
         if grad:
             with timer("backward"):
-                dlogpsi = precision.asarray(
+                dlogpsi = precision.cast(
                     2.0 * w * residual,
                     "calc",
                     host=True,
                 )
                 cotangent = self.model.cotangent(ket_logpsi, dlogpsi)
 
-                gradient = utils.vjp(
+                gradient = batch.vjp(
                     self.model.coord,
                     self.params,
                     ket,
-                    utils.device(
-                        precision.asarray(
-                            cotangent,
-                            "model",
-                            host=True,
-                        )
-                    ),
+                    precision.device(cotangent, "model"),
                 )
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    b_log = precision.asarray(
+                    b_log = precision.cast(
                         2.0 * np.sqrt(w) * residual,
                         "sr",
                         "real",
@@ -424,21 +409,8 @@ class MCState(VState):
                         theta=self.params,
                         coord=self.model.coord,
                         x=ket,
-                        w=utils.device(
-                            precision.asarray(
-                                w,
-                                "sr",
-                                "real",
-                                host=True,
-                            )
-                        ),
-                        b=utils.device(
-                            precision.asarray(
-                                self.model.cotangent(ket_logpsi, b_log),
-                                "sr",
-                                host=True,
-                            )
-                        ),
+                        w=precision.device(w, "sr", "real"),
+                        b=precision.device(self.model.cotangent(ket_logpsi, b_log), "sr"),
                     )
 
         sampler_state = self._auto_alpha(
@@ -491,7 +463,7 @@ class MCState(VState):
         lognu: np.ndarray,
     ) -> tuple[np.ndarray, float]:
         """Normalize Born weights and compute sample-level ESS."""
-        rdtype = precision.dtype("calc", "real", host=True)
+        rdtype = precision.real("calc", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
         logu = rdtype(2.0) * ket_logabs - lognu
@@ -509,7 +481,7 @@ class MCState(VState):
         if not np.isfinite(norm) or norm <= 0.0:
             raise FloatingPointError("importance weights have zero total mass")
 
-        w = precision.asarray(
+        w = precision.cast(
             weighted_mass / max(norm, float(tiny)),
             "calc",
             "real",
@@ -534,25 +506,25 @@ class MCState(VState):
         if self.sampler.alpha is not None:
             return sampler_state
 
-        rdtype = precision.dtype("calc", "real", host=True)
+        rdtype = precision.real("calc", host=True)
         tiny = rdtype(precision.tiny("calc"))
 
         alpha = float(np.clip(float(sampler_state.alpha), 0.0, 2.0))
         alpha_step = int(sampler_state.alpha_step) + 1
 
-        ell = precision.asarray(
+        ell = precision.cast(
             np.asarray(ket_logabs).reshape(-1),
             "calc",
             "real",
             host=True,
         )
-        weight = precision.asarray(
+        weight = precision.cast(
             np.asarray(w).reshape(-1),
             "calc",
             "real",
             host=True,
         )
-        resid = precision.asarray(
+        resid = precision.cast(
             np.asarray(np.abs(eloc - energy)).reshape(-1),
             "calc",
             "real",

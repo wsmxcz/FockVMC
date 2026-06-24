@@ -10,7 +10,7 @@ import optax
 from jax import tree_util
 from jax.flatten_util import ravel_pytree
 
-from ..utils import normalize
+from ..utils import math
 from ..utils import precision
 from . import linalg
 from .base import Geometry
@@ -59,7 +59,7 @@ def sr(
     def init_fn(params: Tree) -> SRState:
         flat, _ = ravel_pytree(params)
 
-        dtype = precision.dtype("sr", "real")
+        dtype = precision.real("sr")
         zero = jnp.asarray(0.0, dtype=dtype)
 
         stats = {
@@ -91,10 +91,10 @@ def sr(
             raise ValueError("optimizer.sr requires geometry")
 
         shift_value = shift(state.step) if callable(shift) else shift
-        shift_t = jnp.asarray(shift_value, dtype=precision.dtype("sr", "real"))
+        shift_t = jnp.asarray(shift_value, dtype=precision.real("sr"))
 
         theta = geometry.theta
-        w = precision.asarray(normalize(geometry.w), "model", "real")
+        w = precision.cast(math.normalize(geometry.w), "model", "real")
 
         # The input updates are interpreted as the parameter-space force g.
         g = jax.tree.map(
@@ -131,7 +131,7 @@ def sr(
             theta,
         )
 
-        dtype = precision.dtype("sr", "real")
+        dtype = precision.real("sr")
         step_norm2 = sum(
             (
                 jnp.sum(
@@ -177,9 +177,9 @@ def _dense_step(
     O = jnp.concatenate(_blocks(coord, theta, x, w), axis=1)
 
     # S = O^dagger O.
-    S = precision.asarray(O.conj().T @ O, "sr")
+    S = precision.cast(O.conj().T @ O, "sr")
 
-    rhs = precision.asarray(g_flat, "sr").astype(S.dtype)
+    rhs = precision.cast(g_flat, "sr").astype(S.dtype)
 
     delta_flat, info = linalg.solve_dense(S, rhs, shift)
     delta = unravel(delta_flat.astype(g_flat.dtype))
@@ -225,8 +225,8 @@ def _matvec_step(
         axis=0,
     )
 
-    rhs = precision.asarray(g_flat, "sr")
-    x0 = precision.asarray(x0, "sr").astype(rhs.dtype)
+    rhs = precision.cast(g_flat, "sr")
+    x0 = precision.cast(x0, "sr").astype(rhs.dtype)
 
     delta_flat, info = linalg.solve_matvec(
         matvec,

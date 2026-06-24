@@ -5,20 +5,18 @@ import matplotlib.pyplot as plt
 
 from pyscf import ao2mo, fci, gto, scf
 
-from detnqs import utils as dq_utils
-from detnqs import hilbert, operator
+from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
 from detnqs.model import Backflow
 from detnqs.optimizer import psr
 from detnqs.vstate import ExactState
 
-import utils as run_utils
 
 
 def main():
     # numerical defaults.
-    dq_utils.batch.configure(chunk=8192)
-    dq_utils.precision.configure("double")
+    utils.batch.configure(chunk=8192)
+    utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
@@ -68,32 +66,19 @@ def main():
     )
     vmc = VMC.init(state, optimizer)
 
-    metrics = {
-        "step": ("Step", "d", 5),
-        "energy": ("Energy", ".8f", 16),
-        "error": ("|E-E0|", ".2e", 10),
-        "variance": ("Var", ".2e", 10),
-    }
-
-    line = run_utils.print_metrics(metrics)
-
-    history = []
+    log = utils.Logger(
+        every=10,
+        keys=["step", "energy", "error", "variance"],
+    )
     steps = 500
 
     # optimization loop.
     for step in range(steps):
         stats = dict(vmc.step())
-        stats["step"] = step
         stats["error"] = abs(float(stats["energy"]) - float(e_fci))
+        log.add(step, stats)
 
-        history.append(float(stats["energy"]))
-
-        if step % 10 == 0 or step == steps - 1:
-            run_utils.print_metrics(metrics, stats)
-
-    print(line)
-
-    run_utils.plot_convergence(history, e_fci)
+    log.plot("energy", benchmark=e_fci)
     plt.show()
 
 

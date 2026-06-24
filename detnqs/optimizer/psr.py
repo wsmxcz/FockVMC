@@ -10,7 +10,7 @@ from jax import tree_util
 from jax.flatten_util import ravel_pytree
 
 from ..utils import batch
-from ..utils import normalize
+from ..utils import math
 from ..utils import precision
 from . import linalg
 from .base import Geometry
@@ -69,7 +69,7 @@ def psr(
         raise ValueError("beta must satisfy 0 <= beta < 1")
 
     def init_fn(params: Tree) -> PSRState:
-        dtype = precision.dtype("sr", "real")
+        dtype = precision.real("sr")
         zero = jnp.asarray(0.0, dtype=dtype)
 
         return PSRState(
@@ -102,7 +102,7 @@ def psr(
             raise ValueError("optimizer.psr requires geometry")
 
         shift_value = shift(state.step) if callable(shift) else shift
-        shift_t = jnp.asarray(shift_value, dtype=precision.dtype("sr", "real"))
+        shift_t = jnp.asarray(shift_value, dtype=precision.real("sr"))
 
         delta_raw, q_raw, info = batch.bucket(
             _step,
@@ -111,8 +111,8 @@ def psr(
             state.p,
             state.v,
             geometry.x,
-            precision.asarray(normalize(geometry.w), "model", "real"),
-            precision.asarray(geometry.b, "model", "real"),
+            precision.cast(math.normalize(geometry.w), "model", "real"),
+            precision.cast(geometry.b, "model", "real"),
             shift_t,
             in_axes=(None, None, None, None, 0, 0, 0, None),
             out_axes=None,
@@ -142,7 +142,7 @@ def psr(
             q_raw,
         )
 
-        dtype = precision.dtype("sr", "real")
+        dtype = precision.real("sr")
         step_norm2 = sum(
             (
                 jnp.sum(
@@ -200,7 +200,7 @@ def _step(
 
     # The global scale of the correction variance defines the covariance
     # reference level.
-    v_sum = jnp.asarray(0.0, dtype=precision.dtype("sr", "real"))
+    v_sum = jnp.asarray(0.0, dtype=precision.real("sr"))
     size = 0
 
     for v_leaf in v_leaves:
@@ -249,10 +249,10 @@ def _step(
         OC_sqrt = O * jnp.sqrt(c)[None, :]
         K = K + OC_sqrt @ OC_sqrt.conj().T
 
-    K = precision.asarray(K, "sr")
+    K = precision.cast(K, "sr")
 
     # Residual SR equation around the predicted step p.
-    rhs = precision.asarray(b_flat, "sr").astype(K.dtype)
+    rhs = precision.cast(b_flat, "sr").astype(K.dtype)
 
     _, Jp = batch.jvp(coord, theta, p, x)
 
@@ -263,7 +263,7 @@ def _step(
         return jnp.sqrt(weight) * (tangent - mean)
 
     Op, _ = ravel_pytree(jax.tree.map(center, Jp))
-    Op = precision.asarray(Op, "sr")
+    Op = precision.cast(Op, "sr")
     rhs = rhs - Op.astype(K.dtype)
 
     a, info = linalg.solve_dense(K, rhs, shift)

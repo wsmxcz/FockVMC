@@ -5,20 +5,17 @@ import matplotlib.pyplot as plt
 
 from pyscf import ao2mo, fci, gto, scf
 
-from detnqs import utils as dq_utils
-from detnqs import hilbert, operator
+from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
 from detnqs.model import Backflow
-from detnqs.vstate import SelectedState
-from detnqs.vstate.selected import topk_selector
+from detnqs.vstate import SelectedState, topk_selector
 
-import utils as run_utils
 
 
 def main():
     # numerical defaults.
-    dq_utils.batch.configure(chunk=8192)
-    dq_utils.precision.configure("double")
+    utils.batch.configure(chunk=8192)
+    utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
@@ -66,44 +63,26 @@ def main():
 
     vmc = VMC.init(state, optax.adamw(1e-3), geometry=False)
 
-    metrics = {
-        "outer": ("Outer", "d", 5),
-        "energy": ("Energy", ".8f", 16),
-        "error": ("|E-E0|", ".2e", 10),
-        "variance": ("Var", ".2e", 10),
-        "n_basis": ("N_basis", "d", 8),
-    }
-
-    line = run_utils.print_metrics(metrics)
-
-    history = []
+    log = utils.Logger(
+        every=1,
+        keys=["outer", "energy", "error", "variance", "n_basis"],
+    )
     outer_steps = 5
     inner_steps = 100
 
-    # optimization loops
+    # optimization loops.
     for outer in range(outer_steps):
         vmc.state = vmc.state.evolve(topk_selector(k=128), eps=1e-6)
 
-        times = {}
-
         for _ in range(inner_steps):
             stats = dict(vmc.step())
-            history.append(float(stats["energy"]))
-
-            for key, value in stats.items():
-                if key.startswith("time_"):
-                    times[key] = times.get(key, 0.0) + float(value)
 
         stats["outer"] = outer
         stats["error"] = abs(float(stats["energy"]) - float(e_fci))
         stats["n_basis"] = vmc.state.n_basis
+        log.add(outer, stats)
 
-        run_utils.print_metrics(metrics, stats)
-        run_utils.print_times(times)
-
-    print(line)
-
-    run_utils.plot_convergence(history, e_fci)
+    log.plot("energy", x="outer", benchmark=e_fci)
     plt.show()
 
 

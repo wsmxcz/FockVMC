@@ -47,7 +47,7 @@ class Backflow(Model):
 
     @nn.compact
     def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        dtype = precision.dtype("model", "real") if self.dtype is None else self.dtype
+        dtype = precision.real("model") if self.dtype is None else self.dtype
 
         batch = x.shape[0]
         nword = x.shape[2]
@@ -79,7 +79,7 @@ class Backflow(Model):
             n_elec * n_sorb,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nn.initializers.normal(1.0e-6),
+            kernel_init=nn.initializers.normal(1.0e-2),
             bias_init=nn.initializers.zeros,
         )(x)
 
@@ -151,7 +151,7 @@ class RBackflow(Model):
 
     @nn.compact
     def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        dtype = precision.dtype("model", "real") if self.dtype is None else self.dtype
+        dtype = precision.real("model") if self.dtype is None else self.dtype
 
         batch = x.shape[0]
         nword = x.shape[2]
@@ -184,7 +184,7 @@ class RBackflow(Model):
             norb * norb,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nn.initializers.normal(1.0e-6),
+            kernel_init=nn.initializers.normal(1.0e-2),
             bias_init=nn.initializers.zeros,
         )(x)
 

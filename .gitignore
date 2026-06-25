@@ -70,6 +70,7 @@ scans/
 *.pkl
 *.pt
 *.pth
+*.jsonl
 
 # Jupyter
 .ipynb_checkpoints/

@@ -15,7 +15,7 @@ from detnqs.vstate import ExactState
 
 def main():
     # numerical defaults.
-    utils.batch.configure(chunk=8192)
+    utils.batch.configure(forward_chunk=8192, backward_chunk=4096)
     utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)

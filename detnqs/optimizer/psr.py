@@ -6,12 +6,12 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import optax
-from jax import tree_util
 from jax.flatten_util import ravel_pytree
 
 from ..utils import batch
 from ..utils import math
 from ..utils import precision
+from ..utils import tree
 from . import linalg
 from .base import Geometry
 
@@ -20,7 +20,7 @@ Shift = float | Callable[[jax.Array], Any]
 
 
 class PSRState(NamedTuple):
-    """Optimizer state for Predictive SR."""
+    """Optimizer state for predictive SR."""
 
     step: jax.Array
     p: Tree
@@ -30,36 +30,20 @@ class PSRState(NamedTuple):
 
 def psr(
     *,
-    shift: Shift = 1.0e-2,
-    mu: float = 0.9,
-    beta: float = 0.999,
+    shift: Shift = 1.0e-3,
+    mu: float = 0.95,
+    beta: float = 0.995,
 ) -> optax.GradientTransformationExtraArgs:
     """Predictive stochastic reconfiguration.
 
-    PSR solves a damped sample-space SR equation around a predicted
-    natural step p.
+    PSR solves a damped sample-space SR equation around a predicted natural
+    step p:
 
         r = b - O p,
         K = O C O^dagger,
         (K + shift I) a = r,
         q = C O^dagger a,
         delta = p + q.
-
-    Here O is the centered weighted log-derivative matrix, b is the
-    sample-space SR force, p is the predicted step, q is the residual
-    correction, and C is a conservative diagonal covariance.
-
-    The state variables are updated as
-
-        p <- mu * delta,
-        v <- beta * v + (1 - beta) * |q|^2.
-
-    The covariance is defined by
-
-        C_i = mean(v) / (v_i + mean(v)),
-
-    with C = I at initialization. Thus directions with large historical
-    residual corrections are shrunk.
     """
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
@@ -125,18 +109,16 @@ def psr(
             geometry.theta,
         )
 
-        # Damped prediction of the next natural update.
         p_next = jax.tree.map(
             lambda d: jnp.asarray(mu, dtype=d.dtype) * d,
             delta,
         )
 
-        # Track the residual correction, not the raw gradient.
         v_next = jax.tree.map(
-            lambda v_old, q: (
-                jnp.asarray(beta, dtype=v_old.dtype) * v_old
-                + (1.0 - jnp.asarray(beta, dtype=v_old.dtype))
-                * jnp.real(q * q.conj()).astype(v_old.dtype)
+            lambda old, q: (
+                jnp.asarray(beta, dtype=old.dtype) * old
+                + (1.0 - jnp.asarray(beta, dtype=old.dtype))
+                * jnp.real(q * q.conj()).astype(old.dtype)
             ),
             state.v,
             q_raw,
@@ -145,29 +127,23 @@ def psr(
         dtype = precision.real("sr")
         step_norm2 = sum(
             (
-                jnp.sum(
-                    jnp.real(
-                        jnp.asarray(x) * jnp.conj(jnp.asarray(x))
-                    )
-                )
+                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
                 for x in jax.tree.leaves(delta)
             ),
             jnp.asarray(0.0, dtype=dtype),
         )
 
-        stats = {
-            "sr_shift": info["shift"],
-            "sr_residual": info["residual"],
-            "sr_step_norm": jnp.sqrt(step_norm2),
-            "sr_cond": info["cond"],
-            "sr_fallback": info["fallback"],
-        }
-
         return delta, PSRState(
             step=state.step + 1,
             p=p_next,
             v=v_next,
-            stats=stats,
+            stats={
+                "sr_shift": info["shift"],
+                "sr_residual": info["residual"],
+                "sr_step_norm": jnp.sqrt(step_norm2),
+                "sr_cond": info["cond"],
+                "sr_fallback": info["fallback"],
+            },
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
@@ -188,70 +164,54 @@ def _step(
     nrow = b_flat.size
     nsample = w.shape[0]
 
-    theta_leaves, treedef = tree_util.tree_flatten(theta)
-    p_leaves = tree_util.tree_leaves(p)
-    v_leaves = tree_util.tree_leaves(v)
-
     dtype = jnp.result_type(
         b_flat,
-        *[leaf.dtype for leaf in theta_leaves],
-        *[leaf.dtype for leaf in p_leaves],
+        *[leaf.dtype for leaf in jax.tree.leaves(theta)],
+        *[leaf.dtype for leaf in jax.tree.leaves(p)],
     )
 
-    # The global scale of the correction variance defines the covariance
-    # reference level.
     v_sum = jnp.asarray(0.0, dtype=precision.real("sr"))
     size = 0
-
-    for v_leaf in v_leaves:
-        v_leaf = jnp.maximum(jnp.asarray(v_leaf), 0.0)
-        v_sum = v_sum + jnp.sum(v_leaf)
-        size += v_leaf.size
+    for leaf in jax.tree.leaves(v):
+        leaf = jnp.maximum(jnp.asarray(leaf), 0.0)
+        v_sum = v_sum + jnp.sum(leaf)
+        size += leaf.size
 
     v_mean = v_sum / float(size)
-    cold_start = v_mean == 0.0
+    cold = v_mean == 0.0
 
-    K = jnp.zeros((nrow, nrow), dtype=dtype)
+    def cov(leaf):
+        leaf = jnp.maximum(jnp.asarray(leaf), 0.0)
+        numer = jnp.asarray(v_mean, dtype=leaf.dtype)
+        denom = leaf + numer
+        numer = jnp.where(cold, jnp.ones_like(leaf), numer)
+        denom = jnp.where(cold, jnp.ones_like(leaf), denom)
+        return numer / denom
 
     def coord_one(params: Tree, sample: Tree):
         sample = jax.tree.map(lambda z: z[None, ...], sample)
         out = coord(params, sample)
         return jax.tree.map(lambda z: jnp.asarray(z)[0], out)
 
-    for i, (theta_leaf, v_leaf) in enumerate(
-        zip(theta_leaves, v_leaves, strict=True)
-    ):
-        def coord_leaf(leaf, sample):
-            leaves = list(theta_leaves)
-            leaves[i] = leaf
-            params = tree_util.tree_unflatten(treedef, leaves)
-            return coord_one(params, sample)
+    K = jnp.zeros((nrow, nrow), dtype=dtype)
+    for block, put, v_block in tree.blocks(theta, batch.config["param_chunk"], v):
+        def coord_block(block, sample):
+            return coord_one(put(block), sample)
 
         J = jax.vmap(
-            jax.jacrev(coord_leaf),
+            jax.jacrev(coord_block),
             in_axes=(None, 0),
-        )(theta_leaf, x)
-        J = J.reshape((nsample, -1, theta_leaf.size))
+        )(block, x)
+        J = J.reshape((nsample, -1, block.size))
 
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
-        O = O.reshape(nrow, theta_leaf.size).astype(dtype)
+        O = O.reshape(nrow, block.size).astype(dtype)
 
-        v_flat = jnp.maximum(jnp.asarray(v_leaf).reshape(-1), 0.0)
-
-        numer = jnp.asarray(v_mean, dtype=v_flat.dtype)
-        denom = v_flat + numer
-
-        numer = jnp.where(cold_start, jnp.ones_like(v_flat), numer)
-        denom = jnp.where(cold_start, jnp.ones_like(v_flat), denom)
-
-        c = (numer / denom).astype(dtype)
-        OC_sqrt = O * jnp.sqrt(c)[None, :]
-        K = K + OC_sqrt @ OC_sqrt.conj().T
+        OC = O * jnp.sqrt(cov(v_block).astype(dtype))[None, :]
+        K = K + OC @ OC.conj().T
 
     K = precision.cast(K, "sr")
-
-    # Residual SR equation around the predicted step p.
     rhs = precision.cast(b_flat, "sr").astype(K.dtype)
 
     _, Jp = batch.jvp(coord, theta, p, x)
@@ -263,8 +223,7 @@ def _step(
         return jnp.sqrt(weight) * (tangent - mean)
 
     Op, _ = ravel_pytree(jax.tree.map(center, Jp))
-    Op = precision.cast(Op, "sr")
-    rhs = rhs - Op.astype(K.dtype)
+    rhs = rhs - precision.cast(Op, "sr").astype(K.dtype)
 
     a, info = linalg.solve_dense(K, rhs, shift)
     a_tree = unravel_b(a.astype(dtype))
@@ -282,27 +241,15 @@ def _step(
         jax.tree.map(cotangent, a_tree),
     )
 
-    q_leaves = []
-    delta_leaves = []
-
-    for g_leaf, p_leaf, v_leaf in zip(
-        tree_util.tree_leaves(gradient),
-        p_leaves,
-        v_leaves,
-        strict=True,
-    ):
-        v_leaf = jnp.maximum(jnp.asarray(v_leaf), 0.0)
-        numer = jnp.asarray(v_mean, dtype=v_leaf.dtype)
-        denom = v_leaf + numer
-
-        numer = jnp.where(cold_start, jnp.ones_like(v_leaf), numer)
-        denom = jnp.where(cold_start, jnp.ones_like(v_leaf), denom)
-
-        q_leaf = (numer / denom).astype(g_leaf.dtype) * g_leaf
-        q_leaves.append(q_leaf)
-        delta_leaves.append(jnp.asarray(p_leaf).astype(q_leaf.dtype) + q_leaf)
-
-    q = tree_util.tree_unflatten(treedef, q_leaves)
-    delta = tree_util.tree_unflatten(treedef, delta_leaves)
+    q = jax.tree.map(
+        lambda g, leaf: cov(leaf).astype(g.dtype) * g,
+        gradient,
+        v,
+    )
+    delta = jax.tree.map(
+        lambda pred, corr: jnp.asarray(pred).astype(corr.dtype) + corr,
+        p,
+        q,
+    )
 
     return delta, q, info

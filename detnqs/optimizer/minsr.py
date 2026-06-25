@@ -6,12 +6,12 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import optax
-from jax import tree_util
 from jax.flatten_util import ravel_pytree
 
 from ..utils import batch
 from ..utils import math
 from ..utils import precision
+from ..utils import tree
 from . import linalg
 from .base import Geometry
 
@@ -137,13 +137,7 @@ def _step(
     nrow = b_flat.size
     nsample = w.shape[0]
 
-    theta_leaves, treedef = tree_util.tree_flatten(theta)
-
-    dtype = jnp.result_type(
-        b_flat,
-        *[leaf.dtype for leaf in theta_leaves],
-    )
-
+    dtype = jnp.result_type(b_flat, *[leaf.dtype for leaf in jax.tree.leaves(theta)])
     K = jnp.zeros((nrow, nrow), dtype=dtype)
 
     def coord_one(params: Tree, sample: Tree):
@@ -151,22 +145,19 @@ def _step(
         out = coord(params, sample)
         return jax.tree.map(lambda z: jnp.asarray(z)[0], out)
 
-    for i, theta_leaf in enumerate(theta_leaves):
-        def coord_leaf(leaf, sample):
-            leaves = list(theta_leaves)
-            leaves[i] = leaf
-            params = tree_util.tree_unflatten(treedef, leaves)
-            return coord_one(params, sample)
+    for block, put in tree.blocks(theta, batch.config["param_chunk"]):
+        def coord_block(block, sample):
+            return coord_one(put(block), sample)
 
         J = jax.vmap(
-            jax.jacrev(coord_leaf),
+            jax.jacrev(coord_block),
             in_axes=(None, 0),
-        )(theta_leaf, x)
-        J = J.reshape((nsample, -1, theta_leaf.size))
+        )(block, x)
+        J = J.reshape((nsample, -1, block.size))
 
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
-        O = O.reshape(nrow, theta_leaf.size).astype(dtype)
+        O = O.reshape(nrow, block.size).astype(dtype)
 
         K = K + O @ O.conj().T
 

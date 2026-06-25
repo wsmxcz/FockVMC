@@ -2,23 +2,19 @@ from __future__ import annotations
 
 """Shape control for JAX kernels.
 
-Two patterns are used throughout DetNQS.
+DetNQS uses three independent chunk sizes.
 
-1. Streaming kernels
-   The map is separable over the leading sample axis:
+forward_chunk:
+    Leading-axis chunks for model forward evaluations.
 
-       y_i = f_theta(x_i).
+backward_chunk:
+    Leading-axis chunks for JVP and VJP evaluations.
 
-   These kernels can be evaluated chunk by chunk without changing the result.
-   This is used for model forward passes, JVPs, and VJPs.
+param_chunk:
+    Flattened parameter-leaf column chunks used by PyTree utilities.
 
-2. Bucketed kernels
-   The kernel couples samples inside the batch:
-
-       y = F_theta(x_1, ..., x_N).
-
-   These kernels are padded to a power-of-two bucket before JIT compilation.
-   Padding is only valid when the caller makes padded rows inactive.
+Bucketed kernels are padded to a power-of-two size before JIT compilation.
+Padding is only valid when the caller makes padded entries inactive.
 """
 
 from collections.abc import Callable
@@ -30,39 +26,59 @@ import jax.numpy as jnp
 
 Tree = Any
 
-_CONFIG = {
-    "chunk": 8192,
+config = {
+    "forward_chunk": 8192,
+    "backward_chunk": 8192,
+    "param_chunk": None,
     "bucket_min": 1024,
 }
 
 
-def configure(*, chunk: int | None = 8192, bucket_min: int = 1024) -> None:
-    """Set global shape policy for streaming and bucketed kernels."""
-    if chunk is not None:
-        chunk = int(chunk)
-        if chunk <= 0:
-            raise ValueError("chunk must be positive or None")
+def configure(
+    *,
+    forward_chunk: int | None = 8192,
+    backward_chunk: int | None = 8192,
+    param_chunk: int | None = None,
+    bucket_min: int = 1024,
+) -> None:
+    """Set the global JAX shape policy."""
+    values = {
+        "forward_chunk": forward_chunk,
+        "backward_chunk": backward_chunk,
+        "param_chunk": param_chunk,
+    }
+
+    for key, value in values.items():
+        if value is not None:
+            value = int(value)
+            if value <= 0:
+                raise ValueError(f"{key} must be positive or None")
+        config[key] = value
 
     bucket_min = int(bucket_min)
     if bucket_min <= 0:
         raise ValueError("bucket_min must be positive")
+    config["bucket_min"] = bucket_min
 
-    _CONFIG["chunk"] = chunk
-    _CONFIG["bucket_min"] = bucket_min
+    _jit.cache_clear()
     jax.clear_caches()
 
 
 def bucket_size(n: int) -> int:
     """Return the power-of-two bucket used for a true leading size."""
-    size = max(int(n), int(_CONFIG["bucket_min"]))
+    size = max(int(n), int(config["bucket_min"]))
     return 1 << (size - 1).bit_length()
 
 
-def chunks(tree: Tree, size: int | None = None):
-    """Yield padded leading-axis chunks and their true sizes."""
-    size = int(_CONFIG["chunk"] if size is None else size)
+def chunks(tree: Tree, size: int | None):
+    """Yield leading-axis chunks and their true sizes."""
     n = int(jax.tree.leaves(tree)[0].shape[0])
 
+    if size is None:
+        yield tree, n
+        return
+
+    size = int(size)
     if n == 0:
         yield pad(tree, size, axis=0), 0
         return
@@ -70,12 +86,8 @@ def chunks(tree: Tree, size: int | None = None):
     for lo in range(0, n, size):
         hi = min(lo + size, n)
         block = jax.tree.map(lambda a: a[lo:hi], tree)
-        true_size = hi - lo
-
-        if true_size < size:
-            block = pad(block, size, axis=0)
-
-        yield block, true_size
+        true = hi - lo
+        yield (pad(block, size, axis=0) if true < size else block), true
 
 
 def mask(n: int, size: int | None = None) -> jax.Array:
@@ -87,16 +99,13 @@ def mask(n: int, size: int | None = None) -> jax.Array:
 
 def apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
     """Evaluate y_i = f_theta(x_i) over the leading axis."""
-    chunk = _CONFIG["chunk"]
-
+    chunk = config["forward_chunk"]
     if chunk is None:
         return _apply(fun, theta, x)
 
     ys = [trim(_apply(fun, theta, xb), n, axis=0) for xb, n in chunks(x, chunk)]
-
     if len(ys) == 1:
         return ys[0]
-
     return jax.tree.map(lambda *leaves: jnp.concatenate(leaves, axis=0), *ys)
 
 
@@ -107,14 +116,12 @@ def jvp(
     x: Tree,
 ) -> tuple[Tree, Tree]:
     """Evaluate y_i = f_theta(x_i) and dy_i = J_i tangent."""
-    chunk = _CONFIG["chunk"]
-
+    chunk = config["backward_chunk"]
     if chunk is None:
         return _jvp(fun, theta, tangent, x)
 
     ys = []
     dys = []
-
     for xb, n in chunks(x, chunk):
         yb, dyb = _jvp(fun, theta, tangent, xb)
         ys.append(trim(yb, n, axis=0))
@@ -135,16 +142,13 @@ def vjp(
     cotangent: Tree,
 ) -> Tree:
     """Evaluate sum_i J_i^dagger cotangent_i."""
-    chunk = _CONFIG["chunk"]
-
+    chunk = config["backward_chunk"]
     if chunk is None:
         return jax.tree.map(jnp.conj, _vjp(fun, theta, x, cotangent))
 
     grad = jax.tree.map(jnp.zeros_like, theta)
-
     for (xb, cb), _ in chunks((x, cotangent), chunk):
         grad = jax.tree.map(jnp.add, grad, _vjp(fun, theta, xb, cb))
-
     return jax.tree.map(jnp.conj, grad)
 
 
@@ -155,15 +159,7 @@ def bucket(
     out_axes: int | tuple[int | None, ...] | None = 0,
     static_argnums: int | tuple[int, ...] = (),
 ) -> Tree:
-    """Run a non-streaming kernel on a padded power-of-two batch.
-
-    The first non-static mapped argument defines the true batch size N.
-    Mapped arguments are padded to
-
-        N_hat = 2 ** ceil(log2(max(N, bucket_min))).
-
-    Padded rows are not masked here. The caller must make them inactive.
-    """
+    """Run a coupled leading-axis kernel on a padded power-of-two bucket."""
     if not isinstance(static_argnums, tuple):
         static_argnums = (int(static_argnums),)
 
@@ -184,7 +180,6 @@ def bucket(
         return _jit(fun, static_argnums)(*args)
 
     size = bucket_size(n)
-
     padded = tuple(
         arg if i in static_argnums or axis is None else pad(arg, size, axis)
         for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True))
@@ -205,27 +200,25 @@ def bucket(
 
 
 def pad(tree: Tree, size: int, axis: int = 0) -> Tree:
-    def pad_leaf(a):
+    def one(a):
         a = jnp.asarray(a)
-        pad = int(size) - int(a.shape[axis])
-
-        if pad <= 0:
+        n = int(size) - int(a.shape[axis])
+        if n <= 0:
             return a
-
         width = [(0, 0)] * a.ndim
-        width[axis] = (0, pad)
+        width[int(axis)] = (0, n)
         return jnp.pad(a, width)
 
-    return jax.tree.map(pad_leaf, tree)
+    return jax.tree.map(one, tree)
 
 
 def trim(tree: Tree, size: int, axis: int = 0) -> Tree:
-    def trim_leaf(a):
+    def one(a):
         slc = [slice(None)] * a.ndim
-        slc[axis] = slice(0, int(size))
+        slc[int(axis)] = slice(0, int(size))
         return a[tuple(slc)]
 
-    return jax.tree.map(trim_leaf, tree)
+    return jax.tree.map(one, tree)
 
 
 @lru_cache(maxsize=16)

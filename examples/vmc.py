@@ -16,7 +16,7 @@ from detnqs.vstate import MCState
 
 def main():
     # numerical defaults.
-    utils.batch.configure(chunk=8192)
+    utils.batch.configure(forward_chunk=8192, backward_chunk=4096)
     utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
@@ -73,9 +73,9 @@ def main():
     model = RBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
 
     sampler = MCSampler(
-        n_samples=4096,
-        n_chains=4096,
-        thermal_steps=1024,
+        n_samples=1024,
+        n_chains=1024,
+        thermal_steps=16,
         proposal="ham",
         blur=0.5,
     )
@@ -99,7 +99,8 @@ def main():
     vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(
-        every=10,
+        file="vmc_log.jsonl",
+        every=1,
         keys=[
             "step", "energy", "error", "variance", "accept",
             "ess_frac", "n_unique", "n_forward", "forward_frac", "alpha",

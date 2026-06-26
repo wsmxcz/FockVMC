@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .backflow import Backflow, RBackflow
+from .backflow import Backflow, PBackflow
 from .base import (
     LogPsi,
     Model,
@@ -12,7 +12,7 @@ from .rbm import RBM
 
 __all__ = (
     "Backflow",
-    "RBackflow",
+    "PBackflow",
     "LogPsi",
     "Model",
     "RBM",

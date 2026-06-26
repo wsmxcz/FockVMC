@@ -1,9 +1,10 @@
 import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import optax
 
-from pyscf import ao2mo, fci, gto, scf
+from pyscf import ao2mo, fci, gto, lo, scf
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
@@ -11,6 +12,8 @@ from detnqs.model import PBackflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
+
+from helper import HydrogenLattice, chain_init
 
 
 def main():
@@ -27,13 +30,9 @@ def main():
 
     # Build molecule.
     mol = gto.M(
-        atom="""
-        N   0.53920000,  0.00000000,  0.0000000
-        N   -0.539200000,  0.00000000,  0.0000000
-        """,
-        basis="sto-3g",
+        atom=HydrogenLattice.cubic([4, 4, 4], 2.00).atom,
+        basis="sto-6g",
         unit="Angstrom",
-        spin=0,
         verbose=0,
     )
 
@@ -41,27 +40,46 @@ def main():
     norb = mf.mo_coeff.shape[1]
     n_alpha, n_beta = mol.nelec
 
-    h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
-    eri = np.asarray(
-        ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb),
-        dtype=np.float64,
-    )
+    # Build OAO integrals.
+    S = mol.intor_symmetric("int1e_ovlp")
+    C = lo.orth.orth_ao(mol, method="lowdin", pre_orth_ao=None)
+    assert np.allclose(C.T @ S @ C, np.eye(norb), atol=1e-10)
+
+    h1e = np.asarray(C.T @ mf.get_hcore() @ C, dtype=np.float64)
+    eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, C), norb), dtype=np.float64)
+
+    h1e[np.abs(h1e) < 1e-8] = 0.0
+    eri[np.abs(eri) < 1e-8] = 0.0
 
     # Build Hamiltonian.
     sector = hilbert.DetSector(norb, n_alpha, n_beta)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
-    # Solve benchmark.
-    solver = fci.direct_spin0.FCI(mol)
-    e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
-    s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
+    # Build reference.
+    mo_oao = np.linalg.solve(C, mf.mo_coeff)
+    assert np.allclose(mo_oao.T @ mo_oao, np.eye(norb), atol=1e-10)
 
-    print(f"SCF energy : {mf.e_tot:.12f}")
-    print(f"FCI energy : {e_fci:.12f}")
-    print(f"S^2        : {s2:.6f}")
+    ref_mat = np.zeros((n_alpha + n_beta, 2 * norb), dtype=np.float64)
+    ref_mat[:n_alpha, :norb] = mo_oao[:, :n_alpha].T
+    ref_mat[n_alpha:, norb:] = mo_oao[:, :n_beta].T
+
+    # Solve benchmark.
+    # solver = fci.direct_spin0.FCI(mol)
+    # e_fci, ci = solver.kernel(h1e, eri, norb, mol.nelec, ecore=mol.energy_nuc())
+    # s2, _ = fci.spin_op.spin_square(ci, norb, mol.nelec)
+
+    # print(f"SCF energy : {mf.e_tot:.12f}")
+    # print(f"FCI energy : {e_fci:.12f}")
+    # print(f"S^2        : {s2:.6f}")
 
     # Initialize VMC.
-    model = PBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
+    model = PBackflow(
+        norb=norb,
+        n_alpha=n_alpha,
+        n_beta=n_beta,
+        hidden=(64, 64),
+        ref_mat=jnp.asarray(ref_mat),
+    )
 
     sampler = MCSampler(
         n_samples=1024,
@@ -71,7 +89,7 @@ def main():
         blur=0.5,
     )
 
-    chains = H.sector.reference(sampler.n_chains)
+    chains = chain_init(H.sector, mo_oao, sampler.n_chains, seed=0)
     state = MCState.init(
         model=model,
         H=H,
@@ -88,11 +106,12 @@ def main():
         psr(shift=1e-3),
         optax.scale(-5e-2),
     )
+
     vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(
-        file="vmc_log.jsonl",
-        every=1,
+        file="hchain_log.jsonl",
+        every=10,
         keys=[
             "step",
             "energy",
@@ -111,10 +130,10 @@ def main():
     # Run optimization.
     for step in range(steps):
         stats = dict(vmc.step())
-        stats["error"] = abs(float(stats["energy"]) - float(e_fci))
+        # stats["error"] = abs(float(stats["energy"]) - float(e_fci))
         log.add(step, stats)
 
-    log.plot("energy", benchmark=e_fci)
+    # log.plot("energy", benchmark=e_fci)
     plt.savefig("convergence.pdf", dpi=300, bbox_inches="tight")
     plt.close()
 

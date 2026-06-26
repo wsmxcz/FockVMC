@@ -79,7 +79,7 @@ class Backflow(Model):
             n_elec * n_sorb,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nn.initializers.normal(1.0e-6),
+            kernel_init=nn.initializers.normal(1.0e-3),
             bias_init=nn.initializers.zeros,
         )(x)
 
@@ -116,7 +116,7 @@ class Backflow(Model):
         return sign.reshape((batch,)), logabs.reshape((batch,))
 
 
-class RBackflow(Model):
+class PBackflow(Model):
     """Restricted paired spatial-orbital neural backflow ansatz.
 
     This represents a singlet-pair or neural antisymmetric geminal power (AGP)
@@ -184,7 +184,7 @@ class RBackflow(Model):
             norb * norb,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nn.initializers.normal(1.0e-6),
+            kernel_init=nn.initializers.normal(1.0e-3),
             bias_init=nn.initializers.zeros,
         )(x)
 

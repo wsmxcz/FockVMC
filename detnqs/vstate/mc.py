@@ -9,6 +9,7 @@ import numpy as np
 
 from ..model import Model, to_logabs, to_ratio
 from ..optimizer import Geometry
+from ..operator import S2
 from ..sampler import Chains, MCSampler
 from ..utils import Timer, batch, math, precision, tree
 from .base import VState
@@ -221,7 +222,9 @@ class MCState(VState):
                 seed=seed,
                 assemble_mode=self.assemble_mode,
             )
-            bra = np.asarray(conn.bra, dtype=np.uint64)
+
+            h_bra = np.asarray(conn.bra, dtype=np.uint64)
+
             strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
             strong_bra = np.asarray(conn.strong_bra, dtype=np.int64)
             strong_h = precision.cast(
@@ -235,7 +238,9 @@ class MCState(VState):
                 "real",
                 host=True,
             )
+
             diag = precision.cast(np.asarray(conn.diag), "calc", host=True)
+
             weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
             weak_bra = np.asarray(conn.weak_bra, dtype=np.int64)
             weak_h = precision.cast(np.asarray(conn.weak_h), "calc", host=True)
@@ -251,6 +256,24 @@ class MCState(VState):
                 "real",
                 host=True,
             )
+
+        s2_diag, s2_ptr, s2_raw_bra, s2_val = S2(self.H.sector).local_conn(ket)
+        s2_raw_bra = np.asarray(s2_raw_bra, dtype=np.uint64)
+        s2_val = np.asarray(s2_val)
+
+        n_h_bra = int(h_bra.shape[0])
+        raw_bra = np.concatenate((h_bra, s2_raw_bra), axis=0)
+
+        if self.assemble_mode == "unique":
+            bra, _, raw_to_bra = self.H.sector.unique(raw_bra)
+            strong_bra = raw_to_bra[strong_bra]
+            weak_bra = raw_to_bra[weak_bra]
+            s2_bra = raw_to_bra[
+                n_h_bra + np.arange(s2_val.size, dtype=np.int64)
+            ]
+        else:
+            bra = raw_bra
+            s2_bra = n_h_bra + np.arange(s2_val.size, dtype=np.int64)
 
         with timer("forward"):
             bra_logpsi_jax = batch.apply(
@@ -305,7 +328,7 @@ class MCState(VState):
                 eloc = eloc.astype(np.result_type(eloc, contribution), copy=False)
                 np.add.at(eloc, ket_idx, contribution)
 
-            # Degree-tilted observed density for Hamiltonian chains or blur.
+            # Degree-tilted observed density.
             tilted_obs = self.sampler.proposal == "ham" or beta > 0.0
             if not tilted_obs:
                 lognu = logrho
@@ -377,6 +400,29 @@ class MCState(VState):
             residual = eloc - energy
             variance = float(np.real(np.dot(w, np.abs(residual) ** 2)))
 
+            # Total spin-squared observable.
+            s2_loc = np.asarray(s2_diag).copy()
+            if s2_val.size:
+                s2_ket = np.repeat(
+                    np.arange(n_ket, dtype=np.int64),
+                    np.diff(s2_ptr),
+                )
+                ratio = np.asarray(
+                    to_ratio(
+                        jax.tree.map(lambda a: a[s2_bra], bra_logpsi),
+                        jax.tree.map(lambda a: a[s2_ket], ket_logpsi),
+                    )
+                )
+                contribution = s2_val * ratio
+                s2_loc = s2_loc.astype(
+                    np.result_type(s2_loc, contribution),
+                    copy=False,
+                )
+                np.add.at(s2_loc, s2_ket, contribution)
+
+            s2 = float(np.real(np.dot(w, s2_loc)))
+            s2_var = float(np.real(np.dot(w, np.abs(s2_loc - s2) ** 2)))
+
         gradient = None
         geom = None
 
@@ -410,7 +456,10 @@ class MCState(VState):
                         coord=self.model.coord,
                         x=ket,
                         w=precision.device(w, "sr", "real"),
-                        b=precision.device(self.model.cotangent(ket_logpsi, b_log), "sr"),
+                        b=precision.device(
+                            self.model.cotangent(ket_logpsi, b_log),
+                            "sr",
+                        ),
                     )
 
         sampler_state = self._auto_alpha(
@@ -425,7 +474,8 @@ class MCState(VState):
         n_sample = int(samples.shape[0])
         n_strong = int(strong_bra.size)
         n_weak = int(weak_bra.size)
-        n_forward_raw = n_ket + n_strong + n_weak
+        n_s2 = int(s2_val.size)
+        n_forward_raw = n_ket + n_strong + n_weak + n_s2
         forward_frac = float(bra.shape[0]) / max(1, n_forward_raw)
 
         unique_frac = 1.0 - float(n_ket) / max(1, n_sample)
@@ -438,6 +488,8 @@ class MCState(VState):
         stats = {
             "energy": energy,
             "variance": variance,
+            "s2": s2,
+            "s2_var": s2_var,
             "accept": float(sampler_stats.get("accept", 0.0)),
             "ess": float(ess),
             "ess_frac": float(ess / max(1, n_sample)),

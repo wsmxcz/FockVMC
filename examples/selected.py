@@ -1,3 +1,5 @@
+from functools import partial
+
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,6 +11,7 @@ from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
 from detnqs.model import Backflow
 from detnqs.vstate import SelectedState, topk_selector
+from helper import warmup
 
 
 def main():
@@ -68,14 +71,14 @@ def main():
         key=jax.random.key(0),
     )
 
+    outer_steps = 5
+    inner_steps = 100
     vmc = VMC.init(state, optax.adamw(1e-3), geometry=False)
 
     log = utils.Logger(
         every=1,
         keys=["outer", "energy", "error", "variance", "n_basis"],
     )
-    outer_steps = 5
-    inner_steps = 100
 
     # Run optimization.
     for outer in range(outer_steps):

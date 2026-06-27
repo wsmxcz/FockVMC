@@ -13,6 +13,8 @@ from detnqs import hilbert, operator, utils
 
 @dataclass(slots=True)
 class HCIState:
+    """Selected-CI wavefunction data used by variational and PT2 stages."""
+
     dets: np.ndarray
     coeffs: np.ndarray
     energy: float
@@ -150,7 +152,16 @@ def hci_solve(
 
     log = utils.Logger(
         every=1,
-        keys=["step", "n_det", "n_new", "energy", "time_screen", "time_conns", "time_solve", "time_other"],
+        keys=[
+            "step",
+            "n_det",
+            "n_new",
+            "energy",
+            "time_screen",
+            "time_conns",
+            "time_solve",
+            "time_other",
+        ],
     )
 
     for it in range(max_cycle):
@@ -164,7 +175,10 @@ def hci_solve(
             break
 
         n_old = len(dets)
-        dets = np.ascontiguousarray(np.concatenate([dets, cand], axis=0), dtype=np.uint64)
+        dets = np.ascontiguousarray(
+            np.concatenate([dets, cand], axis=0),
+            dtype=np.uint64,
+        )
 
         guess = np.zeros(len(dets), dtype=np.float64)
         guess[:n_old] = coeffs
@@ -265,14 +279,13 @@ def semi_pt2(
 
 
 def main():
-    # problem and integral tensors.
+    # Build molecule.
     mol = gto.M(
-        atom=
-        '''
+        atom="""
         O   0.00000000,  0.00000000,  0.00000000
         H   0.75700000,  0.00000000,  0.58590000
         H  -0.75700000,  0.00000000,  0.58590000
-        ''',
+        """,
         basis="6-31g",
         unit="Angstrom",
         spin=0,
@@ -284,13 +297,16 @@ def main():
     n_alpha, n_beta = mol.nelec
 
     h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
-    eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb), dtype=np.float64)
+    eri = np.asarray(
+        ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb),
+        dtype=np.float64,
+    )
 
-    # sector and Hamiltonian.
+    # Build Hamiltonian.
     sector = hilbert.SpinSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
-    # variational stage.
+    # Run variational stage.
     state = hci_solve(
         H,
         eps=1e-4,
@@ -298,7 +314,7 @@ def main():
         davidson_mode="sparse",
     )
 
-    # correction stage.
+    # Run correction stage.
     e2_total, e2_det, e2_stoch, err = semi_pt2(
         H,
         state,

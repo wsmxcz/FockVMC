@@ -9,33 +9,21 @@ from flax import linen as nn
 from ..utils import precision
 from .base import Model
 
-
-# Reference convention
-# --------------------
-# ref_mat is always a Slater reference matrix with shape
-#
-#     (n_alpha + n_beta, 2 * norb).
-#
-# Columns are ordered as
-#
-#     [alpha spatial orbitals | beta spatial orbitals].
-#
-# The alpha block ref_mat[:n_alpha, :norb] and beta block
-# ref_mat[n_alpha:, norb:] contain occupied spatial orbital
-# coefficients in the same one-particle basis as the Hamiltonian.
-
-
 class Backflow(Model):
-    """Dense spin-orbital neural backflow Slater ansatz.
+    """
+    Symmetry-broken spin-orbital backflow Slater determinant.
 
-    This represents the general neural network backflow (NNBF)
-    form where the network predicts determinant-dependent spin orbitals:
+    Fixed sector:
+        N = n_alpha + n_beta,  K = 2 * norb,  d = min(N, K - N).
 
-        M(x) = M0 + Delta(x)
+    Input:
+        c_i in {0, 1},  i = 0, ..., K - 1.
 
-    and evaluates the occupied spin-orbital determinant:
+    Amplitude:
+        psi(C) = det [M0 + dM(c)][:, C],
+        or chi_ph(C) det [M0 + dM(1 - c)][:, C^c].
 
-        psi(x) = det M(x)[occ_rows, occ_cols]
+    The head is fully spin-orbital resolved; SU(2) is not enforced.
     """
 
     norb: int
@@ -43,103 +31,141 @@ class Backflow(Model):
     n_beta: int
     ref_mat: jax.Array | None = None
     hidden: tuple[int, ...] = (64,)
+    init_scale: float = 1.0e-6
     dtype: Any | None = None
 
     @nn.compact
     def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         dtype = precision.real("model") if self.dtype is None else self.dtype
 
-        batch = x.shape[0]
-        nword = x.shape[2]
+        batch, nword = x.shape[0], x.shape[2]
 
+        norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
-        norb = int(self.norb)
 
         n_elec = n_alpha + n_beta
         n_sorb = 2 * norb
 
+        if n_elec > n_sorb:
+            raise ValueError("Backflow requires n_alpha + n_beta <= 2 * norb")
+
+        use_hole = n_elec > norb
+        n_det = n_sorb - n_elec if use_hole else n_elec
+
+        sorb = jnp.arange(n_sorb)
         shifts = jnp.arange(64, dtype=jnp.uint64)
 
-        alpha = (x[:, 0, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
-        beta = (x[:, 1, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
+        # Packed bits -> spin-orbital occupations.
+        occ = (x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)
+        occ = occ.reshape(batch, 2, nword * 64)[:, :, :norb].astype(jnp.int32)
+        occ = jnp.concatenate((occ[:, 0], occ[:, 1]), axis=-1)
 
-        alpha = alpha.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
-        beta = beta.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
+        alpha = occ[:, :norb]
+        beta = occ[:, norb:]
 
-        # Spin-orbital token: empty, alpha, beta, double.
-        token = alpha + 2 * beta
-        x = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
+        # Local spin-orbital features.
+        za = 2 * alpha - 1
+        zb = 2 * beta - 1
+
+        if use_hole:
+            za = -za
+            zb = -zb
+
+        h = jnp.concatenate((za, zb, za * zb), axis=-1).astype(dtype)
 
         for width in self.hidden:
-            x = nn.Dense(width, dtype=dtype, param_dtype=dtype)(x)
-            x = nn.silu(x)
+            h = nn.Dense(width, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.silu(h)
 
-        delta = nn.Dense(
-            n_elec * n_sorb,
+        out = nn.Dense(
+            n_det * n_sorb,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nn.initializers.normal(1.0e-3),
+            kernel_init=nn.initializers.normal(self.init_scale),
             bias_init=nn.initializers.zeros,
-        )(x)
+        )(h)
 
-        delta = delta.reshape(batch, n_elec, n_sorb)
+        delta = out.reshape(batch, n_det, n_sorb)
+        eye = jnp.eye(n_sorb, dtype=dtype)
 
         if self.ref_mat is None:
-            ref = jnp.zeros((n_elec, n_sorb), dtype=dtype)
+            alpha0 = jnp.arange(n_alpha)
+            beta0 = norb + jnp.arange(n_beta)
 
-            ref = ref.at[:n_alpha, :norb].set(
-                jnp.eye(norb, n_alpha, dtype=dtype).T
-            )
-            ref = ref.at[n_alpha:, norb:].set(
-                jnp.eye(norb, n_beta, dtype=dtype).T
-            )
+            if use_hole:
+                # Canonical hole reference.
+                alpha0 = jnp.arange(n_alpha, norb)
+                beta0 = norb + jnp.arange(n_beta, norb)
+
+            ref = eye[jnp.concatenate((alpha0, beta0), axis=0)]
         else:
+            # Path-compatible reference.
             ref = jnp.asarray(self.ref_mat, dtype=dtype)
 
+            if ref.shape != (n_det, n_sorb):
+                raise ValueError(
+                    f"Backflow ref_mat must have shape {(n_det, n_sorb)}, "
+                    f"got {ref.shape}"
+                )
+
         mat = ref[None] + delta
+        occ_bool = occ.astype(bool)
 
-        occ = jnp.concatenate([alpha, beta], axis=-1)
-        col = jnp.argsort(
-            jnp.where(occ.astype(bool), jnp.arange(n_sorb), n_sorb),
-            axis=-1,
-            stable=True,
-        )[:, :n_elec]
+        if use_hole:
+            # Hole columns.
+            col = jnp.argsort(
+                jnp.where(occ_bool, n_sorb, sorb),
+                axis=-1,
+                stable=True,
+            )[:, :n_det]
+        else:
+            # Electron columns.
+            col = jnp.argsort(
+                jnp.where(occ_bool, sorb, n_sorb),
+                axis=-1,
+                stable=True,
+            )[:, :n_det]
 
-        submat = mat[
-            jnp.arange(batch)[:, None, None],
-            jnp.arange(n_elec)[None, :, None],
-            col[:, None, :],
-        ]
+        # Gather determinant columns.
+        col_idx = jnp.broadcast_to(col[:, None, :], (batch, n_det, n_det))
+        submat = jnp.take_along_axis(mat, col_idx, axis=2)
 
         sign, logabs = jnp.linalg.slogdet(submat)
+
+        if use_hole:
+            # Particle-hole basis phase.
+            holes = 1 - occ
+            sorb_i = sorb.astype(jnp.int32)
+
+            exponent = (
+                jnp.sum(holes * sorb_i[None], axis=-1)
+                - n_det * (n_det - 1) // 2
+            )
+
+            phase = (1 - 2 * (exponent & 1)).astype(dtype)
+            sign = sign * phase
+
         return sign.reshape((batch,)), logabs.reshape((batch,))
 
 
-class PBackflow(Model):
-    """Restricted paired spatial-orbital neural backflow ansatz.
+class SBackflow(Model):
+    """
+    SU(2)-adapted single paired-backflow determinant.
 
-    This represents a singlet-pair or neural antisymmetric geminal power (AGP)
-    ansatz. The wavefunction is evaluated as:
+    Fixed sector:
+        n_alpha >= n_beta,  S = (n_alpha - n_beta) / 2,  M = S.
 
-        psi(A, B) = det F(s)[A, B]
+    Input:
+        s_p = n_{p,alpha} + n_{p,beta} in {0, 1, 2}.
 
-    where A and B are the indices of the occupied alpha and beta spatial
-    orbitals, respectively.
+    Head:
+        K(s) = K(s)^T,  U(s) in R^{norb x (n_alpha - n_beta)}.
 
-    The symmetric pairing matrix F(s) is parameterized as:
+    Amplitude:
+        psi(A, B) = det [K(s)[A, B]  U(s)[A]].
 
-        F(s) = F0 + Delta(s)
-        F(s)^T = F(s)
-
-    Requirements:
-        Must satisfy n_alpha == n_beta == n_pair.
-
-    Notes:
-        - The network takes spatial orbital occupations as inputs:
-          s_p = n_{p, alpha} + n_{p, beta} in the set {0, 1, 2}.
-        - The symmetric pairing matrix enforces alpha/beta spin-flip invariance:
-          psi(A, B) = psi(B, A), but does not implement full S^2 spin adaptation.
+    High filling uses the particle-hole dual.
     """
 
     norb: int
@@ -147,80 +173,161 @@ class PBackflow(Model):
     n_beta: int
     ref_mat: jax.Array | None = None
     hidden: tuple[int, ...] = (64,)
+    init_scale: float = 1.0e-6
     dtype: Any | None = None
 
     @nn.compact
     def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         dtype = precision.real("model") if self.dtype is None else self.dtype
 
-        batch = x.shape[0]
-        nword = x.shape[2]
+        batch, nword = x.shape[0], x.shape[2]
 
+        norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
-        norb = int(self.norb)
 
-        if n_alpha != n_beta:
-            raise ValueError("RBackflow requires n_alpha == n_beta")
+        if n_alpha < n_beta:
+            raise ValueError("SBackflow requires n_alpha >= n_beta")
 
-        n_pair = n_alpha
+        n_open = n_alpha - n_beta
+        use_hole = (n_alpha + n_beta) > norb
+
+        n_row = norb - n_beta if use_hole else n_alpha
+        n_pair = norb - n_alpha if use_hole else n_beta
+
+        orb = jnp.arange(norb)
         shifts = jnp.arange(64, dtype=jnp.uint64)
 
-        alpha = (x[:, 0, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
-        beta = (x[:, 1, :, None] >> shifts[None, None, :]) & jnp.uint64(1)
+        # Packed bits -> alpha/beta occupations.
+        occ = (x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)
+        occ = occ.reshape(batch, 2, nword * 64)[:, :, :norb].astype(jnp.int32)
 
-        alpha = alpha.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
-        beta = beta.reshape(batch, nword * 64)[:, :norb].astype(jnp.int32)
+        alpha = occ[:, 0]
+        beta = occ[:, 1]
 
-        # Spatial token: empty, single, double. No alpha/beta label is exposed.
+        alpha_occ = alpha.astype(bool)
+        beta_occ = beta.astype(bool)
+
+        # Spin-free scalar input.
         spatial = alpha + beta
-        x = jax.nn.one_hot(spatial, 3, dtype=dtype).reshape(batch, -1)
+        h = (1 - spatial if use_hole else spatial - 1).astype(dtype)
 
         for width in self.hidden:
-            x = nn.Dense(width, dtype=dtype, param_dtype=dtype)(x)
-            x = nn.silu(x)
+            h = nn.Dense(width, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.silu(h)
 
-        delta = nn.Dense(
-            norb * norb,
+        n_tri = norb * (norb + 1) // 2
+        n_out = n_tri + norb * n_open
+
+        out = nn.Dense(
+            n_out,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nn.initializers.normal(1.0e-3),
+            kernel_init=nn.initializers.normal(self.init_scale),
             bias_init=nn.initializers.zeros,
-        )(x)
+        )(h)
 
-        delta = delta.reshape(batch, norb, norb)
+        # Triangular head -> symmetric pair update.
+        tri_i, tri_j = jnp.triu_indices(norb)
+        upper = jnp.zeros((batch, norb, norb), dtype=dtype)
+        upper = upper.at[:, tri_i, tri_j].set(out[:, :n_tri])
 
-        # Symmetric pair matrix gives spin-flip invariance.
-        delta = 0.5 * (delta + jnp.swapaxes(delta, -1, -2))
+        diag = jnp.diagonal(upper, axis1=-2, axis2=-1)
+        eye = jnp.eye(norb, dtype=dtype)
+
+        delta_pair = upper + jnp.swapaxes(upper, -1, -2)
+        delta_pair = delta_pair - eye[None] * diag[:, None, :]
+
+        # Open-shell update.
+        delta_open = out[:, n_tri:].reshape(batch, norb, n_open)
 
         if self.ref_mat is None:
-            coeff = jnp.eye(norb, n_pair, dtype=dtype)
+            if use_hole:
+                # Canonical hole reference.
+                pair_ref = eye * (orb >= n_alpha).astype(dtype)[None]
+                open_ref = eye[:, n_beta:n_alpha]
+            else:
+                # Canonical electron reference.
+                pair_ref = eye * (orb < n_beta).astype(dtype)[None]
+                open_ref = eye[:, n_beta:n_alpha]
         else:
+            # Path-compatible paired reference.
             ref = jnp.asarray(self.ref_mat, dtype=dtype)
-            alpha_ref = ref[:n_pair, :norb].T
-            beta_ref = ref[n_pair:, norb:].T
-            coeff = 0.5 * (alpha_ref + beta_ref)
+            n_ref = n_row + n_pair
 
-        ref = coeff @ coeff.T
-        pair = ref[None] + delta
+            if ref.shape != (n_ref, 2 * norb):
+                raise ValueError(
+                    f"SBackflow ref_mat must have shape {(n_ref, 2 * norb)}, "
+                    f"got {ref.shape}"
+                )
 
-        alpha_col = jnp.argsort(
-            jnp.where(alpha.astype(bool), jnp.arange(norb), norb),
-            axis=-1,
-            stable=True,
-        )[:, :n_pair]
+            alpha_ref = ref[:n_row, :norb].T
+            beta_ref = ref[n_row:, norb:].T
 
-        beta_col = jnp.argsort(
-            jnp.where(beta.astype(bool), jnp.arange(norb), norb),
-            axis=-1,
-            stable=True,
-        )[:, :n_pair]
+            pair_coeff = 0.5 * (alpha_ref[:, :n_pair] + beta_ref[:, :n_pair])
+            pair_ref = pair_coeff @ pair_coeff.T
+            open_ref = alpha_ref[:, n_pair:n_row]
 
-        mat = pair[
-            jnp.arange(batch)[:, None, None],
-            alpha_col[:, :, None],
-            beta_col[:, None, :],
-        ]
+        pair = pair_ref[None] + delta_pair
+        open_orb = open_ref[None] + delta_open
 
+        if use_hole:
+            # Hole rows/columns.
+            row = jnp.argsort(
+                jnp.where(beta_occ, norb, orb),
+                axis=-1,
+                stable=True,
+            )[:, :n_row]
+
+            col = jnp.argsort(
+                jnp.where(alpha_occ, norb, orb),
+                axis=-1,
+                stable=True,
+            )[:, :n_pair]
+        else:
+            # Electron rows/columns.
+            row = jnp.argsort(
+                jnp.where(alpha_occ, orb, norb),
+                axis=-1,
+                stable=True,
+            )[:, :n_row]
+
+            col = jnp.argsort(
+                jnp.where(beta_occ, orb, norb),
+                axis=-1,
+                stable=True,
+            )[:, :n_pair]
+
+        # Gather K[row, col].
+        row_idx = jnp.broadcast_to(row[:, :, None], (batch, n_row, norb))
+        pair_row = jnp.take_along_axis(pair, row_idx, axis=1)
+
+        col_idx = jnp.broadcast_to(col[:, None, :], (batch, n_row, n_pair))
+        pair_mat = jnp.take_along_axis(pair_row, col_idx, axis=2)
+
+        # Gather U[row].
+        open_idx = jnp.broadcast_to(row[:, :, None], (batch, n_row, n_open))
+        open_mat = jnp.take_along_axis(open_orb, open_idx, axis=1)
+
+        mat = jnp.concatenate((pair_mat, open_mat), axis=-1)
         sign, logabs = jnp.linalg.slogdet(mat)
+
+        if use_hole:
+            # Block-ordered particle-hole phase.
+            hole_alpha = 1 - beta
+            hole_beta = 1 - alpha
+            orb_i = orb.astype(jnp.int32)
+
+            exponent = (
+                n_pair
+                + n_row * norb
+                + jnp.sum(hole_alpha * orb_i[None], axis=-1)
+                + jnp.sum(hole_beta * orb_i[None], axis=-1)
+                - n_row * (n_row - 1) // 2
+                - n_pair * (n_pair - 1) // 2
+            )
+
+            phase = (1 - 2 * (exponent & 1)).astype(dtype)
+            sign = sign * phase
+
         return sign.reshape((batch,)), logabs.reshape((batch,))

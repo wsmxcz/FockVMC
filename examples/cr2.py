@@ -11,6 +11,8 @@ Reference:
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -22,12 +24,12 @@ from pyscf.gto.basis import bse
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
-from detnqs.model import PBackflow
+from detnqs.model import Backflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
 
-from helper import chain_init
+from helper import chain_init, ref_init, warmup
 
 
 def main():
@@ -38,10 +40,10 @@ def main():
     utils.batch.configure(
         forward_chunk=32768,
         backward_chunk=32768,
-        param_chunk=32768,
+        param_chunk=None,
         bucket_min=1024,
     )
-    utils.precision.configure("single")
+    utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
@@ -153,18 +155,6 @@ def main():
     sector = hilbert.DetSector(norb, n_alpha, n_beta)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=float(ecore))
 
-    # Build reference.
-    occ_mo = mf.mo_coeff[:, : mol.nelectron // 2]
-    act_mo = mo[:, ncore:]
-    proj = act_mo.T @ s @ occ_mo
-    ref_coeff = np.linalg.svd(proj, full_matrices=False)[0][:, :n_alpha]
-
-    assert np.allclose(ref_coeff.T @ ref_coeff, np.eye(n_alpha), atol=1e-10)
-
-    ref_mat = np.zeros((n_alpha + n_beta, 2 * norb), dtype=np.float64)
-    ref_mat[:n_alpha, :norb] = ref_coeff.T
-    ref_mat[n_alpha:, norb:] = ref_coeff[:, :n_beta].T
-
     print(f"space        : {space}")
     print(f"RHF energy   : {mf.e_tot:.12f}")
     print(f"CASSCF energy: {mc.e_tot:.12f}")
@@ -172,12 +162,18 @@ def main():
     print(f"frozen core  : {ncore}")
     print(f"ecore        : {float(ecore):.12f}")
 
-    # Initialize VMC.
-    model = PBackflow(
+    # Build reference.
+    occ_mo = mf.mo_coeff[:, : mol.nelectron // 2]
+    act_mo = mo[:, ncore:]
+    proj = act_mo.T @ s @ occ_mo
+    ref_coeff = np.linalg.svd(proj, full_matrices=False)[0][:, :n_alpha]
+    ref_mat = ref_init(sector, ref_coeff)
+
+    model = Backflow(
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
-        hidden=(64,),
+        hidden=(64, 64),
         ref_mat=jnp.asarray(ref_mat),
     )
 
@@ -189,7 +185,7 @@ def main():
         blur=0.5,
     )
 
-    chains = chain_init(H.sector, ref_coeff, sampler.n_chains, seed=0)
+    chains = chain_init(H.sector, ref_coeff, n_chains=sampler.n_chains, seed=0)
 
     state = MCState.init(
         model=model,
@@ -200,18 +196,18 @@ def main():
         eps1=1e-3,
         eps2=1e-6,
         eloc_sample=1024,
-        assemble_mode="flat",
+        assemble_mode="unique",
     )
 
-    vmc = VMC.init(
-        state,
-        optax.chain(
-            psr(shift=1e-3),
-            optax.scale(-5e-2),
-        ),
-    )
+    lr = partial(warmup, start=0.0, end=5.0e-2, steps=100)
 
-    # Run optimization.
+    optimizer = optax.chain(
+        psr(shift=1e-3, mu=0.95, beta=0.995),
+        optax.scale_by_schedule(lr),
+        optax.scale(-1.0),
+    )
+    vmc = VMC.init(state, optimizer)
+
     log = utils.Logger(
         file=f"cr2_{space}.jsonl",
         every=10,
@@ -228,6 +224,7 @@ def main():
         ],
     )
 
+    # Run optimization.
     for step in range(steps):
         log.add(step, dict(vmc.step()))
 

@@ -1,3 +1,5 @@
+from functools import partial
+
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,6 +12,7 @@ from detnqs.driver import VMC
 from detnqs.model import Backflow
 from detnqs.optimizer import psr
 from detnqs.vstate import ExactState
+from helper import warmup
 
 
 def main():
@@ -67,9 +70,13 @@ def main():
         key=jax.random.key(0),
     )
 
+    steps = 500
+    lr = partial(warmup, start=0.0, end=5.0e-2, steps=100)
+
     optimizer = optax.chain(
-        psr(shift=1e-3),
-        optax.scale(-5e-2),
+        psr(shift=1e-3, mu=0.95, beta=0.995),
+        optax.scale_by_schedule(lr),
+        optax.scale(-1.0),
     )
     vmc = VMC.init(state, optimizer)
 
@@ -77,7 +84,6 @@ def main():
         every=10,
         keys=["step", "energy", "error", "variance"],
     )
-    steps = 500
 
     # Run optimization.
     for step in range(steps):

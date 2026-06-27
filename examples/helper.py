@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
+import jax.numpy as jnp
 import numpy as np
 
 
@@ -77,30 +77,50 @@ class HydrogenLattice:
         return cls(coords)
 
 
-def chain_init(sector, mo_coeff, n_chains: int, seed: int = 0) -> np.ndarray:
-    """Sample determinant chains from a real restricted Slater determinant."""
+def warmup(step, start: float, end: float, steps: int = 1000):
+    """Smoothly ramp a scalar value during early optimization."""
+    t = jnp.minimum(jnp.asarray(step, dtype=jnp.float64) / float(steps), 1.0)
+    s = 2.0 * t - t * t
+    return start + (end - start) * s
+
+
+def chain_init(
+    sector,
+    alpha_coeff,
+    beta_coeff=None,
+    *,
+    n_chains: int = 1024,
+    seed: int = 0,
+) -> np.ndarray:
+    """Sample chains from a Slater reference."""
     rng = np.random.default_rng(seed)
+
+    norb = int(sector.norb)
     n_chains = int(n_chains)
 
-    coeff = np.asarray(mo_coeff, dtype=np.float64)
-    chains = sector.zeros(n_chains)
-    chain = np.arange(n_chains, dtype=np.int64)
-    item = chain[:, None]
+    alpha = np.asarray(alpha_coeff, dtype=np.float64)
+    beta = alpha if beta_coeff is None else np.asarray(beta_coeff, dtype=np.float64)
 
-    for spin, n_elec in enumerate((sector.n_alpha, sector.n_beta)):
-        n_elec = int(n_elec)
+    chains = sector.zeros(n_chains)
+    item = np.arange(n_chains, dtype=np.int64)[:, None]
+
+    for spin, (coeff, n_elec) in enumerate(
+        ((alpha, int(sector.n_alpha)), (beta, int(sector.n_beta)))
+    ):
         basis = np.linalg.qr(coeff[:, :n_elec], mode="reduced")[0]
         basis = np.broadcast_to(basis, (n_chains, *basis.shape)).copy()
+
         occ = np.empty((n_chains, n_elec), dtype=np.int64)
+        chain = np.arange(n_chains, dtype=np.int64)
 
         for k in range(n_elec):
-            probs = np.vecdot(basis, basis, axis=-1)
+            probs = np.sum(basis * basis, axis=-1)
             probs[chain[:, None], occ[:, :k]] = 0.0
             probs /= probs.sum(axis=1, keepdims=True)
 
             u = rng.random((n_chains, 1))
             p = (np.cumsum(probs, axis=1) < u).sum(axis=1)
-            occ[:, k] = np.minimum(p, sector.norb - 1)
+            occ[:, k] = np.minimum(p, norb - 1)
 
             if k + 1 == n_elec:
                 break
@@ -122,3 +142,45 @@ def chain_init(sector, mo_coeff, n_chains: int, seed: int = 0) -> np.ndarray:
         np.bitwise_or.at(chains[:, spin, :], (item, word), np.uint64(1) << bit)
 
     return np.ascontiguousarray(chains)
+
+
+def ref_init(sector, alpha_coeff, beta_coeff=None) -> np.ndarray:
+    """Build a Slater reference."""
+    norb = int(sector.norb)
+    n_alpha = int(sector.n_alpha)
+    n_beta = int(sector.n_beta)
+
+    n_elec = n_alpha + n_beta
+    n_sorb = 2 * norb
+    use_hole = n_elec > norb
+
+    alpha = np.asarray(alpha_coeff, dtype=np.float64)
+
+    if beta_coeff is None and alpha.shape[0] == n_sorb:
+        coeff = alpha[:, :n_elec]
+
+        if not use_hole:
+            return np.ascontiguousarray(coeff.T)
+
+        q = np.linalg.qr(coeff, mode="complete")[0]
+        return np.ascontiguousarray(q[:, n_elec:].T)
+
+    beta = alpha if beta_coeff is None else np.asarray(beta_coeff, dtype=np.float64)
+
+    if not use_hole:
+        ref = np.zeros((n_elec, n_sorb), dtype=np.float64)
+        ref[:n_alpha, :norb] = alpha[:, :n_alpha].T
+        ref[n_alpha:, norb:] = beta[:, :n_beta].T
+        return np.ascontiguousarray(ref)
+
+    q_alpha = np.linalg.qr(alpha[:, :n_alpha], mode="complete")[0]
+    q_beta = np.linalg.qr(beta[:, :n_beta], mode="complete")[0]
+
+    n_alpha_hole = norb - n_alpha
+    n_beta_hole = norb - n_beta
+
+    ref = np.zeros((n_alpha_hole + n_beta_hole, n_sorb), dtype=np.float64)
+    ref[:n_alpha_hole, :norb] = q_alpha[:, n_alpha:].T
+    ref[n_alpha_hole:, norb:] = q_beta[:, n_beta:].T
+
+    return np.ascontiguousarray(ref)

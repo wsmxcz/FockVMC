@@ -82,6 +82,8 @@ def _format_quantity(key: str, value: Any) -> str:
         return f"{100.0 * x:.2f}%"
     if key == "alpha":
         return f"{x:.3f}"
+    if key == "s2":
+        return f"{x:.3f}"
     if key in SCI_KEYS or key.startswith("sr_"):
         return f"{x:.3e}"
     if key in FIXED_KEYS:

@@ -1,3 +1,5 @@
+from functools import partial
+
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,10 +9,11 @@ from pyscf import ao2mo, fci, gto, scf
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
-from detnqs.model import PBackflow
+from detnqs.model import Backflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
+from helper import warmup
 
 
 def main():
@@ -18,18 +21,18 @@ def main():
     utils.batch.configure(
         forward_chunk=32768,
         backward_chunk=32768,
-        param_chunk=32768,
+        param_chunk=None,
         bucket_min=1024,
     )
-    utils.precision.configure("single")
+    utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
     # Build molecule.
     mol = gto.M(
         atom="""
-        N   0.53920000,  0.00000000,  0.0000000
-        N   -0.539200000,  0.00000000,  0.0000000
+        N   1.53920000,  0.00000000,  0.0000000
+        N   -1.539200000,  0.00000000,  0.0000000
         """,
         basis="sto-3g",
         unit="Angstrom",
@@ -61,12 +64,17 @@ def main():
     print(f"S^2        : {s2:.6f}")
 
     # Initialize VMC.
-    model = PBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
+    model = Backflow(
+        norb=norb,
+        n_alpha=n_alpha,
+        n_beta=n_beta,
+        hidden=(64,),
+    )
 
     sampler = MCSampler(
         n_samples=1024,
         n_chains=1024,
-        thermal_steps=0,
+        thermal_steps=256,
         proposal="ham",
         blur=0.5,
     )
@@ -81,12 +89,17 @@ def main():
         eps1=1e-3,
         eps2=1e-6,
         eloc_sample=1024,
-        assemble_mode="flat",
+        assemble_mode="unique",
     )
 
+    steps = 1000
+
+    lr = partial(warmup, start=0.0, end=5.0e-2, steps=100)
+
     optimizer = optax.chain(
-        psr(shift=1e-3),
-        optax.scale(-5e-2),
+        psr(shift=1e-3, mu=0.95, beta=0.995),
+        optax.scale_by_schedule(lr),
+        optax.scale(-1.0),
     )
     vmc = VMC.init(state, optimizer)
 
@@ -104,9 +117,9 @@ def main():
             "n_forward",
             "forward_frac",
             "alpha",
+            "s2",
         ],
     )
-    steps = 1000
 
     # Run optimization.
     for step in range(steps):
@@ -115,7 +128,7 @@ def main():
         log.add(step, stats)
 
     log.plot("energy", benchmark=e_fci)
-    plt.savefig("convergence.pdf", dpi=300, bbox_inches="tight")
+    plt.savefig("convergence1.pdf", dpi=300, bbox_inches="tight")
     plt.close()
 
 

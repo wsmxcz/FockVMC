@@ -126,16 +126,95 @@ class S2:
     sector: Any
 
     def diag(self, x: Any) -> np.ndarray:
+        x = np.asarray(x, dtype=np.uint64)
+
         if isinstance(self.sector, SpinSector):
             s = 0.5 * float(self.sector.spin)
             return np.full(x.shape[0], s * (s + 1.0), dtype=np.float64)
 
         if isinstance(self.sector, DetSector):
-            s_z = sz(x)
-            n_alpha = _count(x[:, 0, :])
-            n_beta = _count(x[:, 1, :])
-            n_double = _count(x[:, 0, :] & x[:, 1, :])
+            n_alpha = _count(x[:, 0])
+            n_beta = _count(x[:, 1])
+            n_double = _count(x[:, 0] & x[:, 1])
             n_single = n_alpha + n_beta - 2 * n_double
-            return s_z * s_z + 0.5 * n_single.astype(np.float64)
+            m = 0.5 * (n_alpha - n_beta)
+            return m * m + 0.5 * n_single.astype(np.float64)
 
         raise TypeError(f"unsupported sector: {type(self.sector).__name__}")
+
+    def local_conn(self, x: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return diagonal, CSR pointer, spin-exchange bras, and values."""
+        x = np.ascontiguousarray(x, dtype=np.uint64)
+        diag = self.diag(x)
+        n = int(x.shape[0])
+
+        if isinstance(self.sector, SpinSector):
+            return (
+                diag,
+                np.zeros(n + 1, dtype=np.int64),
+                x[:0].copy(),
+                np.empty(0, dtype=np.float64),
+            )
+
+        if not isinstance(self.sector, DetSector):
+            raise TypeError(f"unsupported sector: {type(self.sector).__name__}")
+
+        norb = int(self.sector.norb)
+        orb = np.arange(norb, dtype=np.int64)
+        word = orb >> 6
+        bit = np.left_shift(np.uint64(1), (orb & 63).astype(np.uint64))
+
+        alpha = (x[:, 0, word] & bit) != 0
+        beta = (x[:, 1, word] & bit) != 0
+
+        aonly = alpha & ~beta
+        bonly = beta & ~alpha
+        single = alpha ^ beta
+
+        count = aonly.sum(axis=1, dtype=np.int64) * bonly.sum(
+            axis=1,
+            dtype=np.int64,
+        )
+
+        ptr = np.empty(n + 1, dtype=np.int64)
+        ptr[0] = 0
+        np.cumsum(count, out=ptr[1:])
+
+        bra = np.empty((int(ptr[-1]),) + x.shape[1:], dtype=np.uint64)
+        val = np.empty(int(ptr[-1]), dtype=np.float64)
+
+        prefix = np.empty((n, norb + 1), dtype=np.int64)
+        prefix[:, 0] = 0
+        np.cumsum(single, axis=1, dtype=np.int64, out=prefix[:, 1:])
+
+        for i in range(n):
+            lo = int(ptr[i])
+            hi = int(ptr[i + 1])
+            if lo == hi:
+                continue
+
+            pa = np.flatnonzero(aonly[i])
+            qb = np.flatnonzero(bonly[i])
+
+            p = np.repeat(pa, qb.size)
+            q = np.tile(qb, pa.size)
+            r = np.arange(p.size)
+
+            y = np.repeat(x[i : i + 1], p.size, axis=0)
+
+            wp, bp = word[p], bit[p]
+            wq, bq = word[q], bit[q]
+
+            y[r, 0, wp] &= ~bp
+            y[r, 1, wp] |= bp
+            y[r, 1, wq] &= ~bq
+            y[r, 0, wq] |= bq
+
+            left = np.minimum(p, q)
+            right = np.maximum(p, q)
+            parity = (prefix[i, right] - prefix[i, left + 1]) & 1
+
+            bra[lo:hi] = y
+            val[lo:hi] = 2.0 * parity.astype(np.float64) - 1.0
+
+        return diag, ptr, bra, val

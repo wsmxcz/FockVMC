@@ -173,7 +173,10 @@ inline Basis take_basis(const Basis& basis, std::size_t n) {
     const std::size_t stride = libdet::word_pair_size(basis.nword);
     if (n > basis.size()) n = basis.size();
     Basis out{basis.nword, {}};
-    out.words.insert(out.words.end(), basis.words.begin(), basis.words.begin() + static_cast<std::ptrdiff_t>(n * stride));
+    out.words.insert(
+        out.words.end(),
+        basis.words.begin(),
+        basis.words.begin() + static_cast<std::ptrdiff_t>(n * stride)
+    );
     return out;
 }
-

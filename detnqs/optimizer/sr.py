@@ -15,10 +15,6 @@ from ..utils import precision
 from . import linalg
 from .base import Geometry
 
-Tree = Any
-Shift = float | Callable[[jax.Array], Any]
-Mode = Literal["dense", "matvec"]
-
 
 class SRState(NamedTuple):
     """Optimizer state for parameter-space SR."""
@@ -30,8 +26,8 @@ class SRState(NamedTuple):
 
 def sr(
     *,
-    shift: Shift = 1.0e-3,
-    mode: Mode = "matvec",
+    shift: float | Callable[[jax.Array], Any] = 1.0e-3,
+    mode: Literal["dense", "matvec"] = "matvec",
     maxiter: int = 64,
 ) -> optax.GradientTransformationExtraArgs:
     """Parameter-space stochastic reconfiguration.
@@ -48,17 +44,11 @@ def sr(
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
 
-    def init_fn(params: Tree) -> SRState:
+    def init_fn(params: Any) -> SRState:
         flat, _ = ravel_pytree(params)
         dtype = precision.real("sr")
         zero = jnp.asarray(0.0, dtype=dtype)
-        stats = {
-            "sr_shift": zero,
-            "sr_residual": zero,
-            "sr_step_norm": zero,
-        }
-        if mode == "dense":
-            stats["sr_cond"] = zero
+        stats = {"sr_force": zero, "sr_damp": zero}
 
         return SRState(
             step=jnp.zeros((), dtype=jnp.int32),
@@ -67,13 +57,13 @@ def sr(
         )
 
     def update_fn(
-        updates: Tree,
+        updates: Any,
         state: SRState,
-        params: Tree | None = None,
+        params: Any | None = None,
         *,
         geometry: Geometry | None = None,
         **extra_args: Any,
-    ) -> tuple[Tree, SRState]:
+    ) -> tuple[Any, SRState]:
         del params, extra_args
 
         if geometry is None:
@@ -118,27 +108,10 @@ def sr(
             theta,
         )
 
-        dtype = precision.real("sr")
-        step_norm2 = sum(
-            (
-                jnp.sum(jnp.real(jnp.asarray(x) * jnp.conj(jnp.asarray(x))))
-                for x in jax.tree.leaves(delta)
-            ),
-            jnp.asarray(0.0, dtype=dtype),
-        )
-
-        stats = {
-            "sr_shift": info["shift"],
-            "sr_residual": info["residual"],
-            "sr_step_norm": jnp.sqrt(step_norm2),
-        }
-        if mode == "dense":
-            stats["sr_cond"] = info["cond"]
-
         return delta, SRState(
             step=state.step + 1,
             x0=x0_next,
-            stats=stats,
+            stats={"sr_force": info["force"], "sr_damp": info["damp"]},
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
@@ -147,32 +120,50 @@ def sr(
 @partial(jax.jit, static_argnums=0)
 def _dense_step(
     coord,
-    theta: Tree,
+    theta: Any,
     x: Any,
     w: jax.Array,
-    g: Tree,
+    g: Any,
     shift: jax.Array,
-) -> tuple[Tree, dict[str, jax.Array]]:
+) -> tuple[Any, dict[str, jax.Array]]:
     """One explicit small-parameter SR solve."""
     g_flat, unravel = ravel_pytree(g)
-    O = jnp.concatenate(_dense_blocks(coord, theta, x, w), axis=1)
+    jac = jax.jacrev(lambda params: coord(params, x))(theta)
+    blocks = []
+    for J, leaf in zip(jax.tree.leaves(jac), jax.tree.leaves(theta), strict=True):
+        J = J.reshape((w.shape[0], -1, leaf.size))
+        mean = jnp.einsum("n,ncp->cp", w, J)
+        O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
+        blocks.append(O.reshape(-1, leaf.size))
+
+    O = jnp.concatenate(blocks, axis=1)
     S = precision.cast(O.conj().T @ O, "sr")
     rhs = precision.cast(g_flat, "sr").astype(S.dtype)
-    delta_flat, info = linalg.solve_dense(S, rhs, shift)
-    return unravel(delta_flat.astype(g_flat.dtype)), info
+    delta_flat = linalg.solve_dense(S, rhs, shift)
+    real_dtype = precision.real("sr")
+    tiny = precision.tiny("sr")
+    force = jnp.real(jnp.vdot(rhs, delta_flat)).astype(real_dtype)
+    damp = (shift * jnp.real(jnp.vdot(delta_flat, delta_flat))) / jnp.maximum(
+        force,
+        tiny,
+    )
+    return (
+        unravel(delta_flat.astype(g_flat.dtype)),
+        {"force": force, "damp": damp.astype(real_dtype)},
+    )
 
 
 @partial(jax.jit, static_argnums=(0, 7))
 def _matvec_step(
     coord,
-    theta: Tree,
+    theta: Any,
     x: Any,
     w: jax.Array,
-    g: Tree,
+    g: Any,
     shift: jax.Array,
     x0: jax.Array,
     maxiter: int,
-) -> tuple[Tree, jax.Array, dict[str, jax.Array]]:
+) -> tuple[Any, jax.Array, dict[str, jax.Array]]:
     """One matrix-free parameter-space SR solve."""
     g_flat, unravel = ravel_pytree(g)
     nsample = w.shape[0]
@@ -200,7 +191,7 @@ def _matvec_step(
     rhs = precision.cast(g_flat, "sr")
     x0 = precision.cast(x0, "sr").astype(rhs.dtype)
 
-    delta_flat, info = linalg.solve_matvec(
+    delta_flat = linalg.solve_matvec(
         matvec,
         rhs,
         shift,
@@ -209,23 +200,12 @@ def _matvec_step(
         maxiter=maxiter,
     )
 
+    real_dtype = precision.real("sr")
+    tiny = precision.tiny("sr")
+    force = jnp.real(jnp.vdot(rhs, delta_flat)).astype(real_dtype)
+    damp = (shift * jnp.real(jnp.vdot(delta_flat, delta_flat))) / jnp.maximum(
+        force,
+        tiny,
+    )
+    info = {"force": force, "damp": damp.astype(real_dtype)}
     return unravel(delta_flat.astype(g_flat.dtype)), delta_flat.astype(x0.dtype), info
-
-
-def _dense_blocks(
-    coord,
-    theta: Tree,
-    x: Any,
-    w: jax.Array,
-) -> list[jax.Array]:
-    """Build explicit blocks of O = sqrt(w) * (J - <J>_w)."""
-    jac = jax.jacrev(lambda params: coord(params, x))(theta)
-    blocks = []
-
-    for J, leaf in zip(jax.tree.leaves(jac), jax.tree.leaves(theta), strict=True):
-        J = J.reshape((w.shape[0], -1, leaf.size))
-        mean = jnp.einsum("n,ncp->cp", w, J)
-        O = (J - mean[None]) * jnp.sqrt(w)[:, None, None]
-        blocks.append(O.reshape(-1, leaf.size))
-
-    return blocks

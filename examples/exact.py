@@ -1,7 +1,6 @@
-from functools import partial
+from __future__ import annotations
 
 import jax
-import matplotlib.pyplot as plt
 import numpy as np
 import optax
 
@@ -12,10 +11,9 @@ from detnqs.driver import VMC
 from detnqs.model import Backflow
 from detnqs.optimizer import psr
 from detnqs.vstate import ExactState
-from helper import warmup
 
 
-def main():
+def main() -> None:
     # Configure runtime.
     utils.batch.configure(
         forward_chunk=32768,
@@ -71,28 +69,18 @@ def main():
     )
 
     steps = 500
-    lr = partial(warmup, start=0.0, end=5.0e-2, steps=100)
 
     optimizer = optax.chain(
-        psr(shift=1e-3, mu=0.95, beta=0.995),
-        optax.scale_by_schedule(lr),
-        optax.scale(-1.0),
+        psr(shift=1e-3, mu=0.95),
+        optax.scale(-5e-2),
     )
     vmc = VMC.init(state, optimizer)
 
-    log = utils.Logger(
-        every=10,
-        keys=["step", "energy", "error", "variance"],
-    )
+    log = utils.Logger(every=10, verbose=2)
 
     # Run optimization.
     for step in range(steps):
-        stats = dict(vmc.step())
-        stats["error"] = abs(float(stats["energy"]) - float(e_fci))
-        log.add(step, stats)
-
-    log.plot("energy", benchmark=e_fci)
-    plt.show()
+        log.add(step, vmc.step())
 
 
 if __name__ == "__main__":

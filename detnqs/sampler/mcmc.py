@@ -18,8 +18,6 @@ class Chains:
     key: jax.Array
     x: np.ndarray
     logabs: np.ndarray
-    alpha: float = 1.0
-    alpha_step: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,14 +36,24 @@ class MCSampler:
     sweep_steps: int = 1
     reset_chains: bool = False
 
-    alpha: float | None = None
+    alpha: float = 1.0
     proposal: str = "ham"
 
     blur: float = 0.5
 
     def __post_init__(self) -> None:
+        if int(self.n_samples) <= 0:
+            raise ValueError("n_samples must be positive")
+        if int(self.n_chains) <= 0:
+            raise ValueError("n_chains must be positive")
+        if int(self.thermal_steps) < 0 or int(self.discard_steps) < 0:
+            raise ValueError("thermal_steps and discard_steps must be nonnegative")
+        if int(self.sweep_steps) <= 0:
+            raise ValueError("sweep_steps must be positive")
         if self.proposal not in {"ham", "single"}:
             raise ValueError("proposal must be 'ham' or 'single'")
+        if not np.isfinite(float(self.alpha)) or float(self.alpha) < 0.0:
+            raise ValueError("alpha must be finite and nonnegative")
         if not 0.0 <= float(self.blur) <= 1.0:
             raise ValueError("blur must satisfy 0 <= blur <= 1")
 
@@ -58,21 +66,11 @@ class MCSampler:
         key: jax.Array,
         eps1: float,
         chains: Any,
-        alpha: float | None = None,
-        alpha_step: int = 0,
     ) -> Chains:
         """Initialize chains and run burn-in."""
         n_chains = int(self.n_chains)
         if n_chains <= 0:
             raise ValueError("n_chains must be positive")
-
-        alpha_value = (
-            float(alpha)
-            if self.alpha is None and alpha is not None
-            else 2.0
-            if self.alpha is None
-            else float(self.alpha)
-        )
 
         key, _ = jax.random.split(key)
         x = H.sector.asarray(chains)
@@ -91,8 +89,6 @@ class MCSampler:
             key=key,
             x=x,
             logabs=logabs,
-            alpha=alpha_value,
-            alpha_step=max(0, int(alpha_step)),
         )
 
         for _ in range(max(0, int(self.thermal_steps))):
@@ -108,11 +104,13 @@ class MCSampler:
         state: Chains,
         *,
         eps1: float,
+        profile: bool = False,
     ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, float]]:
         """Advance chains and return observed configurations.
 
-        The caller owns logabs synchronization. This sampler only consumes the
-        current chain state and performs Markov transitions plus observations.
+        The caller owns logabs synchronization. The sampler only advances
+        chains and reports proposal health; estimator weights are built in
+        vstate.
         """
         n_samples = int(self.n_samples)
         n_chains = int(self.n_chains)
@@ -122,10 +120,8 @@ class MCSampler:
         if state.x.shape[0] != n_chains:
             raise ValueError("chain state size must equal n_chains")
 
-        timer = Timer()
+        timer = Timer(enabled=profile)
         rdtype = precision.real("calc", host=True)
-        alpha = float(state.alpha) if self.alpha is None else float(self.alpha)
-        state = replace(state, alpha=alpha)
 
         accepted = 0
         proposed = 0
@@ -183,11 +179,10 @@ class MCSampler:
                 proposed += info["proposed"]
                 n_conn += info["n_conn"]
 
-        stats = {
-            "accept": float(accepted / proposed if proposed else 0.0),
-            "n_conn": float(n_conn),
-        }
-        stats.update(timer.stats())
+        stats = {"accept": float(accepted / proposed if proposed else 0.0)}
+        if profile:
+            stats["n_conn"] = float(n_conn)
+            stats.update(timer.stats())
 
         return state, samples, mass, stats
 
@@ -203,7 +198,7 @@ class MCSampler:
         timer: Timer | None = None,
     ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, int]]:
         """Observe selected chains and make one Metropolis transition."""
-        timer = Timer() if timer is None else timer
+        timer = Timer(enabled=False) if timer is None else timer
         rdtype = precision.real("calc", host=True)
         n_chain = int(state.x.shape[0])
         n_observe = int(n_observe)
@@ -440,12 +435,16 @@ class MCSampler:
                         )
                         jax.block_until_ready(value)
 
-                    unique_logabs[unknown] = precision.host(value, "calc", "real").reshape(-1)
+                    unique_logabs[unknown] = precision.host(
+                        value,
+                        "calc",
+                        "real",
+                    ).reshape(-1)
 
                 logabs_candidate[active] = unique_logabs[inverse]
 
             with timer("sample"):
-                log_accept = rdtype(state.alpha) * (
+                log_accept = rdtype(float(self.alpha)) * (
                     logabs_candidate - state.logabs
                 )
                 accept = active & (

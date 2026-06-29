@@ -7,20 +7,18 @@ import jax.numpy as jnp
 import numpy as np
 from jax import tree_util
 
-Tree = Any
 
-
-def host(tree: Tree) -> Tree:
+def host(tree: Any) -> Any:
     """Move a PyTree to host NumPy arrays."""
     return jax.tree.map(np.asarray, jax.device_get(tree))
 
 
-def device(tree: Tree) -> Tree:
+def device(tree: Any) -> Any:
     """Move a PyTree to the default JAX device."""
     return jax.tree.map(jnp.asarray, tree)
 
 
-def vdot(a: Tree, b: Tree) -> jax.Array:
+def vdot(a: Any, b: Any) -> jax.Array:
     """Real part of the Hermitian PyTree inner product."""
     out = None
     for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True):
@@ -29,7 +27,7 @@ def vdot(a: Tree, b: Tree) -> jax.Array:
     return jnp.asarray(0.0) if out is None else out
 
 
-def blocks(tree: Tree, size: int | None = None, *aligned: Tree):
+def blocks(tree: Any, size: int | None = None, *aligned: Any):
     """Yield flattened leaf blocks and a local tree updater.
 
     aligned PyTrees must have the same structure and leaf shapes as tree.

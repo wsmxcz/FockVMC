@@ -71,10 +71,10 @@ scans/
 *.pt
 *.pth
 *.jsonl
+*.json
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
 
 # Editors and IDEs
 .idea/

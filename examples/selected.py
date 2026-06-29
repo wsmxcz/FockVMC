@@ -1,7 +1,6 @@
-from functools import partial
+from __future__ import annotations
 
 import jax
-import matplotlib.pyplot as plt
 import numpy as np
 import optax
 
@@ -10,11 +9,11 @@ from pyscf import ao2mo, fci, gto, scf
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
 from detnqs.model import Backflow
+from detnqs.optimizer import psr
 from detnqs.vstate import SelectedState, topk_selector
-from helper import warmup
 
 
-def main():
+def main() -> None:
     # Configure runtime.
     utils.batch.configure(
         forward_chunk=32768,
@@ -73,11 +72,12 @@ def main():
 
     outer_steps = 5
     inner_steps = 100
-    vmc = VMC.init(state, optax.adamw(1e-3), geometry=False)
+    optimizer = optax.adamw(1e-3)
+    vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(
         every=1,
-        keys=["outer", "energy", "error", "variance", "n_basis"],
+        keys=("outer", "energy", "eloc_var", "sr_force", "sr_damp", "n_basis"),
     )
 
     # Run optimization.
@@ -88,12 +88,8 @@ def main():
             stats = dict(vmc.step())
 
         stats["outer"] = outer
-        stats["error"] = abs(float(stats["energy"]) - float(e_fci))
         stats["n_basis"] = vmc.state.n_basis
         log.add(outer, stats)
-
-    log.plot("energy", x="outer", benchmark=e_fci)
-    plt.show()
 
 
 if __name__ == "__main__":

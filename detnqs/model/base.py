@@ -7,11 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 
-Tree = Any
-LogPsi = Any
 
-
-def to_logabs(logpsi: LogPsi) -> Any:
+def to_logabs(logpsi: Any) -> Any:
     """Return log|psi| from a supported wavefunction representation.
 
     Supported representations:
@@ -28,12 +25,16 @@ def to_logabs(logpsi: LogPsi) -> Any:
         return logpsi[1]
 
     if jnp.issubdtype(jnp.asarray(logpsi).dtype, jnp.complexfloating):
-        return np.real(logpsi) if isinstance(logpsi, np.ndarray) else jnp.real(logpsi)
+        return (
+            np.real(logpsi)
+            if isinstance(logpsi, np.ndarray)
+            else jnp.real(logpsi)
+        )
 
     return logpsi
 
 
-def to_psi(logpsi: LogPsi) -> Any:
+def to_psi(logpsi: Any) -> Any:
     """Return shifted wavefunction values.
 
     The global shift does not change Rayleigh quotients or amplitude ratios.
@@ -52,7 +53,7 @@ def to_psi(logpsi: LogPsi) -> Any:
     return xp.exp(logpsi - xp.max(logpsi))
 
 
-def to_ratio(num: LogPsi, den: LogPsi) -> Any:
+def to_ratio(num: Any, den: Any) -> Any:
     """Return psi(num) / psi(den)."""
     if isinstance(num, tuple):
         sign_num, logabs_num = num
@@ -90,10 +91,10 @@ class Model(nn.Module):
             logabs with sign stopped.
     """
 
-    def __call__(self, x: Any) -> LogPsi:
+    def __call__(self, x: Any) -> Any:
         raise NotImplementedError
 
-    def logpsi(self, theta: Tree, x: Any) -> LogPsi:
+    def logpsi(self, theta: Any, x: Any) -> Any:
         """Evaluate the raw wavefunction representation."""
         out = self.apply({"params": theta}, x)
 
@@ -103,11 +104,11 @@ class Model(nn.Module):
 
         return out
 
-    def logabs(self, theta: Tree, x: Any) -> Any:
+    def logabs(self, theta: Any, x: Any) -> Any:
         """Evaluate log|psi_theta(x)|."""
         return to_logabs(self.logpsi(theta, x))
 
-    def coord(self, theta: Tree, x: Any) -> Any:
+    def coord(self, theta: Any, x: Any) -> Any:
         """Evaluate the real coordinate differentiated by autodiff."""
         logpsi = self.logpsi(theta, x)
 
@@ -119,14 +120,18 @@ class Model(nn.Module):
 
         return logpsi
 
-    def cotangent(self, logpsi: LogPsi, dlogpsi: Any) -> Any:
+    def cotangent(self, logpsi: Any, dlogpsi: Any) -> Any:
         """Map dL/dlogpsi to dL/dcoord.
 
         This method keeps optimizer-facing autodiff coordinates real. Complex
         cotangents are represented by real and imaginary channels.
         """
         if isinstance(logpsi, tuple):
-            return np.real(dlogpsi) if isinstance(dlogpsi, np.ndarray) else jnp.real(dlogpsi)
+            return (
+                np.real(dlogpsi)
+                if isinstance(dlogpsi, np.ndarray)
+                else jnp.real(dlogpsi)
+            )
 
         if jnp.issubdtype(jnp.asarray(logpsi).dtype, jnp.complexfloating):
             if isinstance(dlogpsi, np.ndarray):
@@ -134,4 +139,8 @@ class Model(nn.Module):
 
             return jnp.stack((jnp.real(dlogpsi), jnp.imag(dlogpsi)), axis=-1)
 
-        return np.real(dlogpsi) if isinstance(dlogpsi, np.ndarray) else jnp.real(dlogpsi)
+        return (
+            np.real(dlogpsi)
+            if isinstance(dlogpsi, np.ndarray)
+            else jnp.real(dlogpsi)
+        )

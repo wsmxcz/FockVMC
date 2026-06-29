@@ -1,8 +1,7 @@
-from functools import partial
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import numpy as np
 import optax
 
@@ -15,10 +14,10 @@ from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
 
-from helper import HydrogenLattice, chain_init, ref_init, warmup
+from helper import HydrogenLattice, chain_init, ref_init
 
 
-def main():
+def main() -> None:
     # Configure runtime.
     utils.batch.configure(
         forward_chunk=32768,
@@ -91,40 +90,18 @@ def main():
     )
 
     steps = 1000
-    lr = partial(warmup, start=0.0, end=5.0e-2, steps=100)
 
     optimizer = optax.chain(
-        psr(shift=1e-3, mu=0.95, beta=0.995),
-        optax.scale_by_schedule(lr),
-        optax.scale(-1.0),
+        psr(shift=1e-3, mu=0.95),
+        optax.scale(-5e-2),
     )
     vmc = VMC.init(state, optimizer)
 
-    log = utils.Logger(
-        file="hchain_log.jsonl",
-        every=10,
-        keys=[
-            "step",
-            "energy",
-            "error",
-            "variance",
-            "accept",
-            "ess_frac",
-            "n_unique",
-            "n_forward",
-            "forward_frac",
-            "alpha",
-        ],
-    )
+    log = utils.Logger(file="hchain_log.jsonl", every=10, verbose=2)
 
     # Run optimization.
     for step in range(steps):
-        stats = dict(vmc.step())
-        log.add(step, stats)
-
-    log.plot("energy")
-    plt.savefig("convergence.pdf", dpi=300, bbox_inches="tight")
-    plt.close()
+        log.add(step, vmc.step())
 
 
 if __name__ == "__main__":

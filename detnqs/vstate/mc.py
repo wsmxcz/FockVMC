@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -9,36 +11,20 @@ import numpy as np
 
 from ..model import Model, to_logabs, to_ratio
 from ..optimizer import Geometry
-from ..operator import S2
 from ..sampler import Chains, MCSampler
-from ..utils import Timer, batch, math, precision, tree
+from ..utils import Timer, batch, checkpoint, math, precision, stats, tree
 from .base import VState
 
 
 @dataclass(slots=True)
 class MCState(VState):
-    """Monte Carlo variational state.
-
-    Physical measure:
-        pi_theta(x) proportional to |psi_theta(x)|^2.
-
-    Markov reference:
-        Hamiltonian proposals use the degree-tilted law
-        ``|psi_theta(x)|^alpha s(x)``.
-
-    Observation law:
-        Hamiltonian chains or blur use degree-tilted observed density.
-
-    ``eps1`` defines Hamiltonian proposal, blur, and deterministic local
-    energy. ``eps2`` is the sampled weak-window lower cutoff.
-    """
+    """Monte Carlo variational state."""
 
     model: Model
     params: Any
     H: Any
     sampler: MCSampler
     sampler_state: Chains
-
     chains: np.ndarray
 
     eps1: float = 1.0e-3
@@ -60,7 +46,6 @@ class MCState(VState):
         eloc_sample: int = 256,
         assemble_mode: str = "unique",
     ) -> MCState:
-        """Initialize a Monte Carlo variational state."""
         eps1 = float(eps1)
         eps2 = float(eps2)
         if eps1 < 0.0:
@@ -69,21 +54,19 @@ class MCState(VState):
             raise ValueError("eps2 must be nonnegative")
         if eps2 > eps1:
             raise ValueError("eps2 must be <= eps1")
-
+        if int(eloc_sample) < 0:
+            raise ValueError("eloc_sample must be nonnegative")
         if not 0.0 <= float(sampler.blur) <= 1.0:
             raise ValueError("sampler.blur must satisfy 0 <= blur <= 1")
 
-        if int(eloc_sample) < 0:
-            raise ValueError("eloc_sample must be nonnegative")
-
         _, init_key, sample_key = jax.random.split(key, 3)
-
         params = model.init(init_key, H.sector.zeros(1))["params"]
 
-        if chains is None:
-            chains_arr = H.sector.reference(sampler.n_chains)
-        else:
-            chains_arr = H.sector.asarray(chains)
+        chains_arr = (
+            H.sector.reference(sampler.n_chains)
+            if chains is None
+            else H.sector.asarray(chains)
+        )
         if chains_arr.shape[0] != int(sampler.n_chains):
             raise ValueError("chains size must equal sampler.n_chains")
         chains_arr = np.ascontiguousarray(chains_arr)
@@ -113,17 +96,80 @@ class MCState(VState):
     def replace(self, **updates: Any) -> MCState:
         return replace(self, **updates)
 
-    def expect(self) -> tuple[MCState, dict[str, float]]:
-        new_state, _, _, stats, _ = self._run(grad=False, geometry=False)
-        return new_state, stats
+    def expect(
+        self,
+        *,
+        obs: Mapping[str, Any] | None = None,
+        profile: bool = False,
+        data: bool = False,
+    ):
+        result = self._run(
+            grad=False,
+            geometry=False,
+            obs=obs,
+            profile=profile,
+            data=data,
+        )
+        if data:
+            new_state, _, _, out, _, sample_data = result
+            return new_state, out, sample_data
+        new_state, _, _, out, _ = result
+        return new_state, out
 
-    def expect_and_grad(self, *, geometry: bool = False):
-        return self._run(grad=True, geometry=geometry)
+    def expect_and_grad(
+        self,
+        *,
+        geometry: bool = False,
+        obs: Mapping[str, Any] | None = None,
+        profile: bool = False,
+    ):
+        return self._run(
+            grad=True,
+            geometry=geometry,
+            obs=obs,
+            profile=profile,
+            data=False,
+        )
 
-    def _run(self, *, grad: bool, geometry: bool):
-        """Run one VMC estimator pass."""
-        timer = Timer()
+    def save(self, file: str | Path) -> Path:
+        data = {
+            "params": self.params,
+            "sampler_state": {
+                "key": self.sampler_state.key,
+                "x": self.sampler_state.x,
+                "logabs": self.sampler_state.logabs,
+            },
+            "chains": self.chains,
+        }
+        return checkpoint.save(file, data)
+
+    def load(self, file: str | Path) -> MCState:
+        data = checkpoint.load(file)
+        saved = data["sampler_state"]
+        sampler_state = Chains(
+            key=jax.device_put(saved["key"]),
+            x=np.ascontiguousarray(saved["x"], dtype=np.uint64),
+            logabs=precision.cast(saved["logabs"], "calc", "real", host=True),
+        )
+        return replace(
+            self,
+            params=data["params"],
+            sampler_state=sampler_state,
+            chains=np.ascontiguousarray(data["chains"], dtype=np.uint64),
+        )
+
+    def _run(
+        self,
+        *,
+        grad: bool,
+        geometry: bool,
+        obs: Mapping[str, Any] | None,
+        profile: bool,
+        data: bool = False,
+    ):
+        timer = Timer(enabled=profile)
         sampler_state = self.sampler_state
+        obs = {} if obs is None else dict(obs)
 
         if self.sampler.reset_chains:
             with timer("sample"):
@@ -134,76 +180,39 @@ class MCState(VState):
                     key=sampler_state.key,
                     eps1=float(self.eps1),
                     chains=self.chains,
-                    alpha=(
-                        float(sampler_state.alpha)
-                        if self.sampler.alpha is None
-                        else None
-                    ),
-                    alpha_step=(
-                        int(sampler_state.alpha_step)
-                        if self.sampler.alpha is None
-                        else 0
-                    ),
                 )
         else:
-            alpha = (
-                float(sampler_state.alpha)
-                if self.sampler.alpha is None
-                else float(self.sampler.alpha)
-            )
-
             with timer("forward"):
                 unique, _, inv = self.H.sector.unique(sampler_state.x)
                 value = batch.apply(self.model.logabs, self.params, unique)
                 jax.block_until_ready(value)
-
-                unique_logabs = precision.host(value, "calc", "real").reshape(-1)
+                logabs = precision.host(value, "calc", "real").reshape(-1)
                 sampler_state = replace(
                     sampler_state,
-                    logabs=precision.cast(
-                        unique_logabs[inv],
-                        "calc",
-                        "real",
-                        host=True,
-                    ),
-                    alpha=alpha,
+                    logabs=precision.cast(logabs[inv], "calc", "real", host=True),
                 )
 
-        sampler_state, samples, sample_mass, sampler_stats = self.sampler.draw(
-            self.params,
-            self.H,
-            self.model,
-            sampler_state,
-            eps1=float(self.eps1),
-        )
-        alpha = float(sampler_state.alpha)
-
-        timer.add("sample", sampler_stats.get("time_sample", 0.0))
-        timer.add("conns", sampler_stats.get("time_conns", 0.0))
-        timer.add("forward", sampler_stats.get("time_forward", 0.0))
+        with timer("sample"):
+            sampler_state, samples, sample_mass, sample_stats = self.sampler.draw(
+                self.params,
+                self.H,
+                self.model,
+                sampler_state,
+                eps1=float(self.eps1),
+                profile=profile,
+            )
 
         with timer("reduce"):
             ket, _, sample_to_ket = self.H.sector.unique(samples)
             n_ket = int(ket.shape[0])
 
-            raw_mass = precision.cast(
-                sample_mass,
-                "calc",
-                "real",
-                host=True,
-            )
-
-            mass = np.bincount(
-                sample_to_ket,
-                weights=raw_mass,
-                minlength=n_ket,
-            )
+            raw_mass = precision.cast(sample_mass, "calc", "real", host=True)
+            mass = np.bincount(sample_to_ket, weights=raw_mass, minlength=n_ket)
             mass2 = np.bincount(
                 sample_to_ket,
                 weights=raw_mass * raw_mass,
                 minlength=n_ket,
             )
-
             mass = precision.cast(mass, "calc", "real", host=True)
             mass2 = precision.cast(mass2, "calc", "real", host=True)
 
@@ -224,23 +233,16 @@ class MCState(VState):
             )
 
             h_bra = np.asarray(conn.bra, dtype=np.uint64)
-
             strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
             strong_bra = np.asarray(conn.strong_bra, dtype=np.int64)
-            strong_h = precision.cast(
-                np.asarray(conn.strong_h),
-                "calc",
-                host=True,
-            )
+            strong_h = precision.cast(np.asarray(conn.strong_h), "calc", host=True)
             strong_w = precision.cast(
                 np.asarray(conn.strong_degree),
                 "calc",
                 "real",
                 host=True,
             )
-
             diag = precision.cast(np.asarray(conn.diag), "calc", host=True)
-
             weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
             weak_bra = np.asarray(conn.weak_bra, dtype=np.int64)
             weak_h = precision.cast(np.asarray(conn.weak_h), "calc", host=True)
@@ -257,36 +259,62 @@ class MCState(VState):
                 host=True,
             )
 
-        s2_diag, s2_ptr, s2_raw_bra, s2_val = S2(self.H.sector).local_conn(ket)
-        s2_raw_bra = np.asarray(s2_raw_bra, dtype=np.uint64)
-        s2_val = np.asarray(s2_val)
+            obs_conn = []
+            raw_parts = [h_bra]
+            for name, op in obs.items():
+                o_diag, o_ptr, o_bra, o_val = op.local_conn(ket)
+                o_bra = np.asarray(o_bra, dtype=np.uint64)
+                obs_conn.append((
+                    str(name),
+                    np.asarray(o_diag),
+                    np.asarray(o_ptr, dtype=np.int64),
+                    o_bra,
+                    np.asarray(o_val),
+                ))
+                raw_parts.append(o_bra)
 
-        n_h_bra = int(h_bra.shape[0])
-        raw_bra = np.concatenate((h_bra, s2_raw_bra), axis=0)
+        # Share one forward pool across H and optional observables.
+        raw_bra = np.concatenate(raw_parts, axis=0)
+        h_size = int(h_bra.shape[0])
 
         if self.assemble_mode == "unique":
             bra, _, raw_to_bra = self.H.sector.unique(raw_bra)
             strong_bra = raw_to_bra[strong_bra]
             weak_bra = raw_to_bra[weak_bra]
-            s2_bra = raw_to_bra[
-                n_h_bra + np.arange(s2_val.size, dtype=np.int64)
-            ]
+            obs_mapped = []
+            start = h_size
+            for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
+                end = start + int(o_bra.shape[0])
+                obs_mapped.append((
+                    name,
+                    o_diag,
+                    o_ptr,
+                    raw_to_bra[start:end],
+                    o_val,
+                ))
+                start = end
         else:
             bra = raw_bra
-            s2_bra = n_h_bra + np.arange(s2_val.size, dtype=np.int64)
+            obs_mapped = []
+            start = h_size
+            for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
+                end = start + int(o_bra.shape[0])
+                obs_mapped.append((
+                    name,
+                    o_diag,
+                    o_ptr,
+                    np.arange(start, end, dtype=np.int64),
+                    o_val,
+                ))
+                start = end
 
         with timer("forward"):
-            bra_logpsi_jax = batch.apply(
-                self.model.logpsi,
-                self.params,
-                bra,
-            )
+            bra_logpsi_jax = batch.apply(self.model.logpsi, self.params, bra)
             jax.block_until_ready(bra_logpsi_jax)
             bra_logpsi = tree.host(bra_logpsi_jax)
 
         with timer("reduce"):
             ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
-
             bra_logabs = precision.cast(
                 np.asarray(to_logabs(bra_logpsi)).reshape(-1),
                 "calc",
@@ -297,21 +325,12 @@ class MCState(VState):
 
             rdtype = precision.real("calc", host=True)
             tiny = rdtype(precision.tiny("calc"))
-            alpha_r = rdtype(alpha)
+            alpha = rdtype(float(self.sampler.alpha))
             beta = rdtype(float(self.sampler.blur))
 
-            ket_idx = np.repeat(
-                np.arange(n_ket, dtype=np.int64),
-                np.diff(strong_ptr),
-            )
-            logrho = precision.cast(
-                alpha_r * ket_logabs,
-                "calc",
-                "real",
-                host=True,
-            )
+            ket_idx = np.repeat(np.arange(n_ket, dtype=np.int64), np.diff(strong_ptr))
+            logamp = precision.cast(alpha * ket_logabs, "calc", "real", host=True)
 
-            # Exact strong-window local energy.
             eloc = diag.copy()
             if strong_h.size:
                 ratio = precision.cast(
@@ -324,46 +343,41 @@ class MCState(VState):
                     "calc",
                     host=True,
                 )
-                contribution = strong_h * ratio
-                eloc = eloc.astype(np.result_type(eloc, contribution), copy=False)
-                np.add.at(eloc, ket_idx, contribution)
+                contrib = strong_h * ratio
+                eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
+                np.add.at(eloc, ket_idx, contrib)
 
-            # Degree-tilted observed density.
-            tilted_obs = self.sampler.proposal == "ham" or beta > 0.0
-            if not tilted_obs:
-                lognu = logrho
+            tilted = self.sampler.proposal == "ham" or beta > 0.0
+            if not tilted:
+                logprob = logamp
             else:
-                stay_scale = np.where(
+                stay = np.where(
                     strong_w > 0.0,
                     (rdtype(1.0) - beta) * strong_w,
                     rdtype(1.0),
                 )
                 log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
-                nonzero = stay_scale > 0.0
-                log_stay[nonzero] = (
-                    np.log(np.maximum(stay_scale[nonzero], tiny))
-                    + logrho[nonzero]
-                )
+                ok = stay > 0.0
+                log_stay[ok] = np.log(np.maximum(stay[ok], tiny)) + logamp[ok]
 
                 if beta > 0.0 and strong_h.size:
-                    terms = (
-                        alpha_r * bra_logabs[strong_bra]
-                        + np.log(np.maximum(np.abs(strong_h), tiny))
+                    terms = alpha * bra_logabs[strong_bra] + np.log(
+                        np.maximum(np.abs(strong_h), tiny)
                     )
-                    log_blur = (
-                        np.log(beta)
-                        + math.segment_logsumexp(strong_ptr, terms, n_ket)
+                    log_blur = np.log(beta) + math.segment_logsumexp(
+                        strong_ptr,
+                        terms,
+                        n_ket,
                     )
-                    lognu = precision.cast(
+                    logprob = precision.cast(
                         np.logaddexp(log_stay, log_blur),
                         "calc",
                         "real",
                         host=True,
                     )
                 else:
-                    lognu = log_stay
+                    logprob = log_stay
 
-            # Unbiased weak-window local energy correction.
             if weak_h.size and int(self.eloc_sample) > 0:
                 weak_ket = np.repeat(
                     np.arange(n_ket, dtype=np.int64),
@@ -383,58 +397,47 @@ class MCState(VState):
                     rdtype(int(self.eloc_sample)) * np.abs(weak_h),
                     tiny,
                 )
-                contribution = weak_count * scale * weak_h * ratio
-                eloc = eloc.astype(np.result_type(eloc, contribution), copy=False)
-                np.add.at(eloc, weak_ket, contribution)
+                contrib = weak_count * scale * weak_h * ratio
+                eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
+                np.add.at(eloc, weak_ket, contrib)
 
             eloc = precision.cast(eloc, "calc", host=True)
-
-            w, ess = self._weights(
-                mass=mass,
-                mass2=mass2,
-                ket_logabs=ket_logabs,
-                lognu=lognu,
-            )
-
-            energy = float(np.real(np.dot(w, eloc)))
+            w, wstats = stats.weight(mass, mass2, ket_logabs, logprob)
+            energy, estats = stats.eloc(w, eloc)
             residual = eloc - energy
-            variance = float(np.real(np.dot(w, np.abs(residual) ** 2)))
 
-            # Total spin-squared observable.
-            s2_loc = np.asarray(s2_diag).copy()
-            if s2_val.size:
-                s2_ket = np.repeat(
-                    np.arange(n_ket, dtype=np.int64),
-                    np.diff(s2_ptr),
-                )
-                ratio = np.asarray(
-                    to_ratio(
-                        jax.tree.map(lambda a: a[s2_bra], bra_logpsi),
-                        jax.tree.map(lambda a: a[s2_ket], ket_logpsi),
+            obs_stats: dict[str, float] = {}
+            obs_data = {}
+            for name, o_diag, o_ptr, o_bra, o_val in obs_mapped:
+                oloc = precision.cast(np.asarray(o_diag).copy(), "calc", host=True)
+                if o_val.size:
+                    o_ket = np.repeat(
+                        np.arange(n_ket, dtype=np.int64),
+                        np.diff(o_ptr),
                     )
-                )
-                contribution = s2_val * ratio
-                s2_loc = s2_loc.astype(
-                    np.result_type(s2_loc, contribution),
-                    copy=False,
-                )
-                np.add.at(s2_loc, s2_ket, contribution)
-
-            s2 = float(np.real(np.dot(w, s2_loc)))
-            s2_var = float(np.real(np.dot(w, np.abs(s2_loc - s2) ** 2)))
+                    ratio = precision.cast(
+                        np.asarray(
+                            to_ratio(
+                                jax.tree.map(lambda a: a[o_bra], bra_logpsi),
+                                jax.tree.map(lambda a: a[o_ket], ket_logpsi),
+                            )
+                        ),
+                        "calc",
+                        host=True,
+                    )
+                    contrib = precision.cast(o_val, "calc", host=True) * ratio
+                    oloc = oloc.astype(np.result_type(oloc, contrib), copy=False)
+                    np.add.at(oloc, o_ket, contrib)
+                obs_stats.update(stats.observable(name, w, oloc))
+                if data:
+                    obs_data[name] = oloc
 
         gradient = None
         geom = None
-
         if grad:
             with timer("backward"):
-                dlogpsi = precision.cast(
-                    2.0 * w * residual,
-                    "calc",
-                    host=True,
-                )
+                dlogpsi = precision.cast(2.0 * w * residual, "calc", host=True)
                 cotangent = self.model.cotangent(ket_logpsi, dlogpsi)
-
                 gradient = batch.vjp(
                     self.model.coord,
                     self.params,
@@ -450,7 +453,6 @@ class MCState(VState):
                         "real",
                         host=True,
                     )
-
                     geom = Geometry(
                         theta=self.params,
                         coord=self.model.coord,
@@ -462,187 +464,42 @@ class MCState(VState):
                         ),
                     )
 
-        sampler_state = self._auto_alpha(
-            sampler_state=sampler_state,
-            ket_logabs=ket_logabs,
-            eloc=eloc,
-            energy=energy,
-            w=w,
-        )
         new_state = replace(self, sampler_state=sampler_state)
-
         n_sample = int(samples.shape[0])
-        n_strong = int(strong_bra.size)
-        n_weak = int(weak_bra.size)
-        n_s2 = int(s2_val.size)
-        n_forward_raw = n_ket + n_strong + n_weak + n_s2
-        forward_frac = float(bra.shape[0]) / max(1, n_forward_raw)
+        n_forward = int(bra.shape[0])
 
-        unique_frac = 1.0 - float(n_ket) / max(1, n_sample)
-        n_conn = (
-            float(sampler_stats.get("n_conn", 0.0))
-            + float(n_strong)
-            + float(n_weak)
-        )
-
-        stats = {
-            "energy": energy,
-            "variance": variance,
-            "s2": s2,
-            "s2_var": s2_var,
-            "accept": float(sampler_stats.get("accept", 0.0)),
-            "ess": float(ess),
-            "ess_frac": float(ess / max(1, n_sample)),
+        out = {
+            **estats,
+            **wstats,
+            **obs_stats,
+            "accept": float(sample_stats.get("accept", 0.0)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),
-            "n_forward": float(bra.shape[0]),
-            "unique_frac": float(unique_frac),
-            "forward_frac": float(forward_frac),
-            "n_conn": n_conn,
-            "n_conn_weak": float(n_weak),
-            "alpha": alpha,
+            "n_forward": float(n_forward),
+            "unique_frac": float(n_ket) / max(1.0, float(n_sample)),
         }
-        stats.update(timer.stats())
-
-        return new_state, energy, gradient, stats, geom
-
-    def _weights(
-        self,
-        *,
-        mass: np.ndarray,
-        mass2: np.ndarray,
-        ket_logabs: np.ndarray,
-        lognu: np.ndarray,
-    ) -> tuple[np.ndarray, float]:
-        """Normalize Born weights and compute sample-level ESS."""
-        rdtype = precision.real("calc", host=True)
-        tiny = rdtype(precision.tiny("calc"))
-
-        logu = rdtype(2.0) * ket_logabs - lognu
-        finite = np.isfinite(logu)
-
-        if not finite.any():
-            raise FloatingPointError("all importance weights are non-finite")
-
-        u = np.zeros_like(logu, dtype=rdtype)
-        u[finite] = np.exp(logu[finite] - rdtype(np.max(logu[finite])))
-
-        weighted_mass = mass * u
-        norm = float(np.sum(weighted_mass))
-
-        if not np.isfinite(norm) or norm <= 0.0:
-            raise FloatingPointError("importance weights have zero total mass")
-
-        w = precision.cast(
-            weighted_mass / max(norm, float(tiny)),
-            "calc",
-            "real",
-            host=True,
-        )
-
-        ess_denom = float(np.sum(mass2 * u * u))
-        ess = float(norm * norm / max(ess_denom, float(tiny)))
-
-        return w, ess
-
-    def _auto_alpha(
-        self,
-        *,
-        sampler_state: Chains,
-        ket_logabs: np.ndarray,
-        eloc: np.ndarray,
-        energy: float,
-        w: np.ndarray,
-    ) -> Chains:
-        """Update alpha by KL moment projection."""
-        if self.sampler.alpha is not None:
-            return sampler_state
-
-        rdtype = precision.real("calc", host=True)
-        tiny = rdtype(precision.tiny("calc"))
-
-        alpha = float(np.clip(float(sampler_state.alpha), 0.0, 2.0))
-        alpha_step = int(sampler_state.alpha_step) + 1
-
-        ell = precision.cast(
-            np.asarray(ket_logabs).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
-        weight = precision.cast(
-            np.asarray(w).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
-        resid = precision.cast(
-            np.asarray(np.abs(eloc - energy)).reshape(-1),
-            "calc",
-            "real",
-            host=True,
-        )
-
-        valid = np.isfinite(ell) & np.isfinite(weight) & np.isfinite(resid)
-        valid &= weight > 0.0
-
-        if not valid.any():
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
+        if profile:
+            out.update(timer.stats())
+            out.update(
+                {
+                    k: float(v)
+                    for k, v in sample_stats.items()
+                    if k.startswith("time_") or k.startswith("n_")
+                }
             )
 
-        ell = ell[valid]
-        weight = weight[valid]
-        resid = resid[valid]
-
-        resid_weight = weight * resid
-        resid_norm = float(np.sum(resid_weight))
-
-        if not np.isfinite(resid_norm) or resid_norm <= float(tiny):
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
+        if data:
+            return (
+                new_state,
+                energy,
+                gradient,
+                out,
+                geom,
+                {
+                    "x": ket,
+                    "w": w,
+                    "eloc": eloc,
+                    "obs": obs_data,
+                },
             )
-
-        resid_moment = float(np.dot(resid_weight, ell) / resid_norm)
-
-        log_ratio = (rdtype(alpha) - rdtype(2.0)) * ell
-        reference = weight * np.exp(log_ratio - rdtype(np.max(log_ratio)))
-        reference_norm = float(np.sum(reference))
-
-        if not np.isfinite(reference_norm) or reference_norm <= float(tiny):
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
-            )
-
-        reference_moment = float(np.dot(reference, ell) / reference_norm)
-        reference_var = float(
-            np.dot(reference, (ell - rdtype(reference_moment)) ** 2)
-            / reference_norm
-        )
-
-        if not np.isfinite(reference_var) or reference_var <= float(tiny):
-            return replace(
-                sampler_state,
-                alpha=alpha,
-                alpha_step=alpha_step,
-            )
-
-        alpha_hat = alpha + (
-            resid_moment - reference_moment
-        ) / reference_var
-        alpha_hat = float(np.clip(alpha_hat, 0.0, 2.0))
-
-        rate = 1.0 / float(alpha_step + 1)
-        alpha_next = (1.0 - rate) * alpha + rate * alpha_hat
-
-        return replace(
-            sampler_state,
-            alpha=float(np.clip(alpha_next, 0.0, 2.0)),
-            alpha_step=alpha_step,
-        )
+        return new_state, energy, gradient, out, geom

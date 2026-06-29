@@ -11,11 +11,8 @@ Reference:
 
 from __future__ import annotations
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import numpy as np
 import optax
 
@@ -29,10 +26,10 @@ from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
 
-from helper import chain_init, ref_init, warmup
+from helper import chain_init, ref_init
 
 
-def main():
+def main() -> None:
     space = "24e30o"
     steps = 1000
 
@@ -199,38 +196,29 @@ def main():
         assemble_mode="unique",
     )
 
-    lr = partial(warmup, start=0.0, end=5.0e-2, steps=100)
-
     optimizer = optax.chain(
-        psr(shift=1e-3, mu=0.95, beta=0.995),
-        optax.scale_by_schedule(lr),
-        optax.scale(-1.0),
+        psr(shift=1e-3, mu=0.95),
+        optax.scale(-5e-2),
     )
     vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(
         file=f"cr2_{space}.jsonl",
         every=10,
-        keys=[
+        keys=(
             "step",
             "energy",
-            "variance",
-            "accept",
+            "eloc_var",
             "ess_frac",
+            "accept",
             "n_unique",
             "n_forward",
-            "forward_frac",
-            "alpha",
-        ],
+        ),
     )
 
     # Run optimization.
     for step in range(steps):
         log.add(step, dict(vmc.step()))
-
-    log.plot("energy")
-    plt.savefig(f"cr2_{space}.pdf", dpi=300, bbox_inches="tight")
-    plt.close()
 
 
 if __name__ == "__main__":

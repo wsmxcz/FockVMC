@@ -4,8 +4,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-Tree = Any
-
 
 @dataclass(frozen=True, slots=True)
 class Geometry:
@@ -34,8 +32,8 @@ class Geometry:
             Parameter-space SR uses the incoming Optax update instead.
     """
 
-    theta: Tree
-    coord: Callable[[Tree, Any], Any]
+    theta: Any
+    coord: Callable[[Any, Any], Any]
     x: Any
     w: Any
     b: Any

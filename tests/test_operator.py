@@ -83,7 +83,7 @@ def cg(b: int, m: int, sig: int, a: int) -> float:
     return 0.0
 
 
-def csfs(x: np.ndarray, norb: int, spin: int):
+def csfs(x: np.ndarray, norb: int, spin: int) -> list[tuple[int, int, float]]:
     steps = [step(x, p) for p in range(norb)]
     bs = [0]
 
@@ -239,13 +239,29 @@ def test_guga_dense() -> None:
 
         mat = dense(H, basis)
         ref = np.array(
-            [[ref_hij(h1, h2, ecore, bra, ket, spin) for ket in basis] for bra in basis],
+            [
+                [
+                    ref_hij(h1, h2, ecore, bra, ket, spin)
+                    for ket in basis
+                ]
+                for bra in basis
+            ],
             dtype=np.float64,
         )
 
         np.testing.assert_allclose(mat, ref, atol=2e-12, rtol=2e-12)
-        np.testing.assert_allclose(H.matrix(basis).toarray(), ref, atol=2e-12, rtol=2e-12)
-        np.testing.assert_allclose(H.diag(basis), np.diag(ref), atol=2e-12, rtol=2e-12)
+        np.testing.assert_allclose(
+            H.matrix(basis).toarray(),
+            ref,
+            atol=2e-12,
+            rtol=2e-12,
+        )
+        np.testing.assert_allclose(
+            H.diag(basis),
+            np.diag(ref),
+            atol=2e-12,
+            rtol=2e-12,
+        )
 
 
 def test_guga_conn() -> None:

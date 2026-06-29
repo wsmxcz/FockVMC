@@ -7,14 +7,6 @@ from scipy.sparse import csr_matrix
 from ..hilbert import DetSector, Sector, SpinSector
 from . import libdet
 
-FloatArray = NDArray[np.float64]
-UInt64Array = NDArray[np.uint64]
-
-Conns = libdet.Conns
-LocalConn = libdet.LocalConn
-Projection = libdet.Projection
-Projections = libdet.Projections
-
 
 class Hamiltonian:
     """Electronic Hamiltonian acting on a Fock-space sector."""
@@ -73,7 +65,7 @@ class Hamiltonian:
             )
         )
 
-    def diag(self, x: ArrayLike) -> FloatArray:
+    def diag(self, x: ArrayLike) -> NDArray[np.float64]:
         """Return diagonal elements for a batch of basis states."""
         return self._raw.diag(np.ascontiguousarray(x, dtype=np.uint64))
 
@@ -84,7 +76,7 @@ class Hamiltonian:
         *,
         scale: ArrayLike | None = None,
         exclude: ArrayLike | None = None,
-    ) -> UInt64Array:
+    ) -> NDArray[np.uint64]:
         """Generate unique connected `bra` states above the screening cutoff."""
         return self._raw.expand(
             np.ascontiguousarray(kets, dtype=np.uint64),
@@ -105,7 +97,7 @@ class Hamiltonian:
         *,
         eps: float = 0.0,
         exclude: ArrayLike | None = None,
-    ) -> Projection:
+    ) -> libdet.Projection:
         """Contract `H[bras, kets] scale[kets]`.
 
         If `bras` is `None`, connected external `bra` states are generated with
@@ -139,7 +131,7 @@ class Hamiltonian:
         eps: float = 0.0,
         *,
         assemble_mode: str = "unique",
-    ) -> Conns:
+    ) -> libdet.Conns:
         """Return screened off-diagonal connections for each ket."""
         return self._raw.conn(
             np.ascontiguousarray(kets, dtype=np.uint64),
@@ -156,7 +148,7 @@ class Hamiltonian:
         eps2: float = 0.0,
         seed: int = 0,
         assemble_mode: str = "unique",
-    ) -> Conns:
+    ) -> libdet.Conns:
         """Sample connections in the screened span `eps2 <= |H| < eps1`."""
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
         counts_arr = (
@@ -173,7 +165,6 @@ class Hamiltonian:
             assemble_mode=assemble_mode,
         )
 
-
     def local_conn(
         self,
         kets: ArrayLike,
@@ -183,7 +174,7 @@ class Hamiltonian:
         *,
         seed: int = 0,
         assemble_mode: str = "unique",
-    ) -> LocalConn:
+    ) -> libdet.LocalConn:
         """Return strong connections and weak-window samples for local energy."""
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
         counts_arr = (
@@ -210,7 +201,7 @@ class Hamiltonian:
         eps2: float = 0.0,
         exclude: ArrayLike | None = None,
         seed: int = 0,
-    ) -> Projections:
+    ) -> libdet.Projections:
         """Sample projected amplitudes in the screened external span."""
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
         scale_arr = np.ascontiguousarray(scale, dtype=np.float64).reshape(-1)
@@ -226,8 +217,13 @@ class Hamiltonian:
             else np.ascontiguousarray(exclude, dtype=np.uint64)
         )
         return self._raw.sample_project(
-            kets_arr, scale_arr, counts_arr, float(eps1), float(eps2),
-            exclude_arr, int(seed),
+            kets_arr,
+            scale_arr,
+            counts_arr,
+            float(eps1),
+            float(eps2),
+            exclude_arr,
+            int(seed),
         )
 
     def matrix(self, bras: ArrayLike, kets: ArrayLike | None = None) -> csr_matrix:
@@ -247,7 +243,7 @@ class Hamiltonian:
         x: ArrayLike,
         *,
         kets: ArrayLike | None = None,
-    ) -> FloatArray:
+    ) -> NDArray[np.float64]:
         """Apply `H[bras, kets]` to one or more vectors."""
         bras_arr = np.ascontiguousarray(bras, dtype=np.uint64)
         kets_arr = (

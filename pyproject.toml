@@ -10,7 +10,7 @@ name = "detnqs"
 version = "0.3.0"
 description = "DetNQS: An Efficient Framework for Neural Network Quantum States in Quantum Chemistry"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
@@ -20,9 +20,9 @@ authors = [
 
 dependencies = [
   "flax>=0.12",
-  "jax>=0.8",
-  "jaxlib>=0.8",
-  "numpy>=2.0",
+  "jax>=0.10",
+  "jaxlib>=0.10",
+  "numpy>=2.4",
   "optax>=0.2",
   "pyscf>=2.13",
   "scipy>=1.10",
@@ -33,7 +33,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: C++",

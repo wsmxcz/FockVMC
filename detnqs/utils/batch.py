@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Shape control for JAX kernels.
 
 DetNQS uses three independent chunk sizes.
@@ -17,14 +15,14 @@ Bucketed kernels are padded to a power-of-two size before JIT compilation.
 Padding is only valid when the caller makes padded entries inactive.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from functools import lru_cache, partial
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-
-Tree = Any
 
 config = {
     "forward_chunk": 8192,
@@ -64,13 +62,7 @@ def configure(
     jax.clear_caches()
 
 
-def bucket_size(n: int) -> int:
-    """Return the power-of-two bucket used for a true leading size."""
-    size = max(int(n), int(config["bucket_min"]))
-    return 1 << (size - 1).bit_length()
-
-
-def chunks(tree: Tree, size: int | None):
+def chunks(tree: Any, size: int | None):
     """Yield leading-axis chunks and their true sizes."""
     n = int(jax.tree.leaves(tree)[0].shape[0])
 
@@ -79,6 +71,8 @@ def chunks(tree: Tree, size: int | None):
         return
 
     size = int(size)
+    if size <= 0:
+        raise ValueError("size must be positive or None")
     if n == 0:
         yield pad(tree, size, axis=0), 0
         return
@@ -97,7 +91,7 @@ def mask(n: int, size: int | None = None) -> jax.Array:
     return jnp.arange(size) < n
 
 
-def apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
+def apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     """Evaluate y_i = f_theta(x_i) over the leading axis."""
     chunk = config["forward_chunk"]
     if chunk is None:
@@ -110,11 +104,11 @@ def apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
 
 
 def jvp(
-    fun: Callable[[Tree, Tree], Tree],
-    theta: Tree,
-    tangent: Tree,
-    x: Tree,
-) -> tuple[Tree, Tree]:
+    fun: Callable[[Any, Any], Any],
+    theta: Any,
+    tangent: Any,
+    x: Any,
+) -> tuple[Any, Any]:
     """Evaluate y_i = f_theta(x_i) and dy_i = J_i tangent."""
     chunk = config["backward_chunk"]
     if chunk is None:
@@ -136,11 +130,11 @@ def jvp(
 
 
 def vjp(
-    fun: Callable[[Tree, Tree], Tree],
-    theta: Tree,
-    x: Tree,
-    cotangent: Tree,
-) -> Tree:
+    fun: Callable[[Any, Any], Any],
+    theta: Any,
+    x: Any,
+    cotangent: Any,
+) -> Any:
     """Evaluate sum_i J_i^dagger cotangent_i."""
     chunk = config["backward_chunk"]
     if chunk is None:
@@ -153,12 +147,12 @@ def vjp(
 
 
 def bucket(
-    fun: Callable[..., Tree],
-    *args: Tree,
+    fun: Callable[..., Any],
+    *args: Any,
     in_axes: int | tuple[int | None, ...] | None = 0,
     out_axes: int | tuple[int | None, ...] | None = 0,
     static_argnums: int | tuple[int, ...] = (),
-) -> Tree:
+) -> Any:
     """Run a coupled leading-axis kernel on a padded power-of-two bucket."""
     if not isinstance(static_argnums, tuple):
         static_argnums = (int(static_argnums),)
@@ -179,7 +173,8 @@ def bucket(
     if n is None:
         return _jit(fun, static_argnums)(*args)
 
-    size = bucket_size(n)
+    size = max(n, int(config["bucket_min"]))
+    size = 1 << (size - 1).bit_length()
     padded = tuple(
         arg if i in static_argnums or axis is None else pad(arg, size, axis)
         for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True))
@@ -199,7 +194,7 @@ def bucket(
     return trim(out, n, out_axes)
 
 
-def pad(tree: Tree, size: int, axis: int = 0) -> Tree:
+def pad(tree: Any, size: int, axis: int = 0) -> Any:
     def one(a):
         a = jnp.asarray(a)
         n = int(size) - int(a.shape[axis])
@@ -212,7 +207,7 @@ def pad(tree: Tree, size: int, axis: int = 0) -> Tree:
     return jax.tree.map(one, tree)
 
 
-def trim(tree: Tree, size: int, axis: int = 0) -> Tree:
+def trim(tree: Any, size: int, axis: int = 0) -> Any:
     def one(a):
         slc = [slice(None)] * a.ndim
         slc[int(axis)] = slice(0, int(size))
@@ -222,31 +217,31 @@ def trim(tree: Tree, size: int, axis: int = 0) -> Tree:
 
 
 @lru_cache(maxsize=16)
-def _jit(fun: Callable[..., Tree], static_argnums: tuple[int, ...]):
+def _jit(fun: Callable[..., Any], static_argnums: tuple[int, ...]):
     return jax.jit(fun, static_argnums=static_argnums)
 
 
 @partial(jax.jit, static_argnums=0)
-def _apply(fun: Callable[[Tree, Tree], Tree], theta: Tree, x: Tree) -> Tree:
+def _apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     return fun(theta, x)
 
 
 @partial(jax.jit, static_argnums=0)
 def _jvp(
-    fun: Callable[[Tree, Tree], Tree],
-    theta: Tree,
-    tangent: Tree,
-    x: Tree,
-) -> tuple[Tree, Tree]:
+    fun: Callable[[Any, Any], Any],
+    theta: Any,
+    tangent: Any,
+    x: Any,
+) -> tuple[Any, Any]:
     return jax.jvp(lambda p: fun(p, x), (theta,), (tangent,))
 
 
 @partial(jax.jit, static_argnums=0)
 def _vjp(
-    fun: Callable[[Tree, Tree], Tree],
-    theta: Tree,
-    x: Tree,
-    cotangent: Tree,
-) -> Tree:
+    fun: Callable[[Any, Any], Any],
+    theta: Any,
+    x: Any,
+    cotangent: Any,
+) -> Any:
     _, pullback = jax.vjp(lambda p: fun(p, x), theta)
     return pullback(cotangent)[0]

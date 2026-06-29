@@ -15,9 +15,6 @@ from ..utils import tree
 from . import linalg
 from .base import Geometry
 
-Tree = Any
-Shift = float | Callable[[jax.Array], Any]
-
 
 class MinSRState(NamedTuple):
     """Optimizer state for sample-space minSR."""
@@ -28,7 +25,7 @@ class MinSRState(NamedTuple):
 
 def minsr(
     *,
-    shift: Shift = 1.0e-3,
+    shift: float | Callable[[jax.Array], Any] = 1.0e-3,
 ) -> optax.GradientTransformationExtraArgs:
     """Dense sample-space minimum-step stochastic reconfiguration.
 
@@ -45,7 +42,7 @@ def minsr(
     if not callable(shift) and shift < 0.0:
         raise ValueError("shift must be non-negative")
 
-    def init_fn(params: Tree) -> MinSRState:
+    def init_fn(params: Any) -> MinSRState:
         del params
 
         dtype = precision.real("sr")
@@ -53,22 +50,17 @@ def minsr(
 
         return MinSRState(
             step=jnp.zeros((), dtype=jnp.int32),
-            stats={
-                "sr_shift": zero,
-                "sr_residual": zero,
-                "sr_step_norm": zero,
-                "sr_cond": zero,
-            },
+            stats={"sr_force": zero, "sr_damp": zero},
         )
 
     def update_fn(
-        updates: Tree,
+        updates: Any,
         state: MinSRState,
-        params: Tree | None = None,
+        params: Any | None = None,
         *,
         geometry: Geometry | None = None,
         **extra_args: Any,
-    ) -> tuple[Tree, MinSRState]:
+    ) -> tuple[Any, MinSRState]:
         del updates, params, extra_args
 
         if geometry is None:
@@ -96,29 +88,9 @@ def minsr(
             geometry.theta,
         )
 
-        dtype = precision.real("sr")
-        step_norm2 = sum(
-            (
-                jnp.sum(
-                    jnp.real(
-                        jnp.asarray(x) * jnp.conj(jnp.asarray(x))
-                    )
-                )
-                for x in jax.tree.leaves(delta)
-            ),
-            jnp.asarray(0.0, dtype=dtype),
-        )
-
-        stats = {
-            "sr_shift": info["shift"],
-            "sr_residual": info["residual"],
-            "sr_step_norm": jnp.sqrt(step_norm2),
-            "sr_cond": info["cond"],
-        }
-
         return delta, MinSRState(
             step=state.step + 1,
-            stats=stats,
+            stats={"sr_force": info["force"], "sr_damp": info["damp"]},
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
@@ -126,12 +98,12 @@ def minsr(
 
 def _step(
     coord,
-    theta: Tree,
+    theta: Any,
     x: jax.Array,
     w: jax.Array,
     b: jax.Array,
     shift: jax.Array,
-) -> tuple[Tree, dict[str, jax.Array]]:
+) -> tuple[Any, dict[str, jax.Array]]:
     """One dense sample-space minSR solve on one fixed-shape bucket."""
     b_flat, unravel_b = ravel_pytree(b)
     nrow = b_flat.size
@@ -140,14 +112,11 @@ def _step(
     dtype = jnp.result_type(b_flat, *[leaf.dtype for leaf in jax.tree.leaves(theta)])
     K = jnp.zeros((nrow, nrow), dtype=dtype)
 
-    def coord_one(params: Tree, sample: Tree):
-        sample = jax.tree.map(lambda z: z[None, ...], sample)
-        out = coord(params, sample)
-        return jax.tree.map(lambda z: jnp.asarray(z)[0], out)
-
     for block, put in tree.blocks(theta, batch.config["param_chunk"]):
         def coord_block(block, sample):
-            return coord_one(put(block), sample)
+            sample = jax.tree.map(lambda z: z[None, ...], sample)
+            out = coord(put(block), sample)
+            return jax.tree.map(lambda z: jnp.asarray(z)[0], out)
 
         J = jax.vmap(
             jax.jacrev(coord_block),
@@ -164,7 +133,11 @@ def _step(
     K = precision.cast(K, "sr")
     rhs = precision.cast(b_flat, "sr").astype(K.dtype)
 
-    a, info = linalg.solve_dense(K, rhs, shift)
+    a = linalg.solve_dense(K, rhs, shift)
+    real_dtype = precision.real("sr")
+    tiny = precision.tiny("sr")
+    force = jnp.real(jnp.vdot(rhs, a)).astype(real_dtype)
+    damp = (shift * jnp.real(jnp.vdot(a, a))) / jnp.maximum(force, tiny)
     a_tree = unravel_b(a.astype(dtype))
 
     def cotangent(a_leaf):
@@ -180,4 +153,4 @@ def _step(
         jax.tree.map(cotangent, a_tree),
     )
 
-    return delta, info
+    return delta, {"force": force, "damp": damp.astype(real_dtype)}

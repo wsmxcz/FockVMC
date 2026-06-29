@@ -22,7 +22,7 @@ class Sector(ABC):
         return np.ascontiguousarray(x)
 
     def unique(self, x: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        x = np.asarray(x)
+        x = self.asarray(x)
         n = int(x.shape[0])
         if n == 0:
             empty = np.empty(0, dtype=np.int64)

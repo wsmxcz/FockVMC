@@ -79,29 +79,28 @@ def davidson_primme(
 
     t_conns = time.perf_counter() - t_conns
 
-    # Diagonal inverse preconditioner.
-    def precond(x):
-        X = np.asarray(x, dtype=np.float64)
-        is_vec = X.ndim == 1
+    def precond(x: np.ndarray) -> np.ndarray:
+        x_arr = np.asarray(x, dtype=np.float64)
+        is_vec = x_arr.ndim == 1
 
         if is_vec:
-            X = X[:, None]
+            x_arr = x_arr[:, None]
 
         shifts = np.asarray(primme.get_eigsh_param("ShiftsForPreconditioner"))
         if shifts.size == 0:
-            shifts = np.zeros(X.shape[1], dtype=np.float64)
-        elif shifts.size == 1 and X.shape[1] > 1:
-            shifts = np.full(X.shape[1], shifts[0], dtype=np.float64)
+            shifts = np.zeros(x_arr.shape[1], dtype=np.float64)
+        elif shifts.size == 1 and x_arr.shape[1] > 1:
+            shifts = np.full(x_arr.shape[1], shifts[0], dtype=np.float64)
 
-        Y = np.empty_like(X)
-        for j in range(X.shape[1]):
+        out = np.empty_like(x_arr)
+        for j in range(x_arr.shape[1]):
             denom = hdiag - shifts[j]
             denom = np.where(np.abs(denom) < 1e-8, np.copysign(1e-8, denom), denom)
-            Y[:, j] = X[:, j] / denom
+            out[:, j] = x_arr[:, j] / denom
 
-        return Y[:, 0] if is_vec else Y
+        return out[:, 0] if is_vec else out
 
-    OPinv = LinearOperator((n, n), matvec=precond, matmat=precond, dtype=np.float64)
+    op_inv = LinearOperator((n, n), matvec=precond, matmat=precond, dtype=np.float64)
 
     t_solve = time.perf_counter()
     w, v = primme.eigsh(
@@ -109,7 +108,7 @@ def davidson_primme(
         k=1,
         which="SA",
         v0=v0[:, None],
-        OPinv=OPinv,
+        OPinv=op_inv,
         tol=tol,
         maxiter=max_iter,
         ncv=min(n, max(8, min(max_space, 24))),
@@ -278,7 +277,7 @@ def semi_pt2(
     return e2_det + e2_stoch, e2_det, e2_stoch, err
 
 
-def main():
+def main() -> None:
     # Build molecule.
     mol = gto.M(
         atom="""

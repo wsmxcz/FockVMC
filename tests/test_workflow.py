@@ -59,5 +59,5 @@ def test_h2_workflow() -> None:
     )
     _, stats = state.expect()
     assert np.isfinite(stats["energy"])
-    assert np.isfinite(stats["variance"])
+    assert np.isfinite(stats["eloc_var"])
     assert stats["n_sample"] == 16

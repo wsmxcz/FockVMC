@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import jax.numpy as jnp
 import numpy as np
 
 
@@ -75,13 +74,6 @@ class HydrogenLattice:
         )
         coords -= coords.mean(axis=0, keepdims=True)
         return cls(coords)
-
-
-def warmup(step, start: float, end: float, steps: int = 1000):
-    """Smoothly ramp a scalar value during early optimization."""
-    t = jnp.minimum(jnp.asarray(step, dtype=jnp.float64) / float(steps), 1.0)
-    s = 2.0 * t - t * t
-    return start + (end - start) * s
 
 
 def chain_init(

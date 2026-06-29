@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Global dtype policy.
 
 Precision is a boundary policy. Kernels should cast inputs at their boundary
@@ -11,6 +9,8 @@ Roles:
     sr: stochastic-reconfiguration matrices, RHS vectors, and solves.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 import jax
@@ -19,15 +19,12 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-_PROFILE = "double"
 _ROLES = {
     "model": "double",
     "calc": "double",
     "sr": "double",
 }
 
-_LEVELS = {"single", "double"}
-_PROFILES = {"single", "double", "mixed"}
 _DTYPES = {
     "single": {
         "real": (jnp.float32, np.float32),
@@ -48,10 +45,10 @@ def configure(
     sr: str | None = None,
 ) -> None:
     """Set the global precision profile."""
-    global _PROFILE, _ROLES
+    global _ROLES
 
     profile = str(profile)
-    if profile not in _PROFILES:
+    if profile not in {"single", "double", "mixed"}:
         raise ValueError("profile must be 'single', 'double', or 'mixed'")
 
     if profile in {"single", "double"}:
@@ -64,11 +61,14 @@ def configure(
             "calc": "double" if calc is None else str(calc),
             "sr": "double" if sr is None else str(sr),
         }
-        bad = [name for name, value in roles.items() if value not in _LEVELS]
+        bad = [
+            name
+            for name, value in roles.items()
+            if value not in {"single", "double"}
+        ]
         if bad:
             raise ValueError("role precision must be 'single' or 'double'")
 
-    _PROFILE = profile
     _ROLES = roles
     jax.config.update("jax_enable_x64", True)
     jax.clear_caches()

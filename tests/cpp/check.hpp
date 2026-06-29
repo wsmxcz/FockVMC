@@ -169,13 +169,20 @@ inline void check_conn(
 
     for (std::size_t ik = 0; ik < n; ++ik) {
         near(con.diag[ik], mat[ik * n + ik], "conn diag");
-        near(con.degree[ik], exact_degree(mat, n, ik, std::numeric_limits<double>::infinity(), eps), "conn degree");
+        near(
+            con.degree[ik],
+            exact_degree(mat, n, ik, std::numeric_limits<double>::infinity(), eps),
+            "conn degree"
+        );
 
         std::vector<double> got(n, 0.0);
         double last = std::numeric_limits<double>::infinity();
         for (int p = con.ptr[ik]; p < con.ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.idx[t])]);
+            const int ib = find_state(
+                basis.view(),
+                batch[static_cast<std::size_t>(con.idx[t])]
+            );
             if (ib < 0) throw std::runtime_error("conn bra");
             if (got[static_cast<std::size_t>(ib)] != 0.0) throw std::runtime_error("conn dup");
             const double h = con.h[t];
@@ -234,7 +241,10 @@ inline void check_sample(
 
             for (int p = con.ptr[pos]; p < con.ptr[pos + 1u]; ++p) {
                 const std::size_t t = static_cast<std::size_t>(p);
-                const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.idx[t])]);
+                const int ib = find_state(
+                    basis.view(),
+                    batch[static_cast<std::size_t>(con.idx[t])]
+                );
                 if (ib < 0) throw std::runtime_error("sample bra");
                 const double h = con.h[t];
                 const double a = std::abs(h);
@@ -276,14 +286,21 @@ inline void check_local(
 
     for (std::size_t ik = 0; ik < n; ++ik) {
         near(con.diag[ik], mat[ik * n + ik], "local diag");
-        near(con.strong_degree[ik], exact_degree(mat, n, ik, std::numeric_limits<double>::infinity(), eps1), "strong degree");
+        near(
+            con.strong_degree[ik],
+            exact_degree(mat, n, ik, std::numeric_limits<double>::infinity(), eps1),
+            "strong degree"
+        );
         const double ref_weak = n_draw > 0 ? exact_degree(mat, n, ik, eps1, eps2) : 0.0;
         near(con.weak_degree[ik], ref_weak, "weak degree");
 
         std::vector<double> got(n, 0.0);
         for (int p = con.strong_ptr[ik]; p < con.strong_ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.strong_bra[t])]);
+            const int ib = find_state(
+                basis.view(),
+                batch[static_cast<std::size_t>(con.strong_bra[t])]
+            );
             if (ib < 0) throw std::runtime_error("strong bra");
             const double h = con.strong_h[t];
             if (!(std::abs(h) >= eps1)) throw std::runtime_error("strong eps");
@@ -300,7 +317,10 @@ inline void check_local(
         i64 seen = 0;
         for (int p = con.weak_ptr[ik]; p < con.weak_ptr[ik + 1u]; ++p) {
             const std::size_t t = static_cast<std::size_t>(p);
-            const int ib = find_state(basis.view(), batch[static_cast<std::size_t>(con.weak_bra[t])]);
+            const int ib = find_state(
+                basis.view(),
+                batch[static_cast<std::size_t>(con.weak_bra[t])]
+            );
             if (ib < 0) throw std::runtime_error("weak bra");
             const double h = con.weak_h[t];
             const double a = std::abs(h);
@@ -364,15 +384,21 @@ inline void check_sample_project(const Hamiltonian& ham, const Basis& basis) {
     const StateBatchView exclude = kets.view();
     const auto out = ham.sample_project(kets.view(), scale, counts, ns, 0.30, 0.02, &exclude, 19);
     const auto batch = batch_view(out.nword, out.bra);
-    if (out.nword != basis.nword || out.n_streams != ns) throw std::runtime_error("sample project shape");
+    if (out.nword != basis.nword || out.n_streams != ns) {
+        throw std::runtime_error("sample project shape");
+    }
     if (out.hpsi.size() != ns * batch.n_states) throw std::runtime_error("sample project hpsi");
     if (!out.diag.empty() && out.diag.size() != batch.n_states) {
         throw std::runtime_error("sample project diag");
     }
 
     for (std::size_t ibra = 0; ibra < batch.n_states; ++ibra) {
-        if (find_state(basis.view(), batch[ibra]) < 0) throw std::runtime_error("sample project bra");
-        if (find_state(exclude, batch[ibra]) >= 0) throw std::runtime_error("sample project exclude");
+        if (find_state(basis.view(), batch[ibra]) < 0) {
+            throw std::runtime_error("sample project bra");
+        }
+        if (find_state(exclude, batch[ibra]) >= 0) {
+            throw std::runtime_error("sample project exclude");
+        }
         for (std::size_t jb = ibra + 1u; jb < batch.n_states; ++jb) {
             if (same_state(batch[ibra], batch[jb])) throw std::runtime_error("sample project dup");
         }

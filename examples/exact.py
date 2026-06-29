@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import jax
 import numpy as np
-import optax
 
 from pyscf import ao2mo, fci, gto, scf
 
@@ -50,6 +49,7 @@ def main() -> None:
     # Build Hamiltonian.
     sector = hilbert.DetSector(norb, n_alpha, n_beta)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
+    H.save("h2_exact_ham.npz")
 
     # Solve benchmark.
     solver = fci.direct_spin0.FCI(mol)
@@ -70,17 +70,14 @@ def main() -> None:
 
     steps = 500
 
-    optimizer = optax.chain(
-        psr(shift=1e-3, mu=0.95),
-        optax.scale(-5e-2),
-    )
+    optimizer = psr(shift=1.0e-3, mu=0.95, scale=-5.0e-2)
     vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(every=10, verbose=2)
 
     # Run optimization.
-    for step in range(steps):
-        log.add(step, vmc.step())
+    for _ in range(steps):
+        log.add(vmc.step())
 
 
 if __name__ == "__main__":

@@ -113,9 +113,9 @@ This is the sampled pullback of wave-function geometry to parameter space. A
 small displacement has squared tangent length
 
 $$
-\|\delta\psi\|^2
+|\delta\psi|^2
 \approx
-\delta\theta^\mathsf T S\,\delta\theta,
+\delta\theta^\mathsf T S,\delta\theta,
 $$
 
 up to the normalization and coordinate convention used to construct $O$.
@@ -131,7 +131,7 @@ $$
 In the positive real convention, the sample-space force can be written as
 
 $$
-b_n=2\sqrt{w_n}\,\Delta E_n.
+b_n=2\sqrt{w_n},\Delta E_n.
 $$
 
 For complex or signed representations, the same object is mapped through the
@@ -146,13 +146,13 @@ $$
 The local tangent projection problem is
 
 $$
-\min_\delta \|O\delta+b\|^2 .
+\min_\delta |O\delta+b|^2 .
 $$
 
 Its normal equation is
 
 $$
-O^\mathsf T O\,\delta=-O^\mathsf T b,
+O^\mathsf T O,\delta=-O^\mathsf T b,
 $$
 
 or
@@ -168,16 +168,16 @@ $$
 \qquad \lambda\ge 0 .
 $$
 
-This is SR as a natural-gradient or imaginary-time tangent projection. In the
-following sections, $\delta$ denotes the mathematical descent displacement. In
-an Optax-style implementation, however, a transform may return the
-preconditioned gradient direction
+This is SR as a natural-gradient or imaginary-time tangent projection. More
+generally, one may include a signed step scale $\eta$ and write the actual
+parameter displacement as
 
 $$
-u=(S+\lambda I)^{-1}g=-\delta,
+(S+\lambda I)\Delta=\eta g.
 $$
 
-and leave the minus sign and learning rate to a later scaling transform.
+The descent convention corresponds to $\eta<0$. In what follows, $\Delta$
+always denotes the actual parameter displacement.
 
 ## 4. Rank, Cost, and Structured Approximations
 
@@ -232,17 +232,17 @@ $$
 K=OO^\mathsf T\in\mathbb R^{M\times M}.
 $$
 
-Then one solves
+With signed step scale $\eta$, sample-space SR solves
 
 $$
-(K+\lambda I)a=-b,
+(K+\lambda I)a=\eta b,
 \qquad
-\delta=O^\mathsf T a.
+\Delta=O^\mathsf T a.
 $$
 
-This is advantageous when $M\ll P$. In the unshifted underdetermined case,
-it selects the Euclidean minimum-norm parameter displacement satisfying the
-sampled tangent equation $O\delta=-b$, when that equation is consistent.
+This is advantageous when $M\ll P$. In the unshifted underdetermined case, it
+selects the Euclidean minimum-norm displacement satisfying the sampled tangent
+equation, when that equation is consistent.
 
 This is the minimum-step SR viewpoint: the tangent problem is unchanged, but
 the linear algebra is expressed through the sample-space kernel $K$ rather than
@@ -250,48 +250,67 @@ the parameter-space metric $S$.
 
 ## 6. Predictive SR
 
-Predictive SR (PSR) adds short memory to the same sample-space geometry. It is
-most naturally written in the optimizer-sign convention, where $u=-\delta$ is
-the preconditioned gradient direction later multiplied by a negative learning
-rate. Let $p$ be a predicted natural-gradient direction and let $C$ be a
-conservative diagonal covariance. PSR solves a residual SR problem
+Predictive SR (PSR) adds short memory to the same sample-space geometry. The
+memory variable is the previous actual parameter displacement, not an
+unscaled direction. Let
 
 $$
-r=b-Op,
+\Delta_{t-1}
+$$
+
+be the previous displacement and define the predictor
+
+$$
+p_t=\mu\Delta_{t-1},
+\qquad 0\le \mu <1 .
+$$
+
+The current correction is obtained by matching the residual tangent equation
+
+$$
+O_t\Delta_t \approx \eta_t b_t.
+$$
+
+Writing
+
+$$
+\Delta_t=p_t+q_t,
+$$
+
+the residual equation becomes
+
+$$
+O_tq_t\approx \eta_t b_t-O_tp_t.
+$$
+
+Thus PSR solves
+
+$$
+r_t=\eta_t b_t-O_tp_t,
 $$
 
 $$
-K_C=OCO^\mathsf T,
+(K_t+\lambda I)a_t=r_t,
 \qquad
-(K_C+\lambda I)a=r,
+q_t=O_t^\mathsf T a_t,
 $$
 
 and forms
 
 $$
-q=CO^\mathsf T a,
-\qquad
-u=p+q.
+\Delta_t=p_t+q_t.
 $$
 
-The predictor and diagonal scale are updated schematically as
+The predictor is therefore corrected inside the current tangent-space SR
+equation. It is not an external momentum step. The stored memory after the
+update is
 
 $$
-p\leftarrow \mu u,
-\qquad
-v\leftarrow \beta v+(1-\beta)|q|^2,
+\Delta_t,
 $$
 
-with
-
-$$
-C_i=\frac{\operatorname{mean}(v)}{v_i+\operatorname{mean}(v)}.
-$$
-
-At initialization $C=I$. Later, directions that repeatedly require large
-residual corrections are shrunk. PSR should therefore be viewed as a
-predictor-corrector sample-space SR method, not as an Adam-style Euclidean
-optimizer.
+so the next predictor remains in the same parameter-space scale as the actual
+wave-function displacement.
 
 ## 7. Summary
 
@@ -306,10 +325,10 @@ S=O^\mathsf T O,
 K=OO^\mathsf T.
 $$
 
-Parameter-space SR solves with $S$. minSR solves the equivalent shifted problem
-with $K$. PSR solves a covariance-scaled residual problem around a predicted SR
-step. These forms differ in numerical representation and stabilization, not in
-the underlying variational objective.
+Parameter-space SR solves with $S$. Sample-space SR solves the equivalent
+shifted problem with $K$. PSR solves a residual sample-space problem around a
+predicted actual displacement. These forms differ in numerical representation
+and stabilization, not in the underlying variational objective.
 
 ## References
 

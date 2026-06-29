@@ -9,7 +9,6 @@ from pyscf import ao2mo, fci, gto, scf
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
 from detnqs.model import Backflow
-from detnqs.optimizer import psr
 from detnqs.vstate import SelectedState, topk_selector
 
 
@@ -50,6 +49,7 @@ def main() -> None:
     # Build Hamiltonian.
     sector = hilbert.DetSector(norb, n_alpha, n_beta)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
+    H.save("h2o_selected_ham.npz")
 
     # Solve benchmark.
     solver = fci.direct_spin0.FCI(mol)
@@ -73,11 +73,11 @@ def main() -> None:
     outer_steps = 5
     inner_steps = 100
     optimizer = optax.adamw(1e-3)
-    vmc = VMC.init(state, optimizer)
+    vmc = VMC.init(state, optimizer, geometry=False)
 
     log = utils.Logger(
         every=1,
-        keys=("outer", "energy", "eloc_var", "sr_force", "sr_damp", "n_basis"),
+        keys=("step", "outer", "energy", "eloc_var", "n_basis"),
     )
 
     # Run optimization.
@@ -87,9 +87,9 @@ def main() -> None:
         for _ in range(inner_steps):
             stats = dict(vmc.step())
 
-        stats["outer"] = outer
+        stats["outer"] = outer + 1
         stats["n_basis"] = vmc.state.n_basis
-        log.add(outer, stats)
+        log.add(stats)
 
 
 if __name__ == "__main__":

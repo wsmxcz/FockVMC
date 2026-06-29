@@ -190,8 +190,8 @@ def hci_solve(
         )
 
         log.add(
-            it + 1,
             {
+                "step": it + 1,
                 "n_det": len(dets),
                 "n_new": cand.shape[0],
                 "energy": energy,

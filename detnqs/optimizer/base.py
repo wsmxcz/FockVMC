@@ -28,8 +28,7 @@ class Geometry:
             unnormalized; optimizers normalize them internally.
 
         b:
-            Sample-space right-hand side. minSR and PSR use b directly.
-            Parameter-space SR uses the incoming Optax update instead.
+            Sample-space right-hand side used by PSR.
     """
 
     theta: Any

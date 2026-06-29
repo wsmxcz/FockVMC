@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
 import jax
+import jax.numpy as jnp
 import optax
 
 from .utils import Timer, checkpoint, stats as stats_util
@@ -14,11 +15,7 @@ from .utils.logger import Logger
 
 @dataclass(slots=True)
 class VMC:
-    """Minimal variational Monte Carlo driver.
-
-    The driver owns iteration, optimizer state, and checkpointable numerical
-    state. Physics remains in `state`; SR details remain in the optimizer.
-    """
+    """Variational Monte Carlo optimization driver."""
 
     state: Any
     optimizer: optax.GradientTransformationExtraArgs
@@ -34,7 +31,6 @@ class VMC:
         *,
         geometry: bool = True,
     ) -> Self:
-        """Create a driver and initialize the Optax state from parameters."""
         optimizer = optax.with_extra_args_support(optimizer)
         return cls(
             state=state,
@@ -49,7 +45,7 @@ class VMC:
         obs: Mapping[str, Any] | None = None,
         profile: bool = False,
     ) -> dict[str, float]:
-        """Run one optimization step and return a flat scalar record."""
+        """Apply one update and return the pre-update scalar record."""
         timer = Timer(enabled=profile)
         with timer("total"):
             state, energy, grad, out, geometry = self.state.expect_and_grad(
@@ -74,9 +70,16 @@ class VMC:
             self.state = state.replace(params=params)
 
         rec = dict(out)
-        rec["step"] = float(self.step_count)
+        rec["step"] = float(self.step_count + 1)
         rec.update(stats_util.update(grad, updates))
-        rec.update(stats_util.collect(self.opt_state))
+
+        opt_stats = getattr(self.opt_state, "stats", None)
+        if isinstance(opt_stats, Mapping):
+            for key, value in opt_stats.items():
+                arr = jnp.asarray(jax.device_get(value))
+                if arr.ndim == 0 and not jnp.issubdtype(arr.dtype, jnp.complexfloating):
+                    rec[str(key)] = float(arr)
+
         if profile:
             rec.update(timer.stats())
 
@@ -89,65 +92,57 @@ class VMC:
         *,
         obs: Mapping[str, Any] | None = None,
         logger: Logger | None = None,
-        callbacks: Sequence[
-            Callable[[int, dict[str, float], "VMC"], bool | None]
-        ] = (),
-        verbose: int = 1,
         profile: bool = False,
     ) -> dict[str, float]:
-        """Run several steps; logging and callbacks are user-level hooks."""
-        if logger is None and int(verbose) > 0:
-            logger = Logger(verbose=int(verbose))
-
         rec: dict[str, float] = {}
         for _ in range(int(steps)):
             rec = self.step(obs=obs, profile=profile)
-            step = self.step_count - 1
-
             if logger is not None:
-                logger(step, rec, self)
-            for callback in callbacks:
-                if callback(step, rec, self):
-                    return rec
+                logger.add(rec)
         return rec
 
-    def reset_optimizer(self) -> None:
-        """Reset optimizer state while keeping the current wavefunction."""
-        self.opt_state = self.optimizer.init(self.state.params)
-
     def save(self, file: str | Path) -> Path:
-        """Save optimizer and variational-state numerical state."""
-        state_data = {"params": self.state.params}
+        state = {"params": self.state.params}
         if hasattr(self.state, "sampler_state"):
-            state_data["sampler_state"] = {
+            state["sampler_state"] = {
                 "key": self.state.sampler_state.key,
                 "x": self.state.sampler_state.x,
                 "logabs": self.state.sampler_state.logabs,
             }
         if hasattr(self.state, "chains"):
-            state_data["chains"] = self.state.chains
+            state["chains"] = self.state.chains
+        if hasattr(self.state, "basis"):
+            state["basis"] = self.state.basis
 
-        data = {
-            "step": self.step_count,
-            "state": state_data,
-            "opt_state": self.opt_state,
-        }
-        return checkpoint.save(file, data)
+        return checkpoint.save(
+            file,
+            {
+                "step": self.step_count,
+                "state": state,
+                "opt_state": self.opt_state,
+            },
+        )
 
     def load(self, file: str | Path) -> Self:
-        """Restore numerical driver state into an explicitly rebuilt object."""
         data = checkpoint.load(file)
-        state_data = data["state"]
-        updates = {"params": state_data["params"]}
-        if "sampler_state" in state_data and hasattr(self.state, "sampler_state"):
-            saved = state_data["sampler_state"]
+        saved = data["state"]
+        updates = {"params": saved["params"]}
+
+        if "sampler_state" in saved and hasattr(self.state, "sampler_state"):
+            old = saved["sampler_state"]
             updates["sampler_state"] = type(self.state.sampler_state)(
-                key=jax.device_put(saved["key"]),
-                x=saved["x"],
-                logabs=saved["logabs"],
+                key=jax.device_put(old["key"]),
+                x=old["x"],
+                logabs=old["logabs"],
             )
-        if "chains" in state_data and hasattr(self.state, "chains"):
-            updates["chains"] = state_data["chains"]
+        if "chains" in saved and hasattr(self.state, "chains"):
+            updates["chains"] = saved["chains"]
+        if "basis" in saved and hasattr(self.state, "basis"):
+            basis = saved["basis"]
+            updates["basis"] = basis
+            if hasattr(self.state, "hmat"):
+                updates["hmat"] = self.state.H.matrix(basis)
+
         self.state = self.state.replace(**updates)
         self.opt_state = data["opt_state"]
         self.step_count = int(data["step"])

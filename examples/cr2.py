@@ -21,7 +21,7 @@ from pyscf.gto.basis import bse
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
-from detnqs.model import Backflow
+from detnqs.model import GBackflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
@@ -30,21 +30,20 @@ from helper import chain_init, ref_init
 
 
 def main() -> None:
-    space = "24e30o"
-    steps = 1000
+    case = "24e30o"  # "24e30o" or "48e42o"
 
-    # Configure runtime.
+    # Runtime.
     utils.batch.configure(
-        forward_chunk=32768,
-        backward_chunk=32768,
+        forward_chunk=131072,
+        backward_chunk=8192,
         param_chunk=None,
-        bucket_min=1024,
+        bucket_min=8192,
     )
     utils.precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
-    # Build molecule.
+    # Molecule.
     mol = gto.Mole()
     mol.unit = "Angstrom"
     mol.atom = [
@@ -59,11 +58,11 @@ def main() -> None:
     mol.build()
 
     mf = scf.RHF(mol)
-    mf.conv_tol = 1e-10
+    mf.conv_tol = 1.0e-10
     mf.max_cycle = 200
     mf.kernel()
 
-    # Build CASSCF orbitals.
+    # CASSCF orbitals.
     cas_irrep = {
         "Ag": 3,
         "B1u": 3,
@@ -76,7 +75,7 @@ def main() -> None:
     }
 
     mc = mcscf.CASSCF(mf, ncas=12, nelecas=(6, 6))
-    mc.conv_tol = 1e-8
+    mc.conv_tol = 1.0e-8
     mc.fcisolver = fci.direct_spin0_symm.FCI(mol)
     mc.fcisolver.wfnsym = symm.irrep_name2id(mol.groupname, "Ag")
     mc.natorb = False
@@ -106,20 +105,11 @@ def main() -> None:
         cas_natorb=True,
     )
 
-    n_core = int(mc.ncore)
-    n_cas = int(mc.ncas)
-    assert mo_cas.shape[1] == 42
-    assert n_core == 18
-    assert n_cas == 12
+    if case == "24e30o":
+        # Freeze the lowest twelve core orbitals.
+        n_core = int(mc.ncore)
+        n_cas = int(mc.ncas)
 
-    # Select active space.
-    if space == "48e42o":
-        mo = mo_cas
-        ncore = 0
-        norb = 42
-        n_alpha = n_beta = 24
-
-    elif space == "24e30o":
         core = np.arange(n_core)
         order = np.argsort(np.asarray(eps)[core], kind="stable")
 
@@ -129,14 +119,23 @@ def main() -> None:
         virtual = np.arange(n_core + n_cas, mo_cas.shape[1])
 
         mo = mo_cas[:, np.concatenate([frozen, kept_core, active, virtual])]
+
         ncore = 12
         norb = 30
         n_alpha = n_beta = 12
 
-    else:
-        raise ValueError("space must be '48e42o' or '24e30o'")
+    elif case == "48e42o":
+        # All-electron active Hamiltonian.
+        mo = mo_cas
 
-    # Build Hamiltonian.
+        ncore = 0
+        norb = 42
+        n_alpha = n_beta = 24
+
+    else:
+        raise ValueError(f"Unknown case: {case!r}")
+
+    # Hamiltonian.
     mc_eff = mcscf.CASCI(mf, ncas=norb, nelecas=(n_alpha, n_beta))
     mc_eff.ncore = ncore
     mc_eff.mo_coeff = mo
@@ -146,43 +145,45 @@ def main() -> None:
 
     h1e = np.asarray(h1e, dtype=np.float64)
     eri = np.asarray(eri, dtype=np.float64)
-    h1e[np.abs(h1e) < 1e-10] = 0.0
-    eri[np.abs(eri) < 1e-10] = 0.0
+    h1e[np.abs(h1e) < 1.0e-12] = 0.0
+    eri[np.abs(eri) < 1.0e-12] = 0.0
 
     sector = hilbert.DetSector(norb, n_alpha, n_beta)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=float(ecore))
+    H.save(f"cr2_{case}_ham.npz")
 
-    print(f"space        : {space}")
-    print(f"RHF energy   : {mf.e_tot:.12f}")
-    print(f"CASSCF energy: {mc.e_tot:.12f}")
-    print(f"active space : ({2 * n_alpha}e, {norb}o)")
-    print(f"frozen core  : {ncore}")
-    print(f"ecore        : {float(ecore):.12f}")
+    print(f"RHF energy    : {mf.e_tot:.12f}")
+    print(f"CASSCF energy : {mc.e_tot:.12f}")
+    print(f"active        : ({n_alpha + n_beta}e, {norb}o)")
+    print(f"frozen core   : {ncore}")
+    print(f"ecore         : {float(ecore):.12f}")
 
-    # Build reference.
+    # Reference.
     occ_mo = mf.mo_coeff[:, : mol.nelectron // 2]
     act_mo = mo[:, ncore:]
     proj = act_mo.T @ s @ occ_mo
     ref_coeff = np.linalg.svd(proj, full_matrices=False)[0][:, :n_alpha]
     ref_mat = ref_init(sector, ref_coeff)
 
-    model = Backflow(
+    # State.
+    model = GBackflow(
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
-        hidden=(64, 64),
+        hidden=(256, 256),
         ref_mat=jnp.asarray(ref_mat),
     )
 
     sampler = MCSampler(
-        n_samples=1024,
-        n_chains=1024,
+        n_samples=8192,
+        n_chains=8192,
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
+        alpha=1.0,
     )
 
-    chains = chain_init(H.sector, ref_coeff, n_chains=sampler.n_chains, seed=0)
+    chains = chain_init(sector, ref_coeff, n_chains=sampler.n_chains, seed=0)
 
     state = MCState.init(
         model=model,
@@ -190,35 +191,47 @@ def main() -> None:
         sampler=sampler,
         chains=chains,
         key=jax.random.key(0),
-        eps1=1e-3,
-        eps2=1e-6,
+        eps1=1.0e-3,
+        eps2=1.0e-6,
         eloc_sample=1024,
-        assemble_mode="unique",
+        assemble_mode="flat",
     )
 
-    optimizer = optax.chain(
-        psr(shift=1e-3, mu=0.95),
-        optax.scale(-5e-2),
+    # Optimizer.
+    steps = 5000
+    checkpoint_every = 500
+
+    lr = optax.linear_schedule(
+        init_value=0.0,
+        end_value=-5.0e-2,
+        transition_steps=1000,
     )
+
+    optimizer = psr(
+        shift=1.0e-3,
+        mu=0.95,
+        scale=lr,
+    )
+
     vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(
-        file=f"cr2_{space}.jsonl",
+        file=f"cr2_{case}.jsonl",
         every=10,
-        keys=(
-            "step",
-            "energy",
-            "eloc_var",
-            "ess_frac",
-            "accept",
-            "n_unique",
-            "n_forward",
-        ),
     )
 
-    # Run optimization.
-    for step in range(steps):
-        log.add(step, dict(vmc.step()))
+    obs = {
+        "s2": operator.S2(sector),
+    }
+
+    # Optimization.
+    for _ in range(steps):
+        rec = vmc.step(obs=obs, profile=True)
+        log.add(rec)
+
+        step = int(rec["step"])
+        if step % checkpoint_every == 0 or step == steps:
+            vmc.save(f"cr2_{case}_{step:05d}.npz")
 
 
 if __name__ == "__main__":

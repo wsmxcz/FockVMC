@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any, Self
+
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy.sparse import csr_matrix
@@ -22,31 +25,65 @@ class Hamiltonian:
         self.sector = sector
         self._ecore = float(ecore)
 
-        h1_arr = np.ascontiguousarray(h1, dtype=np.float64)
-        if h1_arr.shape != (sector.norb, sector.norb):
+        h1 = np.ascontiguousarray(h1, dtype=np.float64)
+        if h1.shape != (sector.norb, sector.norb):
             raise ValueError("h1 must have shape (sector.norb, sector.norb)")
 
-        eri_arr = np.ascontiguousarray(eri, dtype=np.float64).reshape(-1)
+        eri = np.ascontiguousarray(eri, dtype=np.float64).reshape(-1)
         npair = sector.norb * (sector.norb + 1) // 2
-        if eri_arr.shape != (npair * (npair + 1) // 2,):
+        if eri.shape != (npair * (npair + 1) // 2,):
             raise ValueError("eri must be a 1D PySCF chemist 8-fold array")
 
+        self._h1 = h1
+        self._eri = eri
+
         if isinstance(sector, DetSector):
-            self._raw = libdet.Hamiltonian.det(
-                h1_arr,
-                eri_arr,
-                self._ecore,
-            )
+            self._raw = libdet.Hamiltonian.det(h1, eri, self._ecore)
         elif isinstance(sector, SpinSector):
             self._raw = libdet.Hamiltonian.spin(
-                h1_arr,
-                eri_arr,
+                h1,
+                eri,
                 int(sector.n_alpha),
                 int(sector.n_beta),
                 self._ecore,
             )
         else:
             raise TypeError(f"unsupported sector: {type(sector).__name__}")
+
+    @classmethod
+    def load(cls, file: str | Path) -> Self:
+        """Load the saved integral representation."""
+        data = np.load(Path(file))
+
+        sector = DetSector(
+            int(data["norb"]),
+            int(data["n_alpha"]),
+            int(data["n_beta"]),
+        )
+
+        return cls(
+            sector,
+            data["h1e"],
+            data["eri"],
+            ecore=float(data["ecore"]),
+        )
+
+    def save(self, file: str | Path) -> Path:
+        """Save the integral representation."""
+        path = Path(file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        np.savez_compressed(
+            path,
+            h1e=self._h1,
+            eri=self._eri,
+            ecore=np.asarray(self.ecore, dtype=np.float64),
+            norb=np.asarray(self.sector.norb, dtype=np.int64),
+            n_alpha=np.asarray(self.sector.n_alpha, dtype=np.int64),
+            n_beta=np.asarray(self.sector.n_beta, dtype=np.int64),
+        )
+
+        return path
 
     @property
     def norb(self) -> int:

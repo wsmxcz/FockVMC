@@ -138,7 +138,6 @@ class MCState(VState):
                 "x": self.sampler_state.x,
                 "logabs": self.sampler_state.logabs,
                 "alpha": np.asarray(self.sampler_state.alpha),
-                "alpha_step": np.asarray(self.sampler_state.alpha_step),
             },
             "chains": self.chains,
         }
@@ -152,7 +151,6 @@ class MCState(VState):
             x=np.ascontiguousarray(saved["x"], dtype=np.uint64),
             logabs=precision.cast(saved["logabs"], "calc", "real", host=True),
             alpha=float(np.asarray(saved["alpha"])),
-            alpha_step=int(np.asarray(saved["alpha_step"])),
         )
         return replace(
             self,
@@ -170,42 +168,31 @@ class MCState(VState):
         residual: np.ndarray,
         w: np.ndarray,
     ) -> Chains:
-        """Update alpha by KL moment projection."""
+        """Update alpha by local KL moment projection."""
         if self.sampler.alpha is not None:
             return sampler_state
 
         rdtype = precision.real("calc", host=True)
         tiny = rdtype(precision.tiny("calc"))
-
         alpha = float(sampler_state.alpha)
-        step = int(sampler_state.alpha_step) + 1
 
         target = w * np.abs(residual)
         norm_t = float(np.sum(target))
         norm_m = float(np.sum(mass))
-
-        if (
-            not np.isfinite(norm_t)
-            or not np.isfinite(norm_m)
-            or norm_t <= float(tiny)
-            or norm_m <= float(tiny)
-        ):
-            return replace(sampler_state, alpha=alpha, alpha_step=step)
+        if norm_t <= float(tiny) or norm_m <= float(tiny):
+            return sampler_state
 
         mu_s = float(np.dot(target, score) / norm_t)
         nu_s = float(np.dot(mass, score) / norm_m)
         nu_q = float(np.dot(mass, score2) / norm_m)
         info = nu_q - nu_s * nu_s
-
         if not np.isfinite(info) or info <= float(tiny):
-            return replace(sampler_state, alpha=alpha, alpha_step=step)
+            return sampler_state
 
-        # Fisher step for KL projection onto r_alpha, then RM averaging.
+        # KL projection followed by a small symmetric step cap.
         ahat = float(np.clip(alpha + (mu_s - nu_s) / info, 0.0, 2.0))
-        rate = 1.0 / float(step + 1)
-        alpha = float(np.clip((1.0 - rate) * alpha + rate * ahat, 0.0, 2.0))
-
-        return replace(sampler_state, alpha=alpha, alpha_step=step)
+        delta = float(np.clip(ahat - alpha, -0.001, 0.001))
+        return replace(sampler_state, alpha=float(np.clip(alpha + delta, 0.0, 2.0)))
 
     def _run(
         self,
@@ -230,7 +217,6 @@ class MCState(VState):
                     eps1=self.eps1,
                     chains=self.chains,
                     alpha=sampler_state.alpha,
-                    alpha_step=sampler_state.alpha_step,
                 )
         else:
             with timer("forward"):

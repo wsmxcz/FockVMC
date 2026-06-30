@@ -70,7 +70,6 @@ def main() -> None:
                 host=True,
             ),
             alpha=float(np.asarray(sampler_state["alpha"])),
-            alpha_step=int(np.asarray(sampler_state["alpha_step"])),
         ),
         chains=np.ascontiguousarray(saved["chains"], dtype=np.uint64),
     )

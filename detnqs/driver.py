@@ -110,7 +110,6 @@ class VMC:
                 "x": self.state.sampler_state.x,
                 "logabs": self.state.sampler_state.logabs,
                 "alpha": np.asarray(self.state.sampler_state.alpha),
-                "alpha_step": np.asarray(self.state.sampler_state.alpha_step),
             }
         if hasattr(self.state, "chains"):
             state["chains"] = self.state.chains
@@ -138,7 +137,6 @@ class VMC:
                 x=np.ascontiguousarray(old["x"], dtype=np.uint64),
                 logabs=precision.cast(old["logabs"], "calc", "real", host=True),
                 alpha=float(np.asarray(old["alpha"])),
-                alpha_step=int(np.asarray(old["alpha_step"])),
             )
         if "chains" in saved and hasattr(self.state, "chains"):
             updates["chains"] = np.ascontiguousarray(saved["chains"], dtype=np.uint64)

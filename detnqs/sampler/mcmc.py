@@ -19,7 +19,6 @@ class Chains:
     x: np.ndarray
     logabs: np.ndarray
     alpha: float = 1.0
-    alpha_step: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +91,6 @@ class MCSampler:
         eps1: float,
         chains: Any,
         alpha: float | None = None,
-        alpha_step: int = 0,
     ) -> Chains:
         """Initialize chains and run burn-in."""
         n_chains = self.n_chains
@@ -120,7 +118,6 @@ class MCSampler:
             x=x,
             logabs=logabs,
             alpha=float(np.clip(alpha0, 0.0, 2.0)),
-            alpha_step=int(alpha_step),
         )
 
         for _ in range(self.thermal_steps):

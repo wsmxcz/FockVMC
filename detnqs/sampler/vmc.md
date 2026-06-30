@@ -1,38 +1,49 @@
 # Fock-Space Variational Monte Carlo
 
-This note summarizes the probability structure behind Fock-space variational
-Monte Carlo (VMC). The main point is to separate the physical Born measure from
-the auxiliary laws used for numerical sampling. Markov chains, broadened
-reference laws, observation kernels, importance weights, and stochastic
-local-energy estimators change how an expectation is estimated; they do not
-change the variational objective.
+This note summarizes the probability structure of Fock-space variational Monte
+Carlo (VMC). The main distinction is between the physical Born measure, which
+is determined by the wave function, and auxiliary probability laws, which are
+introduced to estimate Born-measure averages efficiently.
 
-The setting is a discrete Fock-space sector $\mathcal X$, such as a
-fixed-particle-number or fixed-spin sector.
-
-## 1. Born Measure and Observables
-
-Let $\psi_\theta(x)$ be a variational amplitude. The energy is
+The setting is a finite Fock-space sector $\mathcal X$. It may be specified by
+particle number, spin projection, spatial symmetry, spin adaptation, or any
+other constraints used to define the variational problem. A variational state
+assigns amplitudes $\psi_\theta(x)$ to configurations $x\in\mathcal X$. We use
 
 $$
-E(\theta)=
-\frac{\langle\psi_\theta|H|\psi_\theta\rangle}
-{\langle\psi_\theta|\psi_\theta\rangle}.
+\ell_\theta(x)=\log |\psi_\theta(x)|
 $$
 
-The physical probability law is the Born measure
+for the log-amplitude. Markov chains, Hamiltonian-informed proposals, degree
+tilting, blurred observations, importance weights, and stochastic local-energy
+estimators all belong to the estimation procedure. They do not change the
+Rayleigh quotient being minimized.
+
+## 1. Born Measure and VMC Objective
+
+The variational energy is the Rayleigh quotient
 
 $$
-\pi_\theta(x)=
+E(\theta)
+=
+\frac{\langle \psi_\theta|H|\psi_\theta\rangle}
+{\langle \psi_\theta|\psi_\theta\rangle}.
+$$
+
+Define the Born measure
+
+$$
+\pi_\theta(x)
+=
 \frac{|\psi_\theta(x)|^2}{Z_2},
 \qquad
-Z_2=\sum_{z\in\mathcal X}|\psi_\theta(z)|^2.
+Z_2=\sum_{z\in\mathcal X}|\psi_\theta(z)|^2 .
 $$
 
-For an observable $f_\theta(x)$,
+For any local quantity $f_\theta(x)$, the corresponding expectation is
 
 $$
-\langle f\rangle_\pi
+\langle f\rangle_{\pi_\theta}
 =
 \sum_{x\in\mathcal X}\pi_\theta(x)f_\theta(x).
 $$
@@ -40,254 +51,396 @@ $$
 The local energy is
 
 $$
-E_{\mathrm{loc}}(x)
+E_{\mathrm{loc},\theta}(x)
 =
 \frac{(H\psi_\theta)(x)}{\psi_\theta(x)}
 =
-\sum_{y:H_{xy}\ne 0}
-H_{xy}\frac{\psi_\theta(y)}{\psi_\theta(x)},
+\sum_{y:H_{xy}\ne0}
+H_{xy}\frac{\psi_\theta(y)}{\psi_\theta(x)}.
 $$
 
-and therefore
+Thus
 
 $$
-E(\theta)=\langle E_{\mathrm{loc}}\rangle_\pi.
+E(\theta)
+=
+\mathbb E_{\pi_\theta}
+\left[E_{\mathrm{loc},\theta}\right].
 $$
 
-Gradient and geometry estimators have the same basic form: they are
-Born-measure averages of local quantities involving the local energy residual
-and logarithmic derivatives.
+The same probability measure appears in gradients and stochastic
+reconfiguration. If
 
-## 2. Reference Laws and Markov Chains
+$$
+O_\theta(x)=\nabla_\theta\log\psi_\theta(x),
+$$
 
-A simulation may sample from a reference law broader than the Born measure,
+then the standard VMC gradient may be written as
+
+$$
+\nabla_\theta E
+=
+2\,\mathrm{Re}\,
+\mathbb E_{\pi_\theta}
+\left[
+\left(E_{\mathrm{loc},\theta}-E\right)O_\theta^*
+\right].
+$$
+
+The central object is therefore the Born measure $\pi_\theta$. Auxiliary laws
+are introduced only to estimate its expectations.
+
+## 2. Auxiliary Source Laws and Markov Chains
+
+Direct sampling from $\pi_\theta$ is not required. One may instead sample from
+an auxiliary source law
 
 $$
 \eta_{\theta,\alpha}(x)
 =
-\frac{|\psi_\theta(x)|^\alpha}{Z_\alpha},
+\frac{a(x)e^{\alpha\ell_\theta(x)}}{Z_\eta},
 \qquad
-Z_\alpha=\sum_{z\in\mathcal X}|\psi_\theta(z)|^\alpha.
+Z_\eta=
+\sum_{z\in\mathcal X}a(z)e^{\alpha\ell_\theta(z)}.
 $$
 
-Here $\alpha=2$ gives direct Born sampling, while $0\le\alpha<2$ gives a
-broader law. The numerical chain may target $\eta_{\theta,\alpha}$, but the
-reported quantity remains a Born-measure expectation.
+Here $a(x)\ge0$ is a base measure and $\alpha\in[0,2]$ controls the
+concentration of the auxiliary distribution. When $a(x)=1$, the endpoint
+$\alpha=2$ is Born-like, while smaller values of $\alpha$ give broader sampling
+laws.
 
-Let $q_A(y|x)$ be a proposal kernel. A Metropolis-Hastings transition targeting
-$\eta_{\theta,\alpha}$ accepts
+A Markov chain with proposal $q(y|x)$ may be constructed to leave
+$\eta_{\theta,\alpha}$ invariant. The Metropolis-Hastings acceptance probability
+is
 
 $$
 A(x\to y)
 =
 \min\left\{
 1,
-\frac{|\psi_\theta(y)|^\alpha q_A(x|y)}
-{|\psi_\theta(x)|^\alpha q_A(y|x)}
+\frac{a(y)e^{\alpha\ell_\theta(y)}q(x|y)}
+{a(x)e^{\alpha\ell_\theta(x)}q(y|x)}
 \right\}.
 $$
 
-The proposal geometry controls exploration and autocorrelation. It may encode
-local particle moves or Hamiltonian-informed screened connections, but it does
-not define the physical measure.
+The proposal $q$ controls the movement of the chain, the autocorrelation time,
+and the cost of one transition. The invariant law is an auxiliary law used for
+estimation; it is not the physical Born measure unless that choice is made
+explicitly.
 
-## 3. Observation Kernels
-
-The configuration entering the estimator may be drawn from an observation
-kernel $B(y|x)$ after the Markov state $x$ is generated:
-
-$$
-\sum_{y\in\mathcal X}B(y|x)=1.
-$$
-
-If $x\sim\eta_{\theta,\alpha}$ and $y\sim B(\cdot|x)$, the observed law is
+Hamiltonian-informed moves use the sparse connectivity induced by matrix
+elements. Let
 
 $$
-\nu(y)=
-\sum_{x\in\mathcal X}\eta_{\theta,\alpha}(x)B(y|x).
-$$
-
-Equivalently, using an unnormalized density,
-
-$$
-r_\nu(y)=
-\sum_{x\in\mathcal X}|\psi_\theta(x)|^\alpha B(y|x),
+b(x,y)\ge0,
 \qquad
-\nu(y)=\frac{r_\nu(y)}{Z_\alpha}.
+b(x,x)=0,
+\qquad
+d(x)=\sum_y b(x,y).
 $$
 
-The identity observation kernel gives $\nu=\eta_{\theta,\alpha}$. A blurred
-observation kernel may mix the current ket with Hamiltonian-connected bras.
-This can improve support for local-energy and gradient estimators,
-while leaving the Born objective unchanged.
-
-## 4. Degree-Tilted Hamiltonian Sampling
-
-For Hamiltonian-informed moves let
+The corresponding degree factor is
 
 $$
-b_{xy}=|H_{xy}|,\qquad
-d(x)=\sum_{z\ne x} b_{xz},\qquad
 s(x)=
 \begin{cases}
-d(x),&d(x)>0,\\
-1,&d(x)=0.
+d(x),& d(x)>0,\\
+1,& d(x)=0.
 \end{cases}
 $$
 
-The heat-bath kernel is $q(y|x)=b_{xy}/d(x)$ when $d(x)>0$. Used directly,
-reverse proposal probabilities or observed blur densities require degrees of
-sampled bras, which creates a second Hamiltonian traversal.
-
-Degree tilting absorbs the ket degree into the working law. For blur, use
-the unnormalized observed density
+For $d(x)>0$, a heat-bath proposal along Hamiltonian connections is
 
 $$
-\widetilde r(y)
+q_H(y|x)=\frac{b(x,y)}{d(x)}.
+$$
+
+If $b(x,y)$ is symmetric and the source law uses $a(x)=s(x)$, the degree factors
+in the proposal and in the auxiliary source law cancel in the acceptance ratio.
+For connected non-isolated configurations,
+
+$$
+\frac{s(y)e^{\alpha\ell_\theta(y)}q_H(x|y)}
+{s(x)e^{\alpha\ell_\theta(x)}q_H(y|x)}
 =
-c_\beta(y)|\psi_\theta(y)|^\alpha
-+
-\beta\sum_{x\ne y}b_{xy}|\psi_\theta(x)|^\alpha,
+e^{\alpha(\ell_\theta(y)-\ell_\theta(x))}.
+$$
+
+This is the role of degree tilting. It is a choice of auxiliary source measure
+that makes Hamiltonian-informed transitions depend locally on amplitude ratios
+rather than explicit degree corrections. The Born objective is unchanged.
+
+## 3. Observation Laws and Born Reweighting
+
+The configuration used in an estimator need not be the same as the source state
+of the chain. Given a source configuration $x$, introduce an observation kernel
+
+$$
+B_\beta(y|x)\ge0,
 \qquad
-c_\beta(y)=
-\begin{cases}
-(1-\beta)d(y),&d(y)>0,\\
-1,&d(y)=0.
-\end{cases}
+\sum_y B_\beta(y|x)=1.
 $$
 
-This expression is local to bra $y$. For Hamiltonian proposals, target the
-working chain law $|\psi_\theta(x)|^\alpha s(x)$; the heat-bath degree factors
-then cancel in the Metropolis ratio, leaving only
+The unnormalized observed auxiliary density is
 
 $$
-A(x\to y)=
-\min\left\{1,
-\frac{|\psi_\theta(y)|^\alpha}{|\psi_\theta(x)|^\alpha}
-\right\}.
-$$
-
-The physical Born target is unchanged. Estimates are still reweighted by
-$|\psi_\theta(y)|^2/\widetilde r(y)$ or by the corresponding identity-law
-density when no tilt is used.
-
-## 5. Reweighting
-
-When samples are distributed according to $\nu$ but the target is $\pi_\theta$,
-use the unnormalized importance weight
-
-$$
-\omega(y)=
-\frac{|\psi_\theta(y)|^2}{r_\nu(y)}.
-$$
-
-The self-normalized estimator is
-
-$$
-\widehat{\langle f\rangle}_\pi
+r_{\theta,\alpha,\beta}(y)
 =
-\frac{\sum_{k=1}^N\omega(y_k)f_\theta(y_k)}
-{\sum_{k=1}^N\omega(y_k)}.
+\sum_{x\in\mathcal X}
+a(x)e^{\alpha\ell_\theta(x)}B_\beta(y|x).
 $$
 
-For identity observation, $r_\nu(y)=|\psi_\theta(y)|^\alpha$, so
+The normalized observed law is
 
 $$
-\omega(y)=|\psi_\theta(y)|^{2-\alpha}.
-$$
-
-For a nontrivial observation kernel, $r_\nu$ includes the probability mass
-transported to $y$ by that kernel.
-
-## 6. Support, Tails, and ESS
-
-Reweighting requires the observed law to cover the relevant target
-contributions. For an observable $f_\theta$,
-
-$$
-\pi_\theta(y)|f_\theta(y)|>0
-\quad\Rightarrow\quad
-\nu(y)>0.
-$$
-
-This condition is observable-dependent. Energy, gradient, and geometry
-estimators involve different local factors and may have different stability
-requirements.
-
-Even when support is adequate, weighted observables can have heavy tails,
-especially near zeros of $\psi_\theta$. A useful diagnostic is the effective
-sample size
-
-$$
-\mathrm{ESS}
+\nu_{\theta,\alpha,\beta}(y)
 =
-\frac{\left(\sum_{k=1}^N\omega_k\right)^2}
-{\sum_{k=1}^N\omega_k^2}.
+\frac{r_{\theta,\alpha,\beta}(y)}{Z_\eta}.
 $$
 
-ESS diagnoses weight concentration, not Markov-chain mixing. A chain may mix
-well while producing poor weights, or mix slowly while weights are benign.
+Identity observation corresponds to $B_0(y|x)=\delta_{xy}$. Blurred observation
+moves part of the source mass to nearby configurations, often using the same
+Hamiltonian connectivity as the proposal. This changes the law seen by the
+estimator, not the Born measure.
 
-## 7. Local-Energy Estimation
-
-Local energy evaluation can itself be expensive. If the Hamiltonian action on a
-ket is not summed exactly, write a stochastic estimator as
-
-$$
-\widehat E_{\mathrm{loc}}(y,\xi),
-$$
-
-where $\xi$ denotes auxiliary sampling. A natural correctness condition is
-conditional unbiasedness:
+Born expectations are recovered by importance reweighting. The unnormalized
+weight is
 
 $$
-\mathbb E_{\xi|y}
-\left[
-\widehat E_{\mathrm{loc}}(y,\xi)
-\right]
+\omega_{\theta,\alpha,\beta}(y)
 =
-E_{\mathrm{loc}}(y).
+\frac{|\psi_\theta(y)|^2}{r_{\theta,\alpha,\beta}(y)}
+=
+\frac{e^{2\ell_\theta(y)}}{r_{\theta,\alpha,\beta}(y)}.
 $$
 
-The corresponding reweighted energy estimator is
+For observed configurations with empirical mass $M_y$, the self-normalized
+estimator is
+
+$$
+\widehat{\mathbb E}_{\pi_\theta}[f]
+=
+\frac{\sum_y M_y\omega_y f_\theta(y)}
+{\sum_y M_y\omega_y}.
+$$
+
+The energy estimator is the special case
 
 $$
 \widehat E
 =
-\frac{\sum_{k=1}^N
-\omega(y_k)\widehat E_{\mathrm{loc}}(y_k,\xi_k)}
-{\sum_{k=1}^N\omega(y_k)}.
+\frac{\sum_y M_y\omega_yE_{\mathrm{loc},\theta}(y)}
+{\sum_y M_y\omega_y}.
 $$
 
-This separates configuration-sampling error from Hamiltonian-connection
-estimation error. In screened Hamiltonian workflows, deterministic strong
-connections use `eps1`, while sampled weak connections use the window
-`eps2 <= |H| < eps1`. They are two parts of the same ket sum estimator.
-
-## 8. Validation
-
-A VMC sampling specification is described by
+With normalized weights
 
 $$
-\pi_\theta,\qquad
-\eta_{\theta,\alpha},\qquad
-q_A\text{ or }T,\qquad
-B,\qquad
-\omega=\frac{|\psi_\theta|^2}{r_\nu}.
+w_y
+=
+\frac{M_y\omega_y}{\sum_zM_z\omega_z},
 $$
 
-Useful diagnostics include:
+this becomes
 
-- effective sample size and weight concentration;
-- acceptance rate and autocorrelation;
-- number of unique observed configurations;
-- stability of energy, gradient, and geometry estimates;
-- number of wave-function evaluations;
-- cost of Hamiltonian connections or local-energy sampling.
+$$
+\widehat E
+=
+\sum_y w_yE_{\mathrm{loc},\theta}(y).
+$$
 
-These diagnostics distinguish support mismatch, heavy-tailed weights, slow
-mixing, and expensive Hamiltonian action. They interact in practice,
-but they are conceptually different and should be examined separately.
+The gradient estimator has the analogous form
+
+$$
+\widehat{\nabla_\theta E}
+=
+2\,\mathrm{Re}\,
+\sum_yw_y
+\left(E_{\mathrm{loc},\theta}(y)-\widehat E\right)O_\theta(y)^*.
+$$
+
+All auxiliary choices enter the estimator through
+$r_{\theta,\alpha,\beta}$. Once this density is known, the calculation is an
+ordinary self-normalized importance-sampling estimate of a Born-measure
+expectation.
+
+## 4. Hamiltonian Blur and Local-Energy Estimation
+
+Hamiltonian blur is most naturally described as part of the observation law.
+For the connection weights $b(x,y)$, a typical blurred kernel is
+
+$$
+B_\beta(y|x)
+=
+(1-\beta)\delta_{xy}
++
+\beta\frac{b(x,y)}{d(x)},
+\qquad d(x)>0,
+$$
+
+with identity observation for isolated configurations.
+
+Combining this kernel with the degree-tilted source law $a(x)=s(x)$ gives
+
+$$
+r_{\theta,\alpha,\beta}(y)
+=
+c_\beta(y)e^{\alpha\ell_\theta(y)}
++
+\beta\sum_{x\ne y}b(x,y)e^{\alpha\ell_\theta(x)},
+$$
+
+where
+
+$$
+c_\beta(y)=
+\begin{cases}
+(1-\beta)d(y),& d(y)>0,\\
+1,& d(y)=0.
+\end{cases}
+$$
+
+This expression is the observed auxiliary density associated with
+Hamiltonian-informed proposal structure, degree tilting, and blurred
+observation. It is the quantity required for Born reweighting.
+
+The same Hamiltonian connectivity may also be used to estimate local energies.
+If part of the Hamiltonian action is sampled using an auxiliary random variable
+$\xi$, the natural condition is
+
+$$
+\mathbb E_{\xi|y}
+\left[
+\widehat E_{\mathrm{loc},\theta}(y,\xi)
+\right]
+=
+E_{\mathrm{loc},\theta}(y).
+$$
+
+The corresponding estimator is
+
+$$
+\widehat E
+=
+\frac{\sum_yM_y\omega_y\widehat E_{\mathrm{loc},\theta}(y,\xi_y)}
+{\sum_yM_y\omega_y}.
+$$
+
+This separates two sources of stochastic error. The empirical distribution of
+observed configurations controls sampling error, while the conditional
+estimator of the Hamiltonian action controls local-energy noise. Both affect
+finite-sample behavior, but they are distinct components of the VMC estimator.
+
+## 5. Adaptive Auxiliary Exponent
+
+The exponent $\alpha$ is not a variational parameter. It selects a member of the
+observed auxiliary family
+
+$$
+\nu_{\theta,\alpha,\beta},
+\qquad 0\le\alpha\le2.
+$$
+
+Large values of $\alpha$ produce sharper, Born-like auxiliary laws. Smaller
+values produce broader laws, which may improve exploration but increase the
+importance-reweighting burden. The useful value of $\alpha$ depends on the
+current wave function, the observation law, and the local-energy fluctuations.
+
+For estimating the energy, the variance-relevant importance law is
+
+$$
+\nu_\star(y)
+\propto
+\pi_\theta(y)
+\left|E_{\mathrm{loc},\theta}(y)-E(\theta)\right|.
+$$
+
+It gives more probability to configurations that contribute strongly to the
+fluctuation of the energy estimator. A one-dimensional adaptive choice of
+$\alpha$ can be defined by the projection
+
+$$
+\alpha^\star
+=
+\arg\min_{\alpha\in[0,2]}
+D_{\mathrm{KL}}
+\left(
+\nu_\star
+\Vert
+\nu_{\theta,\alpha,\beta}
+\right).
+$$
+
+Let
+
+$$
+S_\alpha(y)
+=
+\partial_\alpha\log r_{\theta,\alpha,\beta}(y).
+$$
+
+Writing
+
+$$
+r_{\theta,\alpha,\beta}(y)
+=
+\sum_x A_\beta(y,x)e^{\alpha\ell_\theta(x)},
+\qquad
+A_\beta(y,x)=a(x)B_\beta(y|x),
+$$
+
+gives
+
+$$
+S_\alpha(y)
+=
+\frac{\sum_xA_\beta(y,x)e^{\alpha\ell_\theta(x)}\ell_\theta(x)}
+{\sum_xA_\beta(y,x)e^{\alpha\ell_\theta(x)}}.
+$$
+
+Equivalently, $S_\alpha(y)$ is the conditional mean of the source
+log-amplitude given the observed configuration $y$ under the auxiliary joint
+law. The first-order condition for the KL projection is
+
+$$
+\mathbb E_{\nu_\star}[S_\alpha]
+=
+\mathbb E_{\nu_{\theta,\alpha,\beta}}[S_\alpha].
+$$
+
+For identity observation, $S_\alpha(y)=\ell_\theta(y)$, and the projection
+matches the mean log-amplitude of the residual-weighted Born law to that of the
+auxiliary observed law.
+
+The projection should be applied on the outer VMC timescale. During a sampling
+phase, $\theta$, $\alpha$, and $\beta$ define a fixed observed law. After the
+corresponding estimates have been formed, the exponent may be updated for the
+next phase.
+
+Since $\theta$ changes during optimization, the projected exponent is itself a
+moving quantity. A simple stable update is local tracking with a bounded step:
+
+$$
+\alpha_{t+1}
+=
+\Pi_{[0,2]}
+\left[
+\alpha_t+
+\operatorname{clip}(\widehat\alpha_t-\alpha_t,-\delta_\alpha,\delta_\alpha)
+\right].
+$$
+
+Here $\widehat\alpha_t$ is the current moment projection and $\delta_\alpha$ is
+a small step bound. The purpose of the bound is to keep the auxiliary observed
+measure from moving abruptly between successive sampling phases. Because the
+step is symmetric, the exponent can move back when the projected direction
+changes.
+
+Effective sample size and acceptance rate are diagnostics of different parts
+of the estimator. The effective sample size reflects the concentration of Born
+weights. The acceptance rate reflects movement of the Markov chain. They are
+useful for interpreting finite-sample behavior, but they do not define the
+adaptive objective.
 
 ## References
 

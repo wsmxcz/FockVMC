@@ -21,15 +21,18 @@ def estimate(
     obs: Mapping[str, Any] | None = None,
     profile: bool = False,
 ) -> dict[str, float]:
-    """Return posterior scalar estimates.
+    """Return scalar estimates at fixed wavefunction and sampling law.
 
     If `n_blocks > 1`, the current sample count is split into block estimates
     and `energy_se` is estimated from block energies.
     """
-    if n_samples is not None and hasattr(state, "sampler"):
-        state = state.replace(
-            sampler=replace(state.sampler, n_samples=int(n_samples)),
-        )
+    if hasattr(state, "sampler"):
+        sampler = state.sampler
+        if getattr(sampler, "alpha", 1.0) is None and hasattr(state, "sampler_state"):
+            sampler = replace(sampler, alpha=float(state.sampler_state.alpha))
+        if n_samples is not None:
+            sampler = replace(sampler, n_samples=int(n_samples))
+        state = state.replace(sampler=sampler)
 
     n_blocks = int(n_blocks)
     if n_blocks <= 1:
@@ -73,7 +76,11 @@ def estimate(
         if not values:
             continue
 
-        out[key] = float(np.sum(values) if key == "n_forward" or key.startswith("time_") else np.mean(values))
+        out[key] = float(
+            np.sum(values)
+            if key == "n_forward" or key.startswith("time_")
+            else np.mean(values)
+        )
 
     energy = np.asarray([block["energy"] for block in blocks], dtype=np.float64)
     out["energy"] = float(np.mean(energy))

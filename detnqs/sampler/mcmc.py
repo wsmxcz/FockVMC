@@ -18,6 +18,8 @@ class Chains:
     key: jax.Array
     x: np.ndarray
     logabs: np.ndarray
+    alpha: float = 1.0
+    alpha_step: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,26 +38,49 @@ class MCSampler:
     sweep_steps: int = 1
     reset_chains: bool = False
 
-    alpha: float = 1.0
+    alpha: float | None = 1.0
     proposal: str = "ham"
 
     blur: float = 0.5
 
     def __post_init__(self) -> None:
-        if int(self.n_samples) <= 0:
+        n_samples = int(self.n_samples)
+        n_chains = int(self.n_chains)
+        thermal_steps = int(self.thermal_steps)
+        discard_steps = int(self.discard_steps)
+        sweep_steps = int(self.sweep_steps)
+        proposal = str(self.proposal)
+        reset_chains = bool(self.reset_chains)
+        blur = float(self.blur)
+
+        if n_samples <= 0:
             raise ValueError("n_samples must be positive")
-        if int(self.n_chains) <= 0:
+        if n_chains <= 0:
             raise ValueError("n_chains must be positive")
-        if int(self.thermal_steps) < 0 or int(self.discard_steps) < 0:
+        if thermal_steps < 0 or discard_steps < 0:
             raise ValueError("thermal_steps and discard_steps must be nonnegative")
-        if int(self.sweep_steps) <= 0:
+        if sweep_steps <= 0:
             raise ValueError("sweep_steps must be positive")
-        if self.proposal not in {"ham", "single"}:
+        if proposal not in {"ham", "single"}:
             raise ValueError("proposal must be 'ham' or 'single'")
-        if not np.isfinite(float(self.alpha)) or float(self.alpha) < 0.0:
-            raise ValueError("alpha must be finite and nonnegative")
-        if not 0.0 <= float(self.blur) <= 1.0:
+        if not 0.0 <= blur <= 1.0:
             raise ValueError("blur must satisfy 0 <= blur <= 1")
+
+        alpha = None
+        if self.alpha is not None:
+            alpha = float(self.alpha)
+            if not np.isfinite(alpha) or not 0.0 <= alpha <= 2.0:
+                raise ValueError("alpha must be None or satisfy 0 <= alpha <= 2")
+
+        object.__setattr__(self, "n_samples", n_samples)
+        object.__setattr__(self, "n_chains", n_chains)
+        object.__setattr__(self, "thermal_steps", thermal_steps)
+        object.__setattr__(self, "discard_steps", discard_steps)
+        object.__setattr__(self, "sweep_steps", sweep_steps)
+        object.__setattr__(self, "reset_chains", reset_chains)
+        object.__setattr__(self, "proposal", proposal)
+        object.__setattr__(self, "blur", blur)
+        object.__setattr__(self, "alpha", alpha)
 
     def init(
         self,
@@ -66,11 +91,11 @@ class MCSampler:
         key: jax.Array,
         eps1: float,
         chains: Any,
+        alpha: float | None = None,
+        alpha_step: int = 0,
     ) -> Chains:
         """Initialize chains and run burn-in."""
-        n_chains = int(self.n_chains)
-        if n_chains <= 0:
-            raise ValueError("n_chains must be positive")
+        n_chains = self.n_chains
 
         key, _ = jax.random.split(key)
         x = H.sector.asarray(chains)
@@ -85,13 +110,20 @@ class MCSampler:
         unique_logabs = precision.host(value, "calc", "real").reshape(-1)
         logabs = precision.cast(unique_logabs[inv], "calc", "real", host=True)
 
+        if self.alpha is None:
+            alpha0 = 1.0 if alpha is None else float(alpha)
+        else:
+            alpha0 = self.alpha
+
         state = Chains(
             key=key,
             x=x,
             logabs=logabs,
+            alpha=float(np.clip(alpha0, 0.0, 2.0)),
+            alpha_step=int(alpha_step),
         )
 
-        for _ in range(max(0, int(self.thermal_steps))):
+        for _ in range(self.thermal_steps):
             state, _, _, _ = self._step(theta, H, model, state, eps1=eps1)
 
         return state
@@ -112,11 +144,9 @@ class MCSampler:
         chains and reports proposal health; estimator weights are built in
         vstate.
         """
-        n_samples = int(self.n_samples)
-        n_chains = int(self.n_chains)
+        n_samples = self.n_samples
+        n_chains = self.n_chains
 
-        if n_samples <= 0:
-            raise ValueError("n_samples must be positive")
         if state.x.shape[0] != n_chains:
             raise ValueError("chain state size must equal n_chains")
 
@@ -127,7 +157,7 @@ class MCSampler:
         proposed = 0
         n_conn = 0
 
-        for _ in range(max(0, int(self.discard_steps))):
+        for _ in range(self.discard_steps):
             state, _, _, info = self._step(
                 theta,
                 H,
@@ -143,7 +173,7 @@ class MCSampler:
         samples = np.empty((n_samples, *state.x.shape[1:]), dtype=np.uint64)
         mass = np.empty(n_samples, dtype=rdtype)
 
-        sweep_steps = max(1, int(self.sweep_steps))
+        sweep_steps = self.sweep_steps
         offset = 0
 
         while offset < n_samples:
@@ -202,7 +232,7 @@ class MCSampler:
         rdtype = precision.real("calc", host=True)
         n_chain = int(state.x.shape[0])
         n_observe = int(n_observe)
-        beta = float(self.blur)
+        beta = self.blur
 
         with timer("sample"):
             key, random_key = jax.random.split(state.key)
@@ -444,9 +474,9 @@ class MCSampler:
                 logabs_candidate[active] = unique_logabs[inverse]
 
             with timer("sample"):
-                log_accept = rdtype(float(self.alpha)) * (
-                    logabs_candidate - state.logabs
-                )
+                # Fixed alpha uses sampler.alpha; auto alpha uses chain state.
+                alpha = rdtype(state.alpha if self.alpha is None else self.alpha)
+                log_accept = alpha * (logabs_candidate - state.logabs)
                 accept = active & (
                     np.log(rng.random(n_chain)) < np.minimum(rdtype(0.0), log_accept)
                 )

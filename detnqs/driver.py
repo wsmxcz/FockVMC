@@ -7,9 +7,10 @@ from typing import Any, Self
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
-from .utils import Timer, checkpoint, stats as stats_util
+from .utils import Timer, checkpoint, precision, stats as stats_util
 from .utils.logger import Logger
 
 
@@ -108,6 +109,8 @@ class VMC:
                 "key": self.state.sampler_state.key,
                 "x": self.state.sampler_state.x,
                 "logabs": self.state.sampler_state.logabs,
+                "alpha": np.asarray(self.state.sampler_state.alpha),
+                "alpha_step": np.asarray(self.state.sampler_state.alpha_step),
             }
         if hasattr(self.state, "chains"):
             state["chains"] = self.state.chains
@@ -132,11 +135,13 @@ class VMC:
             old = saved["sampler_state"]
             updates["sampler_state"] = type(self.state.sampler_state)(
                 key=jax.device_put(old["key"]),
-                x=old["x"],
-                logabs=old["logabs"],
+                x=np.ascontiguousarray(old["x"], dtype=np.uint64),
+                logabs=precision.cast(old["logabs"], "calc", "real", host=True),
+                alpha=float(np.asarray(old["alpha"])),
+                alpha_step=int(np.asarray(old["alpha_step"])),
             )
         if "chains" in saved and hasattr(self.state, "chains"):
-            updates["chains"] = saved["chains"]
+            updates["chains"] = np.ascontiguousarray(saved["chains"], dtype=np.uint64)
         if "basis" in saved and hasattr(self.state, "basis"):
             basis = saved["basis"]
             updates["basis"] = basis

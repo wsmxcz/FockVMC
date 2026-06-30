@@ -93,7 +93,7 @@ class Logger:
         if self.verbose == 1:
             return tuple(
                 k
-                for k in ("step", "energy", "eloc_var", "ess_frac", "accept")
+                for k in ("step", "energy", "eloc_var", "ess_frac", "accept", "alpha")
                 if k in rec
             )
 

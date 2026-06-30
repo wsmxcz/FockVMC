@@ -67,7 +67,8 @@ class Backflow(Model):
         h = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
 
         for width in self.hidden:
-            h = nn.Dense(width, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
             h = nn.silu(h)
 
         out = nn.Dense(
@@ -179,7 +180,8 @@ class UBackflow(Model):
         h = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
 
         for width in self.hidden:
-            h = nn.Dense(width, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
             h = nn.silu(h)
 
         n_out = (d_alpha + d_beta) * norb
@@ -378,7 +380,8 @@ class GBackflow(Model):
         h = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
 
         for width in self.hidden:
-            h = nn.Dense(width, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
             h = nn.silu(h)
 
         out = nn.Dense(
@@ -511,7 +514,8 @@ class SBackflow(Model):
         h = (1 - spatial if use_hole else spatial - 1).astype(dtype)
 
         for width in self.hidden:
-            h = nn.Dense(width, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
+            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
             h = nn.silu(h)
 
         n_tri = norb * (norb + 1) // 2

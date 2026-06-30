@@ -82,7 +82,7 @@ def main() -> None:
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
-        alpha=1.0,
+        alpha=None,
     )
 
     chains = chain_init(sector, mo_oao, n_chains=sampler.n_chains, seed=0)

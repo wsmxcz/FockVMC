@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import jax
 import numpy as np
 import optax
@@ -61,7 +59,7 @@ def main() -> None:
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
-        alpha=1.0,
+        alpha=None,
     )
 
     state = MCState.init(
@@ -76,8 +74,8 @@ def main() -> None:
         assemble_mode="unique",
     )
 
-    steps = 100
-    checkpoint_every = 100
+    steps = 1000
+    checkpoint_every = 1000
     scale = optax.linear_schedule(0.0, -5.0e-2, transition_steps=100)
     optimizer = psr(shift=1.0e-3, mu=0.95, scale=scale)
     vmc = VMC.init(state, optimizer)

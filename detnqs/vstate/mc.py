@@ -48,16 +48,15 @@ class MCState(VState):
     ) -> MCState:
         eps1 = float(eps1)
         eps2 = float(eps2)
+        eloc_sample = int(eloc_sample)
         if eps1 < 0.0:
             raise ValueError("eps1 must be nonnegative")
         if eps2 < 0.0:
             raise ValueError("eps2 must be nonnegative")
         if eps2 > eps1:
             raise ValueError("eps2 must be <= eps1")
-        if int(eloc_sample) < 0:
+        if eloc_sample < 0:
             raise ValueError("eloc_sample must be nonnegative")
-        if not 0.0 <= float(sampler.blur) <= 1.0:
-            raise ValueError("sampler.blur must satisfy 0 <= blur <= 1")
 
         _, init_key, sample_key = jax.random.split(key, 3)
         params = model.init(init_key, H.sector.zeros(1))["params"]
@@ -67,7 +66,7 @@ class MCState(VState):
             if chains is None
             else H.sector.asarray(chains)
         )
-        if chains_arr.shape[0] != int(sampler.n_chains):
+        if chains_arr.shape[0] != sampler.n_chains:
             raise ValueError("chains size must equal sampler.n_chains")
         chains_arr = np.ascontiguousarray(chains_arr)
 
@@ -89,7 +88,7 @@ class MCState(VState):
             chains=chains_arr,
             eps1=eps1,
             eps2=eps2,
-            eloc_sample=int(eloc_sample),
+            eloc_sample=eloc_sample,
             assemble_mode=assemble_mode,
         )
 
@@ -138,6 +137,8 @@ class MCState(VState):
                 "key": self.sampler_state.key,
                 "x": self.sampler_state.x,
                 "logabs": self.sampler_state.logabs,
+                "alpha": np.asarray(self.sampler_state.alpha),
+                "alpha_step": np.asarray(self.sampler_state.alpha_step),
             },
             "chains": self.chains,
         }
@@ -150,6 +151,8 @@ class MCState(VState):
             key=jax.device_put(saved["key"]),
             x=np.ascontiguousarray(saved["x"], dtype=np.uint64),
             logabs=precision.cast(saved["logabs"], "calc", "real", host=True),
+            alpha=float(np.asarray(saved["alpha"])),
+            alpha_step=int(np.asarray(saved["alpha_step"])),
         )
         return replace(
             self,
@@ -157,6 +160,52 @@ class MCState(VState):
             sampler_state=sampler_state,
             chains=np.ascontiguousarray(data["chains"], dtype=np.uint64),
         )
+
+    def _auto_alpha(
+        self,
+        sampler_state: Chains,
+        mass: np.ndarray,
+        score: np.ndarray,
+        score2: np.ndarray,
+        residual: np.ndarray,
+        w: np.ndarray,
+    ) -> Chains:
+        """Update alpha by KL moment projection."""
+        if self.sampler.alpha is not None:
+            return sampler_state
+
+        rdtype = precision.real("calc", host=True)
+        tiny = rdtype(precision.tiny("calc"))
+
+        alpha = float(sampler_state.alpha)
+        step = int(sampler_state.alpha_step) + 1
+
+        target = w * np.abs(residual)
+        norm_t = float(np.sum(target))
+        norm_m = float(np.sum(mass))
+
+        if (
+            not np.isfinite(norm_t)
+            or not np.isfinite(norm_m)
+            or norm_t <= float(tiny)
+            or norm_m <= float(tiny)
+        ):
+            return replace(sampler_state, alpha=alpha, alpha_step=step)
+
+        mu_s = float(np.dot(target, score) / norm_t)
+        nu_s = float(np.dot(mass, score) / norm_m)
+        nu_q = float(np.dot(mass, score2) / norm_m)
+        info = nu_q - nu_s * nu_s
+
+        if not np.isfinite(info) or info <= float(tiny):
+            return replace(sampler_state, alpha=alpha, alpha_step=step)
+
+        # Fisher step for KL projection onto r_alpha, then RM averaging.
+        ahat = float(np.clip(alpha + (mu_s - nu_s) / info, 0.0, 2.0))
+        rate = 1.0 / float(step + 1)
+        alpha = float(np.clip((1.0 - rate) * alpha + rate * ahat, 0.0, 2.0))
+
+        return replace(sampler_state, alpha=alpha, alpha_step=step)
 
     def _run(
         self,
@@ -178,8 +227,10 @@ class MCState(VState):
                     self.H,
                     self.model,
                     key=sampler_state.key,
-                    eps1=float(self.eps1),
+                    eps1=self.eps1,
                     chains=self.chains,
+                    alpha=sampler_state.alpha,
+                    alpha_step=sampler_state.alpha_step,
                 )
         else:
             with timer("forward"):
@@ -325,8 +376,10 @@ class MCState(VState):
 
             rdtype = precision.real("calc", host=True)
             tiny = rdtype(precision.tiny("calc"))
-            alpha = rdtype(float(self.sampler.alpha))
-            beta = rdtype(float(self.sampler.blur))
+            auto = self.sampler.alpha is None
+            alpha_used = sampler_state.alpha if auto else self.sampler.alpha
+            alpha = rdtype(alpha_used)
+            beta = rdtype(self.sampler.blur)
 
             ket_idx = np.repeat(np.arange(n_ket, dtype=np.int64), np.diff(strong_ptr))
             logamp = precision.cast(alpha * ket_logabs, "calc", "real", host=True)
@@ -350,6 +403,9 @@ class MCState(VState):
             tilted = self.sampler.proposal == "ham" or beta > 0.0
             if not tilted:
                 logprob = logamp
+                if auto:
+                    score = ket_logabs
+                    score2 = ket_logabs * ket_logabs
             else:
                 stay = np.where(
                     strong_w > 0.0,
@@ -359,6 +415,10 @@ class MCState(VState):
                 log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
                 ok = stay > 0.0
                 log_stay[ok] = np.log(np.maximum(stay[ok], tiny)) + logamp[ok]
+
+                if auto:
+                    score = np.zeros(n_ket, dtype=rdtype)
+                    score2 = np.zeros(n_ket, dtype=rdtype)
 
                 if beta > 0.0 and strong_h.size:
                     terms = alpha * bra_logabs[strong_bra] + np.log(
@@ -377,6 +437,24 @@ class MCState(VState):
                     )
                 else:
                     logprob = log_stay
+
+                if auto:
+                    # S=d_alpha log r_alpha is the latent log-amplitude moment.
+                    ok = np.isfinite(log_stay) & np.isfinite(logprob)
+                    stay_w = np.zeros(n_ket, dtype=rdtype)
+                    stay_w[ok] = np.exp(log_stay[ok] - logprob[ok])
+                    score += stay_w * ket_logabs
+                    score2 += stay_w * ket_logabs * ket_logabs
+
+                    if beta > 0.0 and strong_h.size:
+                        term_log = np.log(beta) + terms - logprob[ket_idx]
+                        ok = np.isfinite(term_log)
+                        conn_w = np.zeros_like(term_log, dtype=rdtype)
+                        conn_w[ok] = np.exp(term_log[ok])
+
+                        ell = bra_logabs[strong_bra]
+                        np.add.at(score, ket_idx, conn_w * ell)
+                        np.add.at(score2, ket_idx, conn_w * ell * ell)
 
             if weak_h.size and int(self.eloc_sample) > 0:
                 weak_ket = np.repeat(
@@ -405,6 +483,15 @@ class MCState(VState):
             w, wstats = stats.weight(mass, mass2, ket_logabs, logprob)
             energy, estats = stats.eloc(w, eloc)
             residual = eloc - energy
+            if auto:
+                sampler_state = self._auto_alpha(
+                    sampler_state,
+                    mass,
+                    score,
+                    score2,
+                    residual,
+                    w,
+                )
 
             obs_stats: dict[str, float] = {}
             obs_data = {}
@@ -472,6 +559,7 @@ class MCState(VState):
             **estats,
             **wstats,
             **obs_stats,
+            "alpha": float(alpha_used),
             "accept": float(sample_stats.get("accept", 0.0)),
             "n_sample": float(n_sample),
             "n_unique": float(n_ket),

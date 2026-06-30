@@ -39,7 +39,7 @@ def main() -> None:
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
-        alpha=1.0,
+        alpha=None,
     )
 
     state = MCState.init(
@@ -69,12 +69,20 @@ def main() -> None:
                 "real",
                 host=True,
             ),
+            alpha=float(np.asarray(sampler_state["alpha"])),
+            alpha_step=int(np.asarray(sampler_state["alpha_step"])),
         ),
         chains=np.ascontiguousarray(saved["chains"], dtype=np.uint64),
     )
 
     obs = {"s2": operator.S2(sector)}
-    post_state = state.replace(sampler=replace(state.sampler, n_samples=819200))
+    post_state = state.replace(
+        sampler=replace(
+            state.sampler,
+            n_samples=819200,
+            alpha=float(state.sampler_state.alpha),
+        ),
+    )
 
     post = utils.analysis.estimate(post_state, n_blocks=8, obs=obs, profile=True)
     _, snap, data = post_state.expect(obs=obs, profile=True, data=True)

@@ -21,7 +21,7 @@ from pyscf.gto.basis import bse
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
-from detnqs.model import GBackflow
+from detnqs.model import GBackflow, SBackflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
@@ -166,7 +166,7 @@ def main() -> None:
     ref_mat = ref_init(sector, ref_coeff)
 
     # State.
-    model = GBackflow(
+    model = SBackflow(
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
@@ -180,7 +180,7 @@ def main() -> None:
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
-        alpha=1.0,
+        alpha=None,
     )
 
     chains = chain_init(sector, ref_coeff, n_chains=sampler.n_chains, seed=0)

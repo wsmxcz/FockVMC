@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import jax
-import optax
 
 from detnqs import operator, utils
 from detnqs.driver import VMC
@@ -27,15 +24,20 @@ def main() -> None:
 
     H = operator.Hamiltonian.load("N2_ham.npz")
     sector = H.sector
-    
-    model = GBackflow(norb=sector.norb, n_alpha=sector.n_alpha, n_beta=sector.n_beta, hidden=(64,))
+
+    model = GBackflow(
+        norb=sector.norb,
+        n_alpha=sector.n_alpha,
+        n_beta=sector.n_beta,
+        hidden=(64,),
+    )
     sampler = MCSampler(
         n_samples=1024,
         n_chains=1024,
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
-        alpha=1.0,
+        alpha=None,
     )
 
     state = MCState.init(

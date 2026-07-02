@@ -20,18 +20,18 @@ from helper import HydrogenLattice, chain_init, ref_init
 def main() -> None:
     # Runtime.
     utils.batch.configure(
-        forward_chunk=131072,
-        backward_chunk=8192,
+        forward_chunk=8192,
+        backward_chunk=1024,
         param_chunk=None,
-        bucket_min=8192,
+        bucket_min=1024,
     )
-    utils.precision.configure("double")
+    utils.precision.configure("single")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
     # Molecule.
     mol = gto.M(
-        atom=HydrogenLattice.cubic([4, 4, 4], 2.0).atom,
+        atom=HydrogenLattice.chain(16, 2.0).atom,
         basis="sto-6g",
         unit="Angstrom",
         spin=0,
@@ -59,7 +59,7 @@ def main() -> None:
     # Hamiltonian.
     sector = hilbert.DetSector(norb, n_alpha, n_beta)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
-    H.save("h64_sto6g_ham.npz")
+    H.save("h10.npz")
 
     print(f"SCF energy : {mf.e_tot:.12f}")
     print(f"active     : ({n_alpha + n_beta}e, {norb}o)")
@@ -72,13 +72,13 @@ def main() -> None:
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
-        hidden=(256, 256),
+        hidden=(64,),
         ref_mat=jnp.asarray(ref_mat),
     )
 
     sampler = MCSampler(
-        n_samples=8192,
-        n_chains=8192,
+        n_samples=1024,
+        n_chains=1024,
         thermal_steps=0,
         proposal="ham",
         blur=0.5,
@@ -96,17 +96,17 @@ def main() -> None:
         eps1=1.0e-3,
         eps2=1.0e-6,
         eloc_sample=1024,
-        assemble_mode="flat",
+        assemble_mode="unique",
     )
 
     # Optimizer.
-    steps = 5000
-    checkpoint_every = 500
+    steps = 1000
+    checkpoint_every = 1000
 
     lr = optax.linear_schedule(
         init_value=0.0,
         end_value=-5.0e-2,
-        transition_steps=1000,
+        transition_steps=100,
     )
 
     optimizer = psr(
@@ -118,7 +118,7 @@ def main() -> None:
     vmc = VMC.init(state, optimizer)
 
     log = utils.Logger(
-        file="h64_sto6g.jsonl",
+        file="h10.jsonl",
         every=10,
     )
 
@@ -133,7 +133,7 @@ def main() -> None:
 
         step = int(rec["step"])
         if step % checkpoint_every == 0 or step == steps:
-            vmc.save(f"h64_sto6g_{step:05d}.npz")
+            vmc.save(f"h10_{step:05d}.npz")
 
 
 if __name__ == "__main__":

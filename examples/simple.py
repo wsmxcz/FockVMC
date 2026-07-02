@@ -8,7 +8,7 @@ from pyscf import ao2mo, gto, scf
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
-from detnqs.model import GBackflow
+from detnqs.model import GBackflow, SBackflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
@@ -52,7 +52,7 @@ def main() -> None:
     print(f"SCF energy : {mf.e_tot:.12f}")
     print(f"active     : ({n_alpha + n_beta}e, {norb}o)")
 
-    model = GBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
+    model = SBackflow(norb=norb, n_alpha=n_alpha, n_beta=n_beta, hidden=(64,))
     sampler = MCSampler(
         n_samples=1024,
         n_chains=1024,
@@ -80,7 +80,7 @@ def main() -> None:
     optimizer = psr(shift=1.0e-3, mu=0.95, scale=scale)
     vmc = VMC.init(state, optimizer)
 
-    log = utils.Logger(file="N2.jsonl", every=10)
+    log = utils.Logger(file="N2_TTL.jsonl", every=10)
     obs = {"s2": operator.S2(sector)}
 
     for _ in range(steps):

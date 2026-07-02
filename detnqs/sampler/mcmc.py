@@ -91,8 +91,10 @@ class MCSampler:
         eps1: float,
         chains: Any,
         alpha: float | None = None,
+        timer: Timer | None = None,
     ) -> Chains:
         """Initialize chains and run burn-in."""
+        timer = Timer(enabled=False) if timer is None else timer
         n_chains = self.n_chains
 
         key, _ = jax.random.split(key)
@@ -101,15 +103,19 @@ class MCSampler:
             raise ValueError("chains size must equal sampler.n_chains")
         x = np.ascontiguousarray(x)
 
-        unique, _, inv = H.sector.unique(x)
-        value = batch.apply(model.logabs, theta, unique)
-        jax.block_until_ready(value)
+        with timer("reduce"):
+            unique, _, inv = H.sector.unique(x)
 
-        unique_logabs = precision.host(value, "calc", "real").reshape(-1)
-        logabs = precision.cast(unique_logabs[inv], "calc", "real", host=True)
+        with timer("forward"):
+            value = batch.apply(model.logabs, theta, unique)
+            jax.block_until_ready(value)
+            unique_logabs = precision.host(value, "calc", "real").reshape(-1)
+
+        with timer("reduce"):
+            logabs = precision.cast(unique_logabs[inv], "calc", "real", host=True)
 
         if self.alpha is None:
-            alpha0 = 1.0 if alpha is None else float(alpha)
+            alpha0 = 2.0 if alpha is None else float(alpha)
         else:
             alpha0 = self.alpha
 
@@ -121,7 +127,14 @@ class MCSampler:
         )
 
         for _ in range(self.thermal_steps):
-            state, _, _, _ = self._step(theta, H, model, state, eps1=eps1)
+            state, _, _, _ = self._step(
+                theta,
+                H,
+                model,
+                state,
+                eps1=eps1,
+                timer=timer,
+            )
 
         return state
 
@@ -134,6 +147,7 @@ class MCSampler:
         *,
         eps1: float,
         profile: bool = False,
+        timer: Timer | None = None,
     ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, float]]:
         """Advance chains and return observed configurations.
 
@@ -147,7 +161,7 @@ class MCSampler:
         if state.x.shape[0] != n_chains:
             raise ValueError("chain state size must equal n_chains")
 
-        timer = Timer(enabled=profile)
+        timer = Timer(enabled=profile) if timer is None else timer
         rdtype = precision.real("calc", host=True)
 
         accepted = 0
@@ -209,7 +223,6 @@ class MCSampler:
         stats = {"accept": float(accepted / proposed if proposed else 0.0)}
         if profile:
             stats["n_conn"] = float(n_conn)
-            stats.update(timer.stats())
 
         return state, samples, mass, stats
 
@@ -244,6 +257,7 @@ class MCSampler:
             observed = np.ascontiguousarray(state.x[pick])
             obs_mass = np.ones(n_observe, dtype=rdtype)
 
+        with timer("reduce"):
             ket, first, ket_index = H.sector.unique(state.x)
             n_ket = int(ket.shape[0])
             ket_logabs = precision.cast(
@@ -252,13 +266,16 @@ class MCSampler:
                 "real",
                 host=True,
             )
-
             obs_ket = ket_index[pick] if n_observe else np.empty(0, dtype=np.int64)
+
+        with timer("sample"):
             blur = (
                 rng.random(n_observe) < beta
                 if n_observe > 0 and beta > 0.0
                 else np.zeros(n_observe, dtype=bool)
             )
+
+        with timer("reduce"):
             blur_counts = np.bincount(
                 obs_ket[blur],
                 minlength=n_ket,
@@ -275,7 +292,7 @@ class MCSampler:
         n_conn = 0
 
         if self.proposal == "ham":
-            with timer("sample"):
+            with timer("reduce"):
                 proposal_counts = np.bincount(
                     ket_index,
                     minlength=n_ket,
@@ -421,11 +438,12 @@ class MCSampler:
             logabs_candidate[~active] = state.logabs[~active]
 
             if self.proposal == "ham":
-                pool_logabs = np.empty(conn_bra.shape[0], dtype=rdtype)
-                pool_logabs[:n_ket] = ket_logabs
+                with timer("reduce"):
+                    pool_logabs = np.empty(conn_bra.shape[0], dtype=rdtype)
+                    pool_logabs[:n_ket] = ket_logabs
+                    needed = np.unique(candidate_pos[active])
+                    new = needed[needed >= n_ket]
 
-                needed = np.unique(candidate_pos[active])
-                new = needed[needed >= n_ket]
                 if new.size:
                     with timer("forward"):
                         value = batch.apply(
@@ -434,25 +452,30 @@ class MCSampler:
                             np.ascontiguousarray(conn_bra[new]),
                         )
                         jax.block_until_ready(value)
+                        new_logabs = precision.host(value, "calc", "real").reshape(-1)
 
-                    pool_logabs[new] = precision.host(value, "calc", "real").reshape(-1)
+                    with timer("reduce"):
+                        pool_logabs[new] = new_logabs
 
-                logabs_candidate[active] = pool_logabs[candidate_pos[active]]
+                with timer("reduce"):
+                    logabs_candidate[active] = pool_logabs[candidate_pos[active]]
 
             else:
-                unique_candidate, _, inverse = H.sector.unique(candidate[active])
-                _, first_all, lookup = H.sector.unique(
-                    np.concatenate((ket, unique_candidate), axis=0)
-                )
+                with timer("reduce"):
+                    unique_candidate, _, inverse = H.sector.unique(candidate[active])
+                    _, first_all, lookup = H.sector.unique(
+                        np.concatenate((ket, unique_candidate), axis=0)
+                    )
 
-                first_candidate = first_all[lookup[n_ket:]]
-                known = first_candidate < n_ket
+                    first_candidate = first_all[lookup[n_ket:]]
+                    known = first_candidate < n_ket
 
-                unique_logabs = np.empty(unique_candidate.shape[0], dtype=rdtype)
-                if known.any():
-                    unique_logabs[known] = ket_logabs[first_candidate[known]]
+                    unique_logabs = np.empty(unique_candidate.shape[0], dtype=rdtype)
+                    if known.any():
+                        unique_logabs[known] = ket_logabs[first_candidate[known]]
 
-                unknown = ~known
+                    unknown = ~known
+
                 if unknown.any():
                     with timer("forward"):
                         value = batch.apply(
@@ -461,14 +484,17 @@ class MCSampler:
                             np.ascontiguousarray(unique_candidate[unknown]),
                         )
                         jax.block_until_ready(value)
+                        unknown_logabs = precision.host(
+                            value,
+                            "calc",
+                            "real",
+                        ).reshape(-1)
 
-                    unique_logabs[unknown] = precision.host(
-                        value,
-                        "calc",
-                        "real",
-                    ).reshape(-1)
+                    with timer("reduce"):
+                        unique_logabs[unknown] = unknown_logabs
 
-                logabs_candidate[active] = unique_logabs[inverse]
+                with timer("reduce"):
+                    logabs_candidate[active] = unique_logabs[inverse]
 
             with timer("sample"):
                 # Fixed alpha uses sampler.alpha; auto alpha uses chain state.

@@ -137,42 +137,34 @@ def chain_init(
 
 
 def ref_init(sector, alpha_coeff, beta_coeff=None) -> np.ndarray:
-    """Build a Slater reference."""
+    """Build an electron Slater reference.
+
+    Returned shape is always:
+        (n_alpha + n_beta, 2 * norb)
+
+    Row convention:
+        first  n_alpha rows: alpha occupied orbitals
+        last   n_beta  rows: beta  occupied orbitals
+    """
     norb = int(sector.norb)
     n_alpha = int(sector.n_alpha)
     n_beta = int(sector.n_beta)
 
     n_elec = n_alpha + n_beta
     n_sorb = 2 * norb
-    use_hole = n_elec > norb
 
     alpha = np.asarray(alpha_coeff, dtype=np.float64)
 
+    # General spin-orbital reference.
     if beta_coeff is None and alpha.shape[0] == n_sorb:
         coeff = alpha[:, :n_elec]
+        return np.ascontiguousarray(coeff.T)
 
-        if not use_hole:
-            return np.ascontiguousarray(coeff.T)
-
-        q = np.linalg.qr(coeff, mode="complete")[0]
-        return np.ascontiguousarray(q[:, n_elec:].T)
-
+    # Spin-block reference.
     beta = alpha if beta_coeff is None else np.asarray(beta_coeff, dtype=np.float64)
 
-    if not use_hole:
-        ref = np.zeros((n_elec, n_sorb), dtype=np.float64)
-        ref[:n_alpha, :norb] = alpha[:, :n_alpha].T
-        ref[n_alpha:, norb:] = beta[:, :n_beta].T
-        return np.ascontiguousarray(ref)
-
-    q_alpha = np.linalg.qr(alpha[:, :n_alpha], mode="complete")[0]
-    q_beta = np.linalg.qr(beta[:, :n_beta], mode="complete")[0]
-
-    n_alpha_hole = norb - n_alpha
-    n_beta_hole = norb - n_beta
-
-    ref = np.zeros((n_alpha_hole + n_beta_hole, n_sorb), dtype=np.float64)
-    ref[:n_alpha_hole, :norb] = q_alpha[:, n_alpha:].T
-    ref[n_alpha_hole:, norb:] = q_beta[:, n_beta:].T
+    ref = np.zeros((n_elec, n_sorb), dtype=np.float64)
+    ref[:n_alpha, :norb] = alpha[:, :n_alpha].T
+    ref[n_alpha:, norb:] = beta[:, :n_beta].T
 
     return np.ascontiguousarray(ref)

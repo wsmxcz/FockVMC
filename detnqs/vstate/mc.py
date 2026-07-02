@@ -168,31 +168,32 @@ class MCState(VState):
         residual: np.ndarray,
         w: np.ndarray,
     ) -> Chains:
-        """Update alpha by local KL moment projection."""
+        """Update alpha by damped local KL moment projection."""
         if self.sampler.alpha is not None:
             return sampler_state
-
+    
         rdtype = precision.real("calc", host=True)
         tiny = rdtype(precision.tiny("calc"))
         alpha = float(sampler_state.alpha)
-
+    
         target = w * np.abs(residual)
         norm_t = float(np.sum(target))
         norm_m = float(np.sum(mass))
         if norm_t <= float(tiny) or norm_m <= float(tiny):
             return sampler_state
-
+    
         mu_s = float(np.dot(target, score) / norm_t)
         nu_s = float(np.dot(mass, score) / norm_m)
         nu_q = float(np.dot(mass, score2) / norm_m)
         info = nu_q - nu_s * nu_s
         if not np.isfinite(info) or info <= float(tiny):
             return sampler_state
-
-        # KL projection followed by a small symmetric step cap.
+    
+        # KL projection with fixed under-relaxation.
         ahat = float(np.clip(alpha + (mu_s - nu_s) / info, 0.0, 2.0))
-        delta = float(np.clip(ahat - alpha, -0.001, 0.001))
-        return replace(sampler_state, alpha=float(np.clip(alpha + delta, 0.0, 2.0)))
+        rate = 0.01
+        alpha = (1.0 - rate) * alpha + rate * ahat
+        return replace(sampler_state, alpha=float(np.clip(alpha, 0.0, 2.0)))
 
     def _run(
         self,
@@ -208,36 +209,40 @@ class MCState(VState):
         obs = {} if obs is None else dict(obs)
 
         if self.sampler.reset_chains:
-            with timer("sample"):
-                sampler_state = self.sampler.init(
-                    self.params,
-                    self.H,
-                    self.model,
-                    key=sampler_state.key,
-                    eps1=self.eps1,
-                    chains=self.chains,
-                    alpha=sampler_state.alpha,
-                )
+            sampler_state = self.sampler.init(
+                self.params,
+                self.H,
+                self.model,
+                key=sampler_state.key,
+                eps1=self.eps1,
+                chains=self.chains,
+                alpha=sampler_state.alpha,
+                timer=timer,
+            )
         else:
-            with timer("forward"):
+            with timer("reduce"):
                 unique, _, inv = self.H.sector.unique(sampler_state.x)
+
+            with timer("forward"):
                 value = batch.apply(self.model.logabs, self.params, unique)
                 jax.block_until_ready(value)
                 logabs = precision.host(value, "calc", "real").reshape(-1)
+
+            with timer("reduce"):
                 sampler_state = replace(
                     sampler_state,
                     logabs=precision.cast(logabs[inv], "calc", "real", host=True),
                 )
 
-        with timer("sample"):
-            sampler_state, samples, sample_mass, sample_stats = self.sampler.draw(
-                self.params,
-                self.H,
-                self.model,
-                sampler_state,
-                eps1=float(self.eps1),
-                profile=profile,
-            )
+        sampler_state, samples, sample_mass, sample_stats = self.sampler.draw(
+            self.params,
+            self.H,
+            self.model,
+            sampler_state,
+            eps1=float(self.eps1),
+            profile=profile,
+            timer=timer,
+        )
 
         with timer("reduce"):
             ket, _, sample_to_ket = self.H.sector.unique(samples)
@@ -310,40 +315,41 @@ class MCState(VState):
                 ))
                 raw_parts.append(o_bra)
 
-        # Share one forward pool across H and optional observables.
-        raw_bra = np.concatenate(raw_parts, axis=0)
-        h_size = int(h_bra.shape[0])
+        with timer("reduce"):
+            # Share one forward pool across H and optional observables.
+            raw_bra = np.concatenate(raw_parts, axis=0)
+            h_size = int(h_bra.shape[0])
 
-        if self.assemble_mode == "unique":
-            bra, _, raw_to_bra = self.H.sector.unique(raw_bra)
-            strong_bra = raw_to_bra[strong_bra]
-            weak_bra = raw_to_bra[weak_bra]
-            obs_mapped = []
-            start = h_size
-            for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
-                end = start + int(o_bra.shape[0])
-                obs_mapped.append((
-                    name,
-                    o_diag,
-                    o_ptr,
-                    raw_to_bra[start:end],
-                    o_val,
-                ))
-                start = end
-        else:
-            bra = raw_bra
-            obs_mapped = []
-            start = h_size
-            for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
-                end = start + int(o_bra.shape[0])
-                obs_mapped.append((
-                    name,
-                    o_diag,
-                    o_ptr,
-                    np.arange(start, end, dtype=np.int64),
-                    o_val,
-                ))
-                start = end
+            if self.assemble_mode == "unique":
+                bra, _, raw_to_bra = self.H.sector.unique(raw_bra)
+                strong_bra = raw_to_bra[strong_bra]
+                weak_bra = raw_to_bra[weak_bra]
+                obs_mapped = []
+                start = h_size
+                for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
+                    end = start + int(o_bra.shape[0])
+                    obs_mapped.append((
+                        name,
+                        o_diag,
+                        o_ptr,
+                        raw_to_bra[start:end],
+                        o_val,
+                    ))
+                    start = end
+            else:
+                bra = raw_bra
+                obs_mapped = []
+                start = h_size
+                for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
+                    end = start + int(o_bra.shape[0])
+                    obs_mapped.append((
+                        name,
+                        o_diag,
+                        o_ptr,
+                        np.arange(start, end, dtype=np.int64),
+                        o_val,
+                    ))
+                    start = end
 
         with timer("forward"):
             bra_logpsi_jax = batch.apply(self.model.logpsi, self.params, bra)
@@ -554,13 +560,8 @@ class MCState(VState):
         }
         if profile:
             out.update(timer.stats())
-            out.update(
-                {
-                    k: float(v)
-                    for k, v in sample_stats.items()
-                    if k.startswith("time_") or k.startswith("n_")
-                }
-            )
+            if "n_conn" in sample_stats:
+                out["n_conn"] = float(sample_stats["n_conn"])
 
         if data:
             return (

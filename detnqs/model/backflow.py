@@ -4,6 +4,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import linen as nn
 
 from ..utils import precision
@@ -20,8 +21,10 @@ class Backflow(Model):
     Input:
         t_p in {0, alpha, beta, double}, encoded as 4-state one-hot.
 
-    Ansatz:
-        M(x) = M0 + dM(x),
+    Backflow:
+        M(x) = M0 + dM(x).
+
+    Amplitude:
         psi(C) = det M(x)[:, C].
 
     This is the standard electron-only NNBF baseline.
@@ -30,17 +33,12 @@ class Backflow(Model):
     norb: int
     n_alpha: int
     n_beta: int
-    ref_mat: jax.Array | None = None
+    ref_mat: Any | None = None
     hidden: tuple[int, ...] = (64,)
     init_scale: float = 1.0e-6
     dtype: Any | None = None
 
-    @nn.compact
-    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        dtype = precision.real("model") if self.dtype is None else self.dtype
-
-        batch, nword = x.shape[0], x.shape[2]
-
+    def setup(self):
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -51,269 +49,77 @@ class Backflow(Model):
         if n_elec > n_sorb:
             raise ValueError("Backflow requires n_alpha + n_beta <= 2 * norb")
 
-        orb = jnp.arange(norb)
-        sorb = jnp.arange(n_sorb)
-        shifts = jnp.arange(64, dtype=jnp.uint64)
-
-        # Packed bits -> alpha/beta occupations.
-        occ = (x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)
-        occ = occ.reshape(batch, 2, nword * 64)[:, :, :norb].astype(jnp.int32)
-
-        alpha = occ[:, 0]
-        beta = occ[:, 1]
-
-        # Local 4-state input.
-        token = alpha + 2 * beta
-        h = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
-
-        for width in self.hidden:
-            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
-            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
-            h = nn.silu(h)
-
-        out = nn.Dense(
-            n_elec * n_sorb,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nn.initializers.normal(self.init_scale),
-            bias_init=nn.initializers.zeros,
-        )(h)
-
-        mat = out.reshape(batch, n_elec, n_sorb)
-
         if self.ref_mat is None:
-            # Canonical electron reference.
-            row = jnp.concatenate((orb[:n_alpha], norb + orb[:n_beta]), axis=0)
-            ref = jnp.eye(n_sorb, dtype=dtype)[row]
+            ref = np.zeros((n_elec, n_sorb), dtype=np.float64)
+            col = np.concatenate((np.arange(n_alpha), norb + np.arange(n_beta)))
+            ref[np.arange(n_elec), col] = 1.0
         else:
-            # Electron reference.
-            ref = jnp.asarray(self.ref_mat, dtype=dtype)
+            ref = np.asarray(jax.device_get(self.ref_mat), dtype=np.float64)
 
-            if ref.shape != (n_elec, n_sorb):
-                raise ValueError(
-                    f"Backflow ref_mat must have shape {(n_elec, n_sorb)}, "
-                    f"got {ref.shape}"
-                )
-
-        mat = mat + ref[None]
-
-        # Occupied spin-orbital columns.
-        occ_sorb = jnp.concatenate((alpha, beta), axis=-1).astype(bool)
-        col = jnp.argsort(
-            jnp.where(occ_sorb, sorb, n_sorb),
-            axis=-1,
-            stable=True,
-        )[:, :n_elec]
-
-        # Gather determinant matrix.
-        col = jnp.broadcast_to(col[:, None, :], (batch, n_elec, n_elec))
-        mat = jnp.take_along_axis(mat, col, axis=2)
-
-        sign, logabs = jnp.linalg.slogdet(mat)
-        return sign.reshape((batch,)), logabs.reshape((batch,))
-
-
-class UBackflow(Model):
-    """
-    UHF-like spin-block backflow Slater determinant.
-
-    Fixed sector:
-        n_alpha, n_beta,  d_sigma = min(n_sigma, norb - n_sigma).
-
-    Input:
-        t_p in {0, alpha, beta, double}, encoded as 4-state one-hot.
-
-    Ansatz:
-        M_alpha(x) = M_alpha0 + dM_alpha(x),
-        M_beta(x)  = M_beta0  + dM_beta(x),
-
-        psi(A, B)
-        = det M_alpha(x)[:, A] det M_beta(x)[:, B],
-
-    with independent particle-hole duals for alpha and beta blocks.
-
-    The ansatz preserves S_z but does not enforce SU(2).
-    """
-
-    norb: int
-    n_alpha: int
-    n_beta: int
-    ref_mat: jax.Array | None = None
-    hidden: tuple[int, ...] = (64,)
-    init_scale: float = 1.0e-6
-    dtype: Any | None = None
+        self.ref = np.ascontiguousarray(ref)
 
     @nn.compact
     def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         dtype = precision.real("model") if self.dtype is None else self.dtype
 
-        batch, nword = x.shape[0], x.shape[2]
+        batch = x.shape[0]
+        nword = x.shape[2]
 
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
 
-        if n_alpha > norb or n_beta > norb:
-            raise ValueError("UBackflow requires n_alpha, n_beta <= norb")
+        n_elec = n_alpha + n_beta
+        n_sorb = 2 * norb
 
-        use_alpha_hole = n_alpha > norb - n_alpha
-        use_beta_hole = n_beta > norb - n_beta
-
-        d_alpha = norb - n_alpha if use_alpha_hole else n_alpha
-        d_beta = norb - n_beta if use_beta_hole else n_beta
-
-        orb = jnp.arange(norb)
+        # Unpack occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
+        bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
+        bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
 
-        # Packed bits -> alpha/beta occupations.
-        occ = (x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)
-        occ = occ.reshape(batch, 2, nword * 64)[:, :, :norb].astype(jnp.int32)
+        alpha = bits[:, 0]
+        beta = bits[:, 1]
 
-        alpha = occ[:, 0]
-        beta = occ[:, 1]
-
-        # Spin-block electron/hole input.
-        alpha_in = 1 - alpha if use_alpha_hole else alpha
-        beta_in = 1 - beta if use_beta_hole else beta
-
-        token = alpha_in + 2 * beta_in
+        # Build 4-state input.
+        token = alpha.astype(jnp.int32) + 2 * beta.astype(jnp.int32)
         h = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
 
-        for width in self.hidden:
-            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
-            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
+        # Apply backbone.
+        for i, width in enumerate(self.hidden):
+            h = nn.Dense(
+                int(width),
+                use_bias=True,
+                dtype=dtype,
+                param_dtype=dtype,
+                name=f"hidden_{i}",
+            )(h)
             h = nn.silu(h)
 
-        n_out = (d_alpha + d_beta) * norb
-
+        # Build backflow matrix.
         out = nn.Dense(
-            n_out,
+            n_elec * n_sorb,
+            use_bias=True,
             dtype=dtype,
             param_dtype=dtype,
             kernel_init=nn.initializers.normal(self.init_scale),
             bias_init=nn.initializers.zeros,
+            name="out",
         )(h)
 
-        alpha_out = out[:, : d_alpha * norb].reshape(batch, d_alpha, norb)
-        beta_out = out[:, d_alpha * norb :].reshape(batch, d_beta, norb)
+        mat = out.reshape(batch, n_elec, n_sorb)
+        mat = mat + jnp.asarray(self.ref, dtype=dtype)[None]
 
-        eye = jnp.eye(norb, dtype=dtype)
+        # Select occupied columns.
+        occ = jnp.concatenate((alpha, beta), axis=-1)
+        sorb = jnp.arange(n_sorb, dtype=jnp.int32)
 
-        if self.ref_mat is None:
-            if use_alpha_hole:
-                # Canonical alpha-hole reference.
-                alpha_ref = eye[orb[n_alpha:]]
-            else:
-                # Canonical alpha-electron reference.
-                alpha_ref = eye[orb[:n_alpha]]
+        score = jnp.where(occ, n_sorb - 1 - sorb[None, :], -1)
+        _, col = jax.lax.top_k(score, n_elec)
 
-            if use_beta_hole:
-                # Canonical beta-hole reference.
-                beta_ref = eye[orb[n_beta:]]
-            else:
-                # Canonical beta-electron reference.
-                beta_ref = eye[orb[:n_beta]]
-        else:
-            # Path-compatible spin-block reference.
-            ref = jnp.asarray(self.ref_mat, dtype=dtype)
-            ref_shape = (d_alpha + d_beta, 2 * norb)
+        col = jnp.broadcast_to(col[:, None, :], (batch, n_elec, n_elec))
+        mat = jnp.take_along_axis(mat, col, axis=2)
 
-            if ref.shape != ref_shape:
-                raise ValueError(
-                    f"UBackflow ref_mat must have shape {ref_shape}, "
-                    f"got {ref.shape}"
-                )
-
-            alpha_ref = ref[:d_alpha, :norb]
-            beta_ref = ref[d_alpha:, norb:]
-
-        alpha_mat = alpha_ref[None] + alpha_out
-        beta_mat = beta_ref[None] + beta_out
-
-        alpha_occ = alpha.astype(bool)
-        beta_occ = beta.astype(bool)
-
-        if use_alpha_hole:
-            # Alpha-hole columns.
-            alpha_col = jnp.argsort(
-                jnp.where(alpha_occ, norb, orb),
-                axis=-1,
-                stable=True,
-            )[:, :d_alpha]
-        else:
-            # Alpha-electron columns.
-            alpha_col = jnp.argsort(
-                jnp.where(alpha_occ, orb, norb),
-                axis=-1,
-                stable=True,
-            )[:, :d_alpha]
-
-        if use_beta_hole:
-            # Beta-hole columns.
-            beta_col = jnp.argsort(
-                jnp.where(beta_occ, norb, orb),
-                axis=-1,
-                stable=True,
-            )[:, :d_beta]
-        else:
-            # Beta-electron columns.
-            beta_col = jnp.argsort(
-                jnp.where(beta_occ, orb, norb),
-                axis=-1,
-                stable=True,
-            )[:, :d_beta]
-
-        if d_alpha == 0:
-            sign_alpha = jnp.ones((batch,), dtype=dtype)
-            log_alpha = jnp.zeros((batch,), dtype=dtype)
-        else:
-            # Gather alpha determinant.
-            alpha_col = jnp.broadcast_to(
-                alpha_col[:, None, :],
-                (batch, d_alpha, d_alpha),
-            )
-            alpha_mat = jnp.take_along_axis(alpha_mat, alpha_col, axis=2)
-            sign_alpha, log_alpha = jnp.linalg.slogdet(alpha_mat)
-
-        if d_beta == 0:
-            sign_beta = jnp.ones((batch,), dtype=dtype)
-            log_beta = jnp.zeros((batch,), dtype=dtype)
-        else:
-            # Gather beta determinant.
-            beta_col = jnp.broadcast_to(
-                beta_col[:, None, :],
-                (batch, d_beta, d_beta),
-            )
-            beta_mat = jnp.take_along_axis(beta_mat, beta_col, axis=2)
-            sign_beta, log_beta = jnp.linalg.slogdet(beta_mat)
-
-        sign = sign_alpha * sign_beta
-        logabs = log_alpha + log_beta
-
-        orb_i = orb.astype(jnp.int32)
-
-        if use_alpha_hole:
-            # Alpha particle-hole phase.
-            alpha_hole = 1 - alpha
-
-            exp_alpha = (
-                jnp.sum(alpha_hole * orb_i[None], axis=-1)
-                - d_alpha * (d_alpha - 1) // 2
-            )
-
-            sign = sign * (1 - 2 * (exp_alpha & 1)).astype(dtype)
-
-        if use_beta_hole:
-            # Beta particle-hole phase.
-            beta_hole = 1 - beta
-
-            exp_beta = (
-                jnp.sum(beta_hole * orb_i[None], axis=-1)
-                - d_beta * (d_beta - 1) // 2
-            )
-
-            sign = sign * (1 - 2 * (exp_beta & 1)).astype(dtype)
-
+        sign, logabs = jnp.linalg.slogdet(mat)
         return sign.reshape((batch,)), logabs.reshape((batch,))
 
 
@@ -326,29 +132,30 @@ class GBackflow(Model):
 
     Input:
         t_p in {0, alpha, beta, double}, encoded as 4-state one-hot.
+        In the hole representation, the input is particle-hole transformed.
 
-    Ansatz:
-        M(x) = M0 + dM(x),
-        psi(C) = det M(x)[:, C],
-        or chi_ph(C) det M(1 - x)[:, C^c].
+    Backflow:
+        M(x) = M0 + dM(x).
 
-    The head is fully spin-orbital resolved; S_z and SU(2) are not enforced.
+    Amplitude:
+        electron representation:
+            psi(C) = det M(x)[:, C].
+
+        hole representation:
+            psi(C) = chi_ph(C) det M(1 - x)[:, C^c].
+
+    The head is fully spin-orbital resolved. S_z and SU(2) are not enforced.
     """
 
     norb: int
     n_alpha: int
     n_beta: int
-    ref_mat: jax.Array | None = None
+    ref_mat: Any | None = None
     hidden: tuple[int, ...] = (64,)
     init_scale: float = 1.0e-6
     dtype: Any | None = None
 
-    @nn.compact
-    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        dtype = precision.real("model") if self.dtype is None else self.dtype
-
-        batch, nword = x.shape[0], x.shape[2]
-
+    def setup(self):
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -362,88 +169,103 @@ class GBackflow(Model):
         use_hole = n_elec > norb
         n_det = n_sorb - n_elec if use_hole else n_elec
 
-        orb = jnp.arange(norb)
-        sorb = jnp.arange(n_sorb)
+        if self.ref_mat is None:
+            ref = np.zeros((n_det, n_sorb), dtype=np.float64)
+
+            if use_hole:
+                col = np.concatenate(
+                    (np.arange(n_alpha, norb), norb + np.arange(n_beta, norb))
+                )
+            else:
+                col = np.concatenate((np.arange(n_alpha), norb + np.arange(n_beta)))
+
+            ref[np.arange(n_det), col] = 1.0
+
+        else:
+            ref_e = np.asarray(jax.device_get(self.ref_mat), dtype=np.float64)
+
+            if use_hole:
+                q = np.linalg.qr(ref_e.T, mode="complete")[0]
+                ref = q[:, n_elec:].T
+            else:
+                ref = ref_e
+
+        self.ref = np.ascontiguousarray(ref)
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        dtype = precision.real("model") if self.dtype is None else self.dtype
+
+        batch = x.shape[0]
+        nword = x.shape[2]
+
+        norb = int(self.norb)
+        n_alpha = int(self.n_alpha)
+        n_beta = int(self.n_beta)
+
+        n_elec = n_alpha + n_beta
+        n_sorb = 2 * norb
+
+        use_hole = n_elec > norb
+        n_det = n_sorb - n_elec if use_hole else n_elec
+
+        # Unpack occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
+        bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
+        bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
 
-        # Packed bits -> alpha/beta occupations.
-        occ = (x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)
-        occ = occ.reshape(batch, 2, nword * 64)[:, :, :norb].astype(jnp.int32)
+        alpha = bits[:, 0]
+        beta = bits[:, 1]
 
-        alpha = occ[:, 0]
-        beta = occ[:, 1]
-        occ_sorb = jnp.concatenate((alpha, beta), axis=-1)
+        # Build electron/hole input.
+        net_alpha = ~alpha if use_hole else alpha
+        net_beta = ~beta if use_hole else beta
 
-        # Electron/hole 4-state input.
-        net_occ = 1 - occ_sorb if use_hole else occ_sorb
-        token = net_occ[:, :norb] + 2 * net_occ[:, norb:]
+        token = net_alpha.astype(jnp.int32) + 2 * net_beta.astype(jnp.int32)
         h = jax.nn.one_hot(token, 4, dtype=dtype).reshape(batch, -1)
 
-        for width in self.hidden:
-            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
-            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
+        # Apply backbone.
+        for i, width in enumerate(self.hidden):
+            h = nn.Dense(
+                int(width),
+                use_bias=True,
+                dtype=dtype,
+                param_dtype=dtype,
+                name=f"hidden_{i}",
+            )(h)
             h = nn.silu(h)
 
+        # Build backflow matrix.
         out = nn.Dense(
             n_det * n_sorb,
+            use_bias=True,
             dtype=dtype,
             param_dtype=dtype,
             kernel_init=nn.initializers.normal(self.init_scale),
             bias_init=nn.initializers.zeros,
+            name="out",
         )(h)
 
         mat = out.reshape(batch, n_det, n_sorb)
+        mat = mat + jnp.asarray(self.ref, dtype=dtype)[None]
 
-        if self.ref_mat is None:
-            if use_hole:
-                # Canonical hole reference.
-                row = jnp.concatenate((orb[n_alpha:], norb + orb[n_beta:]), axis=0)
-            else:
-                # Canonical electron reference.
-                row = jnp.concatenate((orb[:n_alpha], norb + orb[:n_beta]), axis=0)
+        # Select electron/hole columns.
+        occ = jnp.concatenate((alpha, beta), axis=-1)
+        mask = ~occ if use_hole else occ
 
-            ref = jnp.eye(n_sorb, dtype=dtype)[row]
-        else:
-            # Path-compatible reference.
-            ref = jnp.asarray(self.ref_mat, dtype=dtype)
+        sorb = jnp.arange(n_sorb, dtype=jnp.int32)
+        score = jnp.where(mask, n_sorb - 1 - sorb[None, :], -1)
+        _, col = jax.lax.top_k(score, n_det)
 
-            if ref.shape != (n_det, n_sorb):
-                raise ValueError(
-                    f"GBackflow ref_mat must have shape {(n_det, n_sorb)}, "
-                    f"got {ref.shape}"
-                )
-
-        mat = mat + ref[None]
-        occ_bool = occ_sorb.astype(bool)
-
-        if use_hole:
-            # Hole columns.
-            col = jnp.argsort(
-                jnp.where(occ_bool, n_sorb, sorb),
-                axis=-1,
-                stable=True,
-            )[:, :n_det]
-        else:
-            # Electron columns.
-            col = jnp.argsort(
-                jnp.where(occ_bool, sorb, n_sorb),
-                axis=-1,
-                stable=True,
-            )[:, :n_det]
-
-        # Gather determinant matrix.
         col = jnp.broadcast_to(col[:, None, :], (batch, n_det, n_det))
         mat = jnp.take_along_axis(mat, col, axis=2)
 
         sign, logabs = jnp.linalg.slogdet(mat)
 
+        # Apply particle-hole phase.
         if use_hole:
-            # Particle-hole basis phase.
-            holes = 1 - occ_sorb
-            sorb_i = sorb.astype(jnp.int32)
-
             exponent = (
-                jnp.sum(holes * sorb_i[None], axis=-1)
+                jnp.sum(mask.astype(jnp.int32) * sorb[None, :], axis=-1)
                 - n_det * (n_det - 1) // 2
             )
 
@@ -463,8 +285,15 @@ class SBackflow(Model):
     Input:
         s_p = n_{p,alpha} + n_{p,beta} in {0, 1, 2}.
 
-    Head:
-        K(s) = K(s)^T,  U(s) in R^{norb x (n_alpha - n_beta)}.
+    Particle-hole normalized channels:
+        z_p = s_p - 1       in electron representation,
+        z_p = 1 - s_p       in hole representation,
+        r_p = 1_{s_p = 1}.
+
+    Backflow:
+        (z, r) -> g(s),
+        K(s) = K0 + dK(s),  K(s) = K(s)^T,
+        U(s) = U0 + dU(s).
 
     Amplitude:
         psi(A, B) = det [K(s)[A, B]  U(s)[A]].
@@ -475,17 +304,12 @@ class SBackflow(Model):
     norb: int
     n_alpha: int
     n_beta: int
-    ref_mat: jax.Array | None = None
-    hidden: tuple[int, ...] = (64,)
+    ref_mat: Any | None = None
+    hidden: tuple[int, ...] = (256,)
     init_scale: float = 1.0e-6
     dtype: Any | None = None
 
-    @nn.compact
-    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        dtype = precision.real("model") if self.dtype is None else self.dtype
-
-        batch, nword = x.shape[0], x.shape[2]
-
+    def setup(self):
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -493,141 +317,153 @@ class SBackflow(Model):
         if n_alpha < n_beta:
             raise ValueError("SBackflow requires n_alpha >= n_beta")
 
+        n_elec = n_alpha + n_beta
+        n_sorb = 2 * norb
+        n_open = n_alpha - n_beta
+        use_hole = n_elec > norb
+
+        if self.ref_mat is None:
+            pair_ref = np.zeros((norb, norb), dtype=np.float64)
+            open_ref = np.zeros((norb, n_open), dtype=np.float64)
+
+            p = np.arange(n_alpha, norb) if use_hole else np.arange(n_beta)
+            pair_ref[p, p] = 1.0
+
+            if n_open > 0:
+                p = np.arange(n_beta, n_alpha)
+                open_ref[p, np.arange(n_open)] = 1.0
+
+        else:
+            ref = np.asarray(jax.device_get(self.ref_mat), dtype=np.float64)
+
+            alpha_occ = ref[:n_alpha, :norb].T
+            open_ref = alpha_occ[:, n_beta:n_alpha]
+
+            if use_hole:
+                q = np.linalg.qr(alpha_occ, mode="complete")[0]
+                pair_orb = q[:, n_alpha:]
+            else:
+                pair_orb = alpha_occ[:, :n_beta]
+
+            pair_ref = pair_orb @ pair_orb.T
+
+        self.pair_ref = np.ascontiguousarray(pair_ref)
+        self.open_ref = np.ascontiguousarray(open_ref)
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        dtype = precision.real("model") if self.dtype is None else self.dtype
+
+        batch = x.shape[0]
+        nword = x.shape[2]
+
+        norb = int(self.norb)
+        n_alpha = int(self.n_alpha)
+        n_beta = int(self.n_beta)
+
         n_open = n_alpha - n_beta
         use_hole = (n_alpha + n_beta) > norb
 
         n_row = norb - n_beta if use_hole else n_alpha
         n_pair = norb - n_alpha if use_hole else n_beta
 
-        orb = jnp.arange(norb)
+        # Unpack occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
+        bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
+        bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
 
-        # Packed bits -> alpha/beta occupations.
-        occ = (x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)
-        occ = occ.reshape(batch, 2, nword * 64)[:, :, :norb].astype(jnp.int32)
+        alpha = bits[:, 0]
+        beta = bits[:, 1]
 
-        alpha = occ[:, 0]
-        beta = occ[:, 1]
+        # Build spin-free input.
+        af = alpha.astype(dtype)
+        bf = beta.astype(dtype)
 
-        # Spin-free input.
-        spatial = alpha + beta
-        h = (1 - spatial if use_hole else spatial - 1).astype(dtype)
+        z = (1.0 - af - bf) if use_hole else (af + bf - 1.0)
+        r = jnp.logical_xor(alpha, beta).astype(dtype)
+        h = jnp.concatenate((z, r), axis=-1)
 
-        for width in self.hidden:
-            h = nn.Dense(width, use_bias=False, dtype=dtype, param_dtype=dtype)(h)
-            h = nn.LayerNorm(dtype=dtype, param_dtype=dtype)(h)
+        # Apply backbone.
+        for i, width in enumerate(self.hidden):
+            h = nn.Dense(
+                int(width),
+                use_bias=True,
+                dtype=dtype,
+                param_dtype=dtype,
+                name=f"hidden_{i}",
+            )(h)
             h = nn.silu(h)
 
+        # Build pair/open heads.
         n_tri = norb * (norb + 1) // 2
         n_out = n_tri + norb * n_open
 
         out = nn.Dense(
             n_out,
+            use_bias=True,
             dtype=dtype,
             param_dtype=dtype,
             kernel_init=nn.initializers.normal(self.init_scale),
             bias_init=nn.initializers.zeros,
+            name="out",
         )(h)
 
-        # Triangular head -> symmetric K.
-        tri_i, tri_j = jnp.triu_indices(norb)
-        upper = jnp.zeros((batch, norb, norb), dtype=dtype)
-        upper = upper.at[:, tri_i, tri_j].set(out[:, :n_tri])
+        d_tri = out[:, :n_tri]
 
-        eye = jnp.eye(norb, dtype=dtype)
-        diag = jnp.diagonal(upper, axis1=-2, axis2=-1)
+        # Select electron/hole rows and columns.
+        orb = jnp.arange(norb, dtype=jnp.int32)
 
-        d_pair = upper + jnp.swapaxes(upper, -1, -2)
-        d_pair = d_pair - eye[None] * diag[:, None, :]
+        row_mask = ~beta if use_hole else alpha
+        col_mask = ~alpha if use_hole else beta
 
-        # Open-shell head.
-        d_open = out[:, n_tri:].reshape(batch, norb, n_open)
+        def select(mask: jax.Array, size: int) -> jax.Array:
+            if size == 0:
+                return jnp.zeros((batch, 0), dtype=jnp.int32)
 
-        if self.ref_mat is None:
-            if use_hole:
-                # Canonical hole reference.
-                pair_ref = eye * (orb >= n_alpha).astype(dtype)[None]
-                open_ref = eye[:, n_beta:n_alpha]
-            else:
-                # Canonical electron reference.
-                pair_ref = eye * (orb < n_beta).astype(dtype)[None]
-                open_ref = eye[:, n_beta:n_alpha]
+            score = jnp.where(mask, norb - 1 - orb[None, :], -1)
+            _, idx = jax.lax.top_k(score, size)
+            return idx.astype(jnp.int32)
+
+        row = select(row_mask, n_row)
+        col = select(col_mask, n_pair)
+
+        # Gather symmetric dK[row, col].
+        p = row[:, :, None]
+        q = col[:, None, :]
+
+        i = jnp.minimum(p, q)
+        j = jnp.maximum(p, q)
+
+        tri = i * norb - i * (i + 1) // 2 + j
+        bid3 = jnp.arange(batch, dtype=jnp.int32)[:, None, None]
+        pair_mat = d_tri[bid3, tri]
+
+        # Add K0[row, col].
+        pair_ref = jnp.asarray(self.pair_ref, dtype=dtype)
+        pair_mat = pair_mat + pair_ref[row[:, :, None], col[:, None, :]]
+
+        # Add U0[row].
+        if n_open == 0:
+            mat = pair_mat
         else:
-            # Path-compatible paired reference.
-            ref = jnp.asarray(self.ref_mat, dtype=dtype)
-            n_ref = n_row + n_pair
+            d_open = out[:, n_tri:].reshape(batch, norb, n_open)
+            bid2 = jnp.arange(batch, dtype=jnp.int32)[:, None]
+            open_mat = d_open[bid2, row]
 
-            if ref.shape != (n_ref, 2 * norb):
-                raise ValueError(
-                    f"SBackflow ref_mat must have shape {(n_ref, 2 * norb)}, "
-                    f"got {ref.shape}"
-                )
+            open_ref = jnp.asarray(self.open_ref, dtype=dtype)
+            open_mat = open_mat + open_ref[row]
 
-            alpha_ref = ref[:n_row, :norb].T
-            beta_ref = ref[n_row:, norb:].T
+            mat = jnp.concatenate((pair_mat, open_mat), axis=-1)
 
-            pair = 0.5 * (alpha_ref[:, :n_pair] + beta_ref[:, :n_pair])
-            pair_ref = pair @ pair.T
-            open_ref = alpha_ref[:, n_pair:n_row]
-
-        pair = pair_ref[None] + d_pair
-        open_orb = open_ref[None] + d_open
-
-        alpha_occ = alpha.astype(bool)
-        beta_occ = beta.astype(bool)
-
-        if use_hole:
-            # Hole rows/columns.
-            row = jnp.argsort(
-                jnp.where(beta_occ, norb, orb),
-                axis=-1,
-                stable=True,
-            )[:, :n_row]
-
-            col = jnp.argsort(
-                jnp.where(alpha_occ, norb, orb),
-                axis=-1,
-                stable=True,
-            )[:, :n_pair]
-        else:
-            # Electron rows/columns.
-            row = jnp.argsort(
-                jnp.where(alpha_occ, orb, norb),
-                axis=-1,
-                stable=True,
-            )[:, :n_row]
-
-            col = jnp.argsort(
-                jnp.where(beta_occ, orb, norb),
-                axis=-1,
-                stable=True,
-            )[:, :n_pair]
-
-        # Gather K[row, col].
-        row_idx = jnp.broadcast_to(row[:, :, None], (batch, n_row, norb))
-        pair_row = jnp.take_along_axis(pair, row_idx, axis=1)
-
-        col_idx = jnp.broadcast_to(col[:, None, :], (batch, n_row, n_pair))
-        pair_mat = jnp.take_along_axis(pair_row, col_idx, axis=2)
-
-        # Gather U[row].
-        open_idx = jnp.broadcast_to(row[:, :, None], (batch, n_row, n_open))
-        open_mat = jnp.take_along_axis(open_orb, open_idx, axis=1)
-
-        mat = jnp.concatenate((pair_mat, open_mat), axis=-1)
         sign, logabs = jnp.linalg.slogdet(mat)
 
+        # Apply particle-hole phase.
         if use_hole:
-            # Block-ordered particle-hole phase.
-            hole_alpha = 1 - beta
-            hole_beta = 1 - alpha
-            orb_i = orb.astype(jnp.int32)
-
             exponent = (
                 n_pair
                 + n_row * norb
-                + jnp.sum(hole_alpha * orb_i[None], axis=-1)
-                + jnp.sum(hole_beta * orb_i[None], axis=-1)
+                + jnp.sum(row, axis=-1)
+                + jnp.sum(col, axis=-1)
                 - n_row * (n_row - 1) // 2
                 - n_pair * (n_pair - 1) // 2
             )

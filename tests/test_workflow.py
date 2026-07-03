@@ -23,7 +23,7 @@ def test_h2_workflow() -> None:
     nelec = tuple(map(int, mol.nelec))
     h1 = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff)
     eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb))
-    sector = hilbert.DetSector(norb, nelec[0], nelec[1])
+    sector = hilbert.DetSector(norb, sum(nelec), nelec[0] - nelec[1])
     H = operator.Hamiltonian(sector, h1, eri, ecore=mol.energy_nuc())
 
     energy, _ = fci.direct_spin1.kernel(

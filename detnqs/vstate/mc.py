@@ -191,7 +191,7 @@ class MCState(VState):
     
         # KL projection with fixed under-relaxation.
         ahat = float(np.clip(alpha + (mu_s - nu_s) / info, 0.0, 2.0))
-        rate = 0.01
+        rate = 0.02
         alpha = (1.0 - rate) * alpha + rate * ahat
         return replace(sampler_state, alpha=float(np.clip(alpha, 0.0, 2.0)))
 

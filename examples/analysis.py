@@ -2,99 +2,39 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import jax
-import numpy as np
+from detnqs import utils
+from vmc import build, configure
 
-from detnqs import operator, utils
-from detnqs.model import GBackflow
-from detnqs.sampler import Chains
-from detnqs.sampler import MCSampler
-from detnqs.vstate import MCState
+
+CHECKPOINT = "N2_01000.npz"
+N_BLOCKS = 8
 
 
 def main() -> None:
-    # Runtime.
-    utils.batch.configure(
-        forward_chunk=8192,
-        backward_chunk=1024,
-        param_chunk=None,
-        bucket_min=1024,
-    )
-    utils.precision.configure("double")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
+    configure()
 
-    H = operator.Hamiltonian.load("N2_ham.npz")
-    sector = H.sector
+    vmc, obs = build(seed=0)
+    vmc.load(CHECKPOINT)
 
-    model = GBackflow(
-        norb=sector.norb,
-        n_alpha=sector.n_alpha,
-        n_beta=sector.n_beta,
-        hidden=(64,),
-    )
-    sampler = MCSampler(
-        n_samples=1024,
-        n_chains=1024,
-        thermal_steps=0,
-        proposal="ham",
-        blur=0.5,
-        alpha=None,
-    )
-
-    state = MCState.init(
-        model=model,
-        H=H,
-        sampler=sampler,
-        chains=sector.reference(sampler.n_chains),
-        key=jax.random.key(1),
-        eps1=1.0e-3,
-        eps2=1.0e-6,
-        eloc_sample=1024,
-        assemble_mode="unique",
-    )
-
-    checkpoint = utils.checkpoint.load("N2_00500.npz")
-    saved = checkpoint["state"]
-    sampler_state = saved["sampler_state"]
-
-    state = state.replace(
-        params=saved["params"],
-        sampler_state=Chains(
-            key=jax.device_put(sampler_state["key"]),
-            x=np.ascontiguousarray(sampler_state["x"], dtype=np.uint64),
-            logabs=utils.precision.cast(
-                sampler_state["logabs"],
-                "calc",
-                "real",
-                host=True,
-            ),
-            alpha=float(np.asarray(sampler_state["alpha"])),
-        ),
-        chains=np.ascontiguousarray(saved["chains"], dtype=np.uint64),
-    )
-
-    obs = {"s2": operator.S2(sector)}
-    post_state = state.replace(
+    state = vmc.state.replace(
         sampler=replace(
-            state.sampler,
+            vmc.state.sampler,
             n_samples=819200,
-            alpha=float(state.sampler_state.alpha),
-        ),
+            alpha=float(vmc.state.sampler_state.alpha),
+        )
     )
 
-    post = utils.analysis.estimate(post_state, n_blocks=8, obs=obs, profile=True)
-    _, snap, data = post_state.expect(obs=obs, profile=True, data=True)
+    # Estimate posterior observables.
+    post = utils.analysis.estimate(state, n_blocks=N_BLOCKS, obs=obs, profile=True)
+    _, snap, data = state.expect(obs=obs, profile=True, data=True)
 
+    # Analyze support, excitation structure, and tail behavior.
     sup = utils.analysis.support(data["w"])
-    exc = utils.analysis.excitation(data["x"], data["w"], sector.reference(1))
+    exc = utils.analysis.excitation(data["x"], data["w"], state.H.sector.reference(1))
     tail = utils.analysis.tail(data["w"], data["eloc"], snap["energy"])
 
-    _, _, _, _, geometry = post_state.expect_and_grad(
-        geometry=True,
-        obs=obs,
-        profile=True,
-    )
+    # Probe SR geometry at the restored point.
+    _, _, _, _, geometry = state.expect_and_grad(geometry=True, obs=obs, profile=True)
     sr = utils.analysis.sr(geometry, shift=1.0e-3)
 
     print("Posterior")

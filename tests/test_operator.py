@@ -134,7 +134,7 @@ def ref_hij(
     nb = (nelec - spin) // 2
     nword = ket.shape[-1]
 
-    sec = hilbert.DetSector(norb=norb, n_alpha=na, n_beta=nb)
+    sec = hilbert.DetSector(norb=norb, nelec=na + nb, spin=na - nb)
     H = operator.Hamiltonian(sec, h1, h2, ecore=ecore)
 
     val = 0.0
@@ -148,7 +148,7 @@ def ref_hij(
 
 
 def test_det_core() -> None:
-    sec = hilbert.DetSector(norb=3, n_alpha=1, n_beta=1)
+    sec = hilbert.DetSector(norb=3, nelec=2, spin=0)
     h1 = np.array(
         [
             [0.2, 0.4, -0.1],
@@ -211,7 +211,7 @@ def test_spin_core() -> None:
 
 
 def test_fermion() -> None:
-    sec = hilbert.DetSector(norb=4, n_alpha=2, n_beta=1)
+    sec = hilbert.DetSector(norb=4, nelec=3, spin=1)
     x = sec.reference(1)
 
     bra, sgn, active = operator.annihilate(x, 0, 1)

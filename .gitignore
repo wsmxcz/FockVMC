@@ -54,7 +54,6 @@ documents/
 performance/
 runs/
 scans/
-*.FCIDUMP
 *.ckpt
 *.csv
 *.h5

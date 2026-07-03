@@ -100,6 +100,7 @@ class SelectedState:
     def expect(
         self,
         *,
+        obs: Any | None = None,
         profile: bool = False,
         data: bool = False,
     ):
@@ -115,6 +116,7 @@ class SelectedState:
         self,
         *,
         geometry: bool = False,
+        obs: Any | None = None,
         profile: bool = False,
     ):
         return self._run(grad=True, geometry=geometry, profile=profile, data=False)

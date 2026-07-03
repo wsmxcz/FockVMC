@@ -94,12 +94,23 @@ class VMC:
         obs: Mapping[str, Any] | None = None,
         logger: Logger | None = None,
         profile: bool = False,
+        checkpoint: str | Path | None = None,
+        checkpoint_every: int = 0,
     ) -> dict[str, float]:
         rec: dict[str, float] = {}
+        checkpoint_every = int(checkpoint_every)
+
         for _ in range(int(steps)):
             rec = self.step(obs=obs, profile=profile)
+
             if logger is not None:
                 logger.add(rec)
+
+            if checkpoint is not None and checkpoint_every > 0:
+                step = int(rec["step"])
+                if step % checkpoint_every == 0:
+                    self.save(str(checkpoint).format(step=step))
+
         return rec
 
     def save(self, file: str | Path) -> Path:

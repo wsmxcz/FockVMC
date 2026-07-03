@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Self
+from typing import Self
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy.sparse import csr_matrix
+from pyscf.tools import fcidump
 
 from ..hilbert import DetSector, Sector, SpinSector
 from . import libdet
@@ -26,13 +27,7 @@ class Hamiltonian:
         self._ecore = float(ecore)
 
         h1 = np.ascontiguousarray(h1, dtype=np.float64)
-        if h1.shape != (sector.norb, sector.norb):
-            raise ValueError("h1 must have shape (sector.norb, sector.norb)")
-
         eri = np.ascontiguousarray(eri, dtype=np.float64).reshape(-1)
-        npair = sector.norb * (sector.norb + 1) // 2
-        if eri.shape != (npair * (npair + 1) // 2,):
-            raise ValueError("eri must be a 1D PySCF chemist 8-fold array")
 
         self._h1 = h1
         self._eri = eri
@@ -51,38 +46,40 @@ class Hamiltonian:
             raise TypeError(f"unsupported sector: {type(sector).__name__}")
 
     @classmethod
-    def load(cls, file: str | Path) -> Self:
-        """Load the saved integral representation."""
-        data = np.load(Path(file))
+    def load(
+        cls,
+        file: str | Path,
+        *,
+        sector: type[Sector] = DetSector,
+        spin: int | None = None,
+    ) -> Self:
+        """Load a standard FCIDUMP Hamiltonian."""
+        data = fcidump.read(str(Path(file)))
 
-        sector = DetSector(
-            int(data["norb"]),
-            int(data["n_alpha"]),
-            int(data["n_beta"]),
-        )
+        norb = int(data["NORB"])
+        nelec = int(data["NELEC"])
+        spin = int(data["MS2"] if spin is None else spin)
 
         return cls(
-            sector,
-            data["h1e"],
-            data["eri"],
-            ecore=float(data["ecore"]),
+            sector(norb, nelec, spin),
+            data["H1"],
+            data["H2"],
+            ecore=float(data["ECORE"]),
         )
 
     def save(self, file: str | Path) -> Path:
-        """Save the integral representation."""
+        """Save a PySCF FCIDUMP Hamiltonian."""
         path = Path(file)
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        np.savez_compressed(
-            path,
-            h1e=self._h1,
-            eri=self._eri,
-            ecore=np.asarray(self.ecore, dtype=np.float64),
-            norb=np.asarray(self.sector.norb, dtype=np.int64),
-            n_alpha=np.asarray(self.sector.n_alpha, dtype=np.int64),
-            n_beta=np.asarray(self.sector.n_beta, dtype=np.int64),
+        fcidump.from_integrals(
+            str(path),
+            self._h1,
+            self._eri,
+            self.sector.norb,
+            self.sector.nelec,
+            nuc=self.ecore,
+            ms=self.sector.spin,
         )
-
         return path
 
     @property
@@ -90,8 +87,21 @@ class Hamiltonian:
         return int(self.sector.norb)
 
     @property
+    def nelec(self) -> int:
+        return int(self.sector.nelec)
+
+    @property
+    def spin(self) -> int:
+        return int(self.sector.spin)
+
+    @property
     def ecore(self) -> float:
         return self._ecore
+
+    @property
+    def integrals(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return one- and two-electron integrals in constructor format."""
+        return self._h1, self._eri
 
     def hij(self, bra: ArrayLike, ket: ArrayLike) -> float:
         """Return a single matrix element `H[bra, ket]`."""

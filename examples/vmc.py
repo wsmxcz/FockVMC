@@ -6,14 +6,14 @@ import optax
 
 from detnqs import hilbert, operator, utils
 from detnqs.driver import VMC
-from detnqs.model import SBackflow
+from detnqs.model import SBackflow, GBackflow, PBackflow
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
 
 
-NAME = "H2O_ccpvdz_1.0re"
-FCIDUMP = f"FCIDUMP/H2O_ccpvdz/{NAME}.FCIDUMP"
+NAME = "fe2s2"
+FCIDUMP = f"FCIDUMP/{NAME}.FCIDUMP"
 LOG = f"{NAME}.jsonl"
 CKPT = f"{NAME}_{{step:05d}}.npz"
 
@@ -30,7 +30,7 @@ def configure() -> None:
         bucket_min=1024,
     )
     utils.precision.configure("single")
-    jax.config.update("jax_debug_nans", False)
+    jax.config.update("jax_debug_nans", True)
     jax.config.update("jax_log_compiles", False)
 
 
@@ -42,18 +42,19 @@ def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
     # Build a mean-field reference and sampled chains.
     ref_mat = utils.ref_init(sector, H.integrals, seed=seed)
 
-    model = SBackflow(
+    model = PBackflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
-        hidden=(256,),
-        ref_mat=jnp.asarray(ref_mat),
+        hidden=(16,),
+        ref_mat=ref_mat,
+        init_scale=1e-3,
     )
 
     sampler = MCSampler(
         n_samples=1024,
         n_chains=1024,
-        thermal_steps=0,
+        thermal_steps=256,
         proposal="ham",
         blur=0.5,
         alpha=None,
@@ -65,6 +66,7 @@ def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
         n_chains=sampler.n_chains,
         seed=seed,
     )
+    # chains = sector.random(sampler.n_chains, seed=seed)
 
     state = MCState.init(
         model=model,
@@ -75,15 +77,9 @@ def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
         eps1=1.0e-3,
         eps2=1.0e-6,
         eloc_sample=1024,
-        assemble_mode="unique",
     )
 
-    scale = optax.linear_schedule(
-        init_value=0.0,
-        end_value=-5.0e-2,
-        transition_steps=100,
-    )
-    optimizer = psr(shift=1.0e-3, mu=0.95, scale=scale)
+    optimizer = psr(shift=1.0e-3, mu=0.95, scale=-5.0e-2)
 
     vmc = VMC.init(state, optimizer)
     obs = {"s2": operator.S2(sector)}

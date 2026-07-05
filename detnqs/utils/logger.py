@@ -67,10 +67,14 @@ class Logger:
             self._head = False
 
         cells = tuple(self._format(k, rec[k]) for k in cols)
-        widths = tuple(
-            max(self._width(k), len(v))
-            for k, v in zip(cols, cells, strict=True)
-        )
+        widths = []
+        for key, cell in zip(cols, cells, strict=True):
+            width = 8 if key == "step" or key.startswith("n_") else 13
+            width = 9 if key.startswith("time_") else width
+            width = 8 if key == "accept" or key.endswith("_frac") else width
+            width = 15 if key in {"energy", "energy_se"} else width
+            widths.append(max(len(key), width, len(cell)))
+        widths = tuple(widths)
 
         self._widths = (
             widths
@@ -147,18 +151,6 @@ class Logger:
             return f"{x:.8f}"
 
         return f"{x:.6f}"
-
-    @staticmethod
-    def _width(key: str) -> int:
-        if key == "step" or key.startswith("n_"):
-            return max(len(key), 8)
-        if key.startswith("time_"):
-            return max(len(key), 9)
-        if key == "accept" or key.endswith("_frac"):
-            return max(len(key), 8)
-        if key in {"energy", "energy_se"}:
-            return max(len(key), 15)
-        return max(len(key), 13)
 
     @staticmethod
     def _json(value: Any) -> Any:

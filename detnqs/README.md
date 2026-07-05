@@ -14,7 +14,7 @@ Hamiltonian work is delegated to `detnqs.operator.libdet`.
 - `sampler`: Metropolis chains used by `MCState`.
 - `optimizer`: Optax-compatible SR, minSR, and PSR transforms.
 - `driver`: the minimal `VMC` iteration loop.
-- `utils`: JAX batching, precision policy, PyTree movement, math helpers, timing, and scalar logging.
+- `utils`: JAX batching, precision policy, math helpers, timing, and logging.
 
 ## Data Flow
 
@@ -22,7 +22,7 @@ Hamiltonian work is delegated to `detnqs.operator.libdet`.
 Sector + Hamiltonian + Model
         |
         v
-VState.expect_and_grad()
+state.expect_and_grad()
         |
         v
 loss, gradient, statistics, geometry

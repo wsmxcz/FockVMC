@@ -176,14 +176,11 @@ class Hamiltonian:
         self,
         kets: ArrayLike,
         eps: float = 0.0,
-        *,
-        assemble_mode: str = "unique",
     ) -> libdet.Conns:
         """Return screened off-diagonal connections for each ket."""
         return self._raw.conn(
             np.ascontiguousarray(kets, dtype=np.uint64),
             float(eps),
-            assemble_mode=assemble_mode,
         )
 
     def sample_conn(
@@ -194,7 +191,6 @@ class Hamiltonian:
         eps1: float = np.inf,
         eps2: float = 0.0,
         seed: int = 0,
-        assemble_mode: str = "unique",
     ) -> libdet.Conns:
         """Sample connections in the screened span `eps2 <= |H| < eps1`."""
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
@@ -209,7 +205,6 @@ class Hamiltonian:
             float(eps1),
             float(eps2),
             int(seed),
-            assemble_mode=assemble_mode,
         )
 
     def local_conn(
@@ -220,7 +215,6 @@ class Hamiltonian:
         counts: ArrayLike | int,
         *,
         seed: int = 0,
-        assemble_mode: str = "unique",
     ) -> libdet.LocalConn:
         """Return strong connections and weak-window samples for local energy."""
         kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
@@ -235,7 +229,6 @@ class Hamiltonian:
             float(eps2),
             counts_arr,
             seed=int(seed),
-            assemble_mode=assemble_mode,
         )
 
     def sample_project(

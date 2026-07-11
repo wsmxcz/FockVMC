@@ -486,8 +486,7 @@ Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
 
 inline ::libdet::Conns Hamiltonian::conn(
     DetBatchView kets,
-    double eps,
-    ::libdet::AssembleMode mode
+    double eps
 ) const {
     check_dets(kets, "conn(kets)");
     check_eps(eps);
@@ -513,7 +512,7 @@ inline ::libdet::Conns Hamiltonian::conn(
         }
     }
 
-    return detail::assemble_conn(kets, items, diag, degree, 1u, mode);
+    return detail::assemble_conn(kets, items, diag, degree, 1u);
 }
 
 } // namespace libdet::rhf

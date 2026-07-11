@@ -186,17 +186,17 @@ data, or scale-dependent/exclude-dependent action data.
 The public primitives are deliberately separate. They represent different
 Hamiltonian actions and should not be merged.
 
-`conn(kets, eps, assemble_mode)` returns deterministic screened connections:
+`conn(kets, eps)` returns deterministic screened connections:
 
 $$
 |H_{bk}|\ge\epsilon.
 $$
 
-It returns a bra evaluation batch, diagonal elements, CSR pointers, bra indices,
-matrix elements, and Hamiltonian degrees. Terms for each ket remain ordered by
-decreasing `|h|`, because they are backed by sorted backend connection objects.
+It returns a flat bra evaluation batch, diagonal elements, CSR pointers, matrix
+elements, and Hamiltonian degrees. Terms for each ket remain ordered by
+decreasing `|h|`.
 
-`sample_conn(kets, counts, eps1, eps2, seed, assemble_mode)` samples the window
+`sample_conn(kets, counts, eps1, eps2, seed)` samples the window
 
 $$
 \epsilon_2\le |H_{bk}|<\epsilon_1.
@@ -207,13 +207,8 @@ then ket-major. It has no sorting guarantee, and duplicates are allowed.
 If `eps2 > 0`, the sampler uses cached sorted connections. If `eps2 == 0`, it
 uses direct enumeration and does not write `ConnCache`.
 
-For both RHF and GUGA, `conn` and `sample_conn` use the same
-`assemble_mode` convention as `local_conn`. `unique` gives an exact shared bra
-batch. `flat` writes one bra per connection record.
-
-`local_conn(kets, eps1, eps2, counts, seed, assemble_mode)` returns deterministic
-strong connections and sampled weak connections. `assemble_mode` is either
-`unique` or `flat`.
+`local_conn(kets, eps1, eps2, counts, seed)` returns deterministic strong
+connections and sampled weak connections.
 
 Strong part:
 
@@ -287,23 +282,10 @@ local strong/weak action
 `SpaceCache` is batch-dependent and finite-space specific.
 Scratch objects are local or thread-local.
 
-Connection batches start with the input kets, and every index array refers to
-that batch. The caller should evaluate the returned batch directly and avoid
-additional deduplication or merging.
-
-Assembly has two modes:
-
-$$
-T_{\rm unique}=T_{\rm hash}+T_{\rm model}(n_{\rm ket}+U),
-\qquad
-T_{\rm flat}=T_{\rm copy}+T_{\rm model}(n_{\rm ket}+N).
-$$
-
-Here $U$ is the number of unique connected bras and $N$ is the number of
-connection records. `unique` routes bras by fingerprint, deduplicates them
-inside independent shards, and gathers the shards after the input ket prefix.
-`flat` skips global deduplication and appends every recorded bra directly.
-Both modes preserve the same index semantics.
+Connection batches use fixed flat layouts. `Conns.bra` is
+`[kets, connection bras]`; record `r` maps to `bra[n_kets + r]`.
+`LocalConn.bra` is `[kets, strong bras, weak bras]`. CSR pointers and matrix
+elements are record-aligned, so no indirect bra indices are stored.
 
 ### Parallel model
 
@@ -323,21 +305,18 @@ reductions.
 Connection assembly separates:
 
 ```text
-ket work -> pointer prefix -> unique or flat assembly
+ket work -> pointer prefix -> contiguous flat output
 ```
 
-External projection uses sharded exact accumulation rather than a global
-`sort_unique` followed by serial accumulation. RHF and GUGA keep separate
-backend kernels, but expose the same connection-batch semantics. The invariant
-is that expensive Hamiltonian work is distributed over kets or bras, while
-global assembly is either linear (`flat`) or shard-local (`unique`).
+External projection uses sharded exact accumulation. RHF and GUGA keep
+specialized kernels but expose the same flat connection-batch semantics.
 
 The design prioritizes:
 
 ```text
 tight candidate tables
 positive-cutoff connection caching
-sharded exact assembly
+contiguous connection assembly
 minimal boundary-side batch manipulation
 ```
 

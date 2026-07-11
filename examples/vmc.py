@@ -12,7 +12,7 @@ from detnqs.sampler import MCSampler
 from detnqs.vstate import MCState
 
 
-NAME = "fe2s2"
+NAME = "N2"
 FCIDUMP = f"FCIDUMP/{NAME}.FCIDUMP"
 LOG = f"{NAME}.jsonl"
 CKPT = f"{NAME}_{{step:05d}}.npz"
@@ -29,7 +29,7 @@ def configure() -> None:
         param_chunk=None,
         bucket_min=1024,
     )
-    utils.precision.configure("single")
+    utils.precision.configure("double")
     jax.config.update("jax_debug_nans", True)
     jax.config.update("jax_log_compiles", False)
 
@@ -46,7 +46,7 @@ def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
-        hidden=(16,),
+        hidden=(4,),
         ref_mat=ref_mat,
         init_scale=1e-3,
     )

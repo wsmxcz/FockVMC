@@ -567,8 +567,7 @@ inline Projection Hamiltonian::project(
 
 inline ::libdet::Conns Hamiltonian::conn(
     PathBatchView kets,
-    double eps,
-    ::libdet::AssembleMode mode
+    double eps
 ) const {
     check_paths(kets, "conn(kets)");
     check_eps(eps);
@@ -595,7 +594,7 @@ inline ::libdet::Conns Hamiltonian::conn(
         }
     }
 
-    return detail::assemble_conn(kets, items, diag, degree, 1u, mode);
+    return detail::assemble_conn(kets, items, diag, degree, 1u);
 }
 
 } // namespace libdet::guga

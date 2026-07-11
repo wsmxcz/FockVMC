@@ -150,19 +150,18 @@ inline void check_action(const Hamiltonian& ham, const Basis& basis) {
 inline void check_conn(
     const Hamiltonian& ham,
     const Basis& basis,
-    double eps,
-    AssembleMode mode = AssembleMode::unique
+    double eps
 ) {
     const std::size_t n = basis.size();
     const auto mat = dense(ham, basis);
-    const auto con = ham.conn(basis.view(), eps, mode);
+    const auto con = ham.conn(basis.view(), eps);
     const auto batch = batch_view(con.nword, con.bra);
 
     if (con.nword != basis.nword || con.n_kets != n || con.ptr.size() != n + 1u) {
         throw std::runtime_error("conn shape");
     }
     if (con.diag.size() != n || con.degree.size() != n) throw std::runtime_error("conn meta");
-    if (batch.n_states < n) throw std::runtime_error("conn batch");
+    if (batch.n_states != n + con.h.size()) throw std::runtime_error("conn batch");
     for (std::size_t i = 0; i < n; ++i) {
         if (!same_state(batch[i], basis.get(i))) throw std::runtime_error("conn prefix");
     }
@@ -181,7 +180,7 @@ inline void check_conn(
             const std::size_t t = static_cast<std::size_t>(p);
             const int ib = find_state(
                 basis.view(),
-                batch[static_cast<std::size_t>(con.idx[t])]
+                batch[n + t]
             );
             if (ib < 0) throw std::runtime_error("conn bra");
             if (got[static_cast<std::size_t>(ib)] != 0.0) throw std::runtime_error("conn dup");
@@ -207,8 +206,7 @@ inline void check_sample(
     const Hamiltonian& ham,
     const Basis& basis,
     double eps1,
-    double eps2,
-    AssembleMode mode = AssembleMode::unique
+    double eps2
 ) {
     const std::size_t n = basis.size();
     const std::size_t ns = 2;
@@ -218,7 +216,7 @@ inline void check_sample(
         for (std::size_t i = 0; i < n; ++i) count[s * n + i] = static_cast<i64>(2 + s);
     }
 
-    const auto con = ham.sample_conn(basis.view(), count, ns, eps1, eps2, 17, mode);
+    const auto con = ham.sample_conn(basis.view(), count, ns, eps1, eps2, 17);
     const auto batch = batch_view(con.nword, con.bra);
     if (con.nword != basis.nword || con.n_kets != n || con.n_streams != ns) {
         throw std::runtime_error("sample shape");
@@ -226,6 +224,7 @@ inline void check_sample(
     if (con.ptr.size() != ns * n + 1u || con.degree.size() != n) {
         throw std::runtime_error("sample meta");
     }
+    if (batch.n_states != n + con.h.size()) throw std::runtime_error("sample batch");
 
     for (std::size_t ik = 0; ik < n; ++ik) {
         const double deg = exact_degree(mat, n, ik, eps1, eps2);
@@ -243,7 +242,7 @@ inline void check_sample(
                 const std::size_t t = static_cast<std::size_t>(p);
                 const int ib = find_state(
                     basis.view(),
-                    batch[static_cast<std::size_t>(con.idx[t])]
+                    batch[n + t]
                 );
                 if (ib < 0) throw std::runtime_error("sample bra");
                 const double h = con.h[t];
@@ -260,13 +259,12 @@ inline void check_local(
     const Basis& basis,
     double eps1,
     double eps2,
-    i64 n_draw,
-    AssembleMode mode = AssembleMode::unique
+    i64 n_draw
 ) {
     const std::size_t n = basis.size();
     const auto mat = dense(ham, basis);
     std::vector<i64> count(n, n_draw);
-    const auto con = ham.local_conn(basis.view(), eps1, eps2, count, 31, mode);
+    const auto con = ham.local_conn(basis.view(), eps1, eps2, count, 31);
     const auto batch = batch_view(con.nword, con.bra);
 
     if (con.nword != basis.nword || con.n_kets != n) throw std::runtime_error("local shape");
@@ -276,8 +274,11 @@ inline void check_local(
     if (con.strong_ptr.size() != n + 1u || con.weak_ptr.size() != n + 1u) {
         throw std::runtime_error("local ptr");
     }
-    if (con.weak_bra.size() != con.weak_h.size() || con.weak_bra.size() != con.weak_count.size()) {
+    if (con.weak_h.size() != con.weak_count.size()) {
         throw std::runtime_error("weak size");
+    }
+    if (batch.n_states != n + con.strong_h.size() + con.weak_h.size()) {
+        throw std::runtime_error("local batch");
     }
 
     for (std::size_t i = 0; i < n; ++i) {
@@ -299,7 +300,7 @@ inline void check_local(
             const std::size_t t = static_cast<std::size_t>(p);
             const int ib = find_state(
                 basis.view(),
-                batch[static_cast<std::size_t>(con.strong_bra[t])]
+                batch[n + t]
             );
             if (ib < 0) throw std::runtime_error("strong bra");
             const double h = con.strong_h[t];
@@ -319,7 +320,7 @@ inline void check_local(
             const std::size_t t = static_cast<std::size_t>(p);
             const int ib = find_state(
                 basis.view(),
-                batch[static_cast<std::size_t>(con.weak_bra[t])]
+                batch[n + con.strong_h.size() + t]
             );
             if (ib < 0) throw std::runtime_error("weak bra");
             const double h = con.weak_h[t];

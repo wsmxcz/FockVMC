@@ -30,7 +30,6 @@ class MCState(VState):
     eps1: float = 1.0e-3
     eps2: float = 1.0e-6
     eloc_sample: int = 256
-    assemble_mode: str = "unique"
 
     @classmethod
     def init(
@@ -44,7 +43,6 @@ class MCState(VState):
         eps1: float = 1.0e-3,
         eps2: float = 1.0e-6,
         eloc_sample: int = 256,
-        assemble_mode: str = "unique",
     ) -> MCState:
         eps1 = float(eps1)
         eps2 = float(eps2)
@@ -89,7 +87,6 @@ class MCState(VState):
             eps1=eps1,
             eps2=eps2,
             eloc_sample=eloc_sample,
-            assemble_mode=assemble_mode,
         )
 
     def replace(self, **updates: Any) -> MCState:
@@ -271,12 +268,10 @@ class MCState(VState):
                 float(self.eps2),
                 int(self.eloc_sample),
                 seed=seed,
-                assemble_mode=self.assemble_mode,
             )
 
             h_bra = np.asarray(conn.bra, dtype=np.uint64)
             strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
-            strong_bra = np.asarray(conn.strong_bra, dtype=np.int64)
             strong_h = precision.cast(np.asarray(conn.strong_h), "calc", host=True)
             strong_w = precision.cast(
                 np.asarray(conn.strong_degree),
@@ -286,7 +281,6 @@ class MCState(VState):
             )
             diag = precision.cast(np.asarray(conn.diag), "calc", host=True)
             weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
-            weak_bra = np.asarray(conn.weak_bra, dtype=np.int64)
             weak_h = precision.cast(np.asarray(conn.weak_h), "calc", host=True)
             weak_count = precision.cast(
                 np.asarray(conn.weak_count),
@@ -317,39 +311,18 @@ class MCState(VState):
 
         with timer("reduce"):
             # Share one forward pool across H and optional observables.
-            raw_bra = np.concatenate(raw_parts, axis=0)
-            h_size = int(h_bra.shape[0])
+            bra = h_bra if len(raw_parts) == 1 else np.concatenate(raw_parts, axis=0)
+            n_strong = int(strong_h.size)
+            n_weak = int(weak_h.size)
+            strong_slice = slice(n_ket, n_ket + n_strong)
+            weak_slice = slice(n_ket + n_strong, n_ket + n_strong + n_weak)
 
-            if self.assemble_mode == "unique":
-                bra, _, raw_to_bra = self.H.sector.unique(raw_bra)
-                strong_bra = raw_to_bra[strong_bra]
-                weak_bra = raw_to_bra[weak_bra]
-                obs_mapped = []
-                start = h_size
-                for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
-                    end = start + int(o_bra.shape[0])
-                    obs_mapped.append((
-                        name,
-                        o_diag,
-                        o_ptr,
-                        raw_to_bra[start:end],
-                        o_val,
-                    ))
-                    start = end
-            else:
-                bra = raw_bra
-                obs_mapped = []
-                start = h_size
-                for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
-                    end = start + int(o_bra.shape[0])
-                    obs_mapped.append((
-                        name,
-                        o_diag,
-                        o_ptr,
-                        np.arange(start, end, dtype=np.int64),
-                        o_val,
-                    ))
-                    start = end
+            obs_mapped = []
+            start = int(h_bra.shape[0])
+            for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
+                end = start + int(o_bra.shape[0])
+                obs_mapped.append((name, o_diag, o_ptr, slice(start, end), o_val))
+                start = end
 
         with timer("forward"):
             bra_logpsi_jax = batch.apply(self.model.logpsi, self.params, bra)
@@ -358,6 +331,8 @@ class MCState(VState):
 
         with timer("reduce"):
             ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
+            strong_logpsi = jax.tree.map(lambda a: a[strong_slice], bra_logpsi)
+            weak_logpsi = jax.tree.map(lambda a: a[weak_slice], bra_logpsi)
             bra_logabs = precision.cast(
                 np.asarray(to_logabs(bra_logpsi)).reshape(-1),
                 "calc",
@@ -381,8 +356,8 @@ class MCState(VState):
                 ratio = precision.cast(
                     np.asarray(
                         to_ratio(
-                            jax.tree.map(lambda a: a[strong_bra], bra_logpsi),
-                            jax.tree.map(lambda a: a[ket_idx], bra_logpsi),
+                            strong_logpsi,
+                            jax.tree.map(lambda a: a[ket_idx], ket_logpsi),
                         )
                     ),
                     "calc",
@@ -413,7 +388,7 @@ class MCState(VState):
                     score2 = np.zeros(n_ket, dtype=rdtype)
 
                 if beta > 0.0 and strong_h.size:
-                    terms = alpha * bra_logabs[strong_bra] + np.log(
+                    terms = alpha * bra_logabs[strong_slice] + np.log(
                         np.maximum(np.abs(strong_h), tiny)
                     )
                     log_blur = np.log(beta) + math.segment_logsumexp(
@@ -444,7 +419,7 @@ class MCState(VState):
                         conn_w = np.zeros_like(term_log, dtype=rdtype)
                         conn_w[ok] = np.exp(term_log[ok])
 
-                        ell = bra_logabs[strong_bra]
+                        ell = bra_logabs[strong_slice]
                         np.add.at(score, ket_idx, conn_w * ell)
                         np.add.at(score2, ket_idx, conn_w * ell * ell)
 
@@ -456,8 +431,8 @@ class MCState(VState):
                 ratio = precision.cast(
                     np.asarray(
                         to_ratio(
-                            jax.tree.map(lambda a: a[weak_bra], bra_logpsi),
-                            jax.tree.map(lambda a: a[weak_ket], bra_logpsi),
+                            weak_logpsi,
+                            jax.tree.map(lambda a: a[weak_ket], ket_logpsi),
                         )
                     ),
                     "calc",
@@ -487,7 +462,7 @@ class MCState(VState):
 
             obs_stats: dict[str, float] = {}
             obs_data = {}
-            for name, o_diag, o_ptr, o_bra, o_val in obs_mapped:
+            for name, o_diag, o_ptr, o_slice, o_val in obs_mapped:
                 oloc = precision.cast(np.asarray(o_diag).copy(), "calc", host=True)
                 if o_val.size:
                     o_ket = np.repeat(
@@ -497,7 +472,7 @@ class MCState(VState):
                     ratio = precision.cast(
                         np.asarray(
                             to_ratio(
-                                jax.tree.map(lambda a: a[o_bra], bra_logpsi),
+                                jax.tree.map(lambda a: a[o_slice], bra_logpsi),
                                 jax.tree.map(lambda a: a[o_ket], ket_logpsi),
                             )
                         ),

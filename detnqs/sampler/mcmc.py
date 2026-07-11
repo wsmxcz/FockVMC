@@ -287,7 +287,6 @@ class MCSampler:
 
         conn_bra = None
         conn_ptr = None
-        conn_idx = None
         conn_degree = None
         n_conn = 0
 
@@ -313,8 +312,7 @@ class MCSampler:
                 )
                 conn_bra = np.asarray(conn.bra, dtype=np.uint64)
                 conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
-                conn_idx = np.asarray(conn.idx, dtype=np.int64)
-                n_conn = int(conn_idx.size)
+                n_conn = int(conn_ptr[-1])
 
             with timer("sample"):
                 proposal_ptr = conn_ptr[: n_ket + 1]
@@ -326,8 +324,8 @@ class MCSampler:
 
                 records = np.arange(proposal_ptr[0], proposal_ptr[-1], dtype=np.int64)
                 if records.size:
-                    candidate[active_order] = conn_bra[conn_idx[records]]
-                    candidate_pos[active_order] = conn_idx[records]
+                    candidate_pos[active_order] = n_ket + records
+                    candidate[active_order] = conn_bra[candidate_pos[active_order]]
 
                 active = candidate_pos >= 0
                 # Degree-tilted target cancels the heat-bath ket degree.
@@ -395,14 +393,13 @@ class MCSampler:
                     )
                     conn_bra = np.asarray(conn.bra, dtype=np.uint64)
                     conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
-                    conn_idx = np.asarray(conn.idx, dtype=np.int64)
                     conn_degree = precision.cast(
                         np.asarray(conn.degree),
                         "calc",
                         "real",
                         host=True,
                     )
-                    n_conn += int(conn_idx.size)
+                    n_conn += int(conn_ptr[-1])
 
             with timer("sample"):
                 if blur.any():
@@ -418,7 +415,7 @@ class MCSampler:
 
                     records = np.arange(blur_ptr[0], blur_ptr[-1], dtype=np.int64)
                     if records.size:
-                        observed[active_pick] = conn_bra[conn_idx[records]]
+                        observed[active_pick] = conn_bra[n_ket + records]
 
                 if self.proposal != "ham":
                     # Single-move chains need the blur degree as sample mass.
@@ -439,26 +436,19 @@ class MCSampler:
 
             if self.proposal == "ham":
                 with timer("reduce"):
-                    pool_logabs = np.empty(conn_bra.shape[0], dtype=rdtype)
-                    pool_logabs[:n_ket] = ket_logabs
-                    needed = np.unique(candidate_pos[active])
-                    new = needed[needed >= n_ket]
+                    new = candidate_pos[active]
 
-                if new.size:
-                    with timer("forward"):
-                        value = batch.apply(
-                            model.logabs,
-                            theta,
-                            np.ascontiguousarray(conn_bra[new]),
-                        )
-                        jax.block_until_ready(value)
-                        new_logabs = precision.host(value, "calc", "real").reshape(-1)
-
-                    with timer("reduce"):
-                        pool_logabs[new] = new_logabs
+                with timer("forward"):
+                    value = batch.apply(
+                        model.logabs,
+                        theta,
+                        np.ascontiguousarray(conn_bra[new]),
+                    )
+                    jax.block_until_ready(value)
+                    new_logabs = precision.host(value, "calc", "real").reshape(-1)
 
                 with timer("reduce"):
-                    logabs_candidate[active] = pool_logabs[candidate_pos[active]]
+                    logabs_candidate[active] = new_logabs
 
             else:
                 with timer("reduce"):

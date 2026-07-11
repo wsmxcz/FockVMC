@@ -16,7 +16,6 @@
 
 using libdet::Hamiltonian;
 using libdet::i64;
-using libdet::AssembleMode;
 using libdet::StateBatchView;
 using libdet::StateRef;
 using libdet::u32;

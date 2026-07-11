@@ -199,15 +199,14 @@ public:
 
     [[nodiscard]] Conns conn(
         StateBatchView kets,
-        double eps = 0.0,
-        AssembleMode mode = AssembleMode::unique
+        double eps = 0.0
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.conn(detail::as_dets(kets), eps, mode);
+                return ham.conn(detail::as_dets(kets), eps);
             } else {
-                return ham.conn(detail::as_paths(kets), eps, mode);
+                return ham.conn(detail::as_paths(kets), eps);
             }
         });
     }
@@ -218,15 +217,14 @@ public:
         std::size_t n_streams,
         double eps1,
         double eps2,
-        u64 seed = 0,
-        AssembleMode mode = AssembleMode::unique
+        u64 seed = 0
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed, mode);
+                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed);
             } else {
-                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed, mode);
+                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed);
             }
         });
     }
@@ -237,15 +235,14 @@ public:
         double eps1,
         double eps2,
         std::span<const i64> counts,
-        u64 seed = 0,
-        AssembleMode mode = AssembleMode::unique
+        u64 seed = 0
     ) const {
         return visit([&](const auto& ham) {
             using H = std::decay_t<decltype(ham)>;
             if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.local_conn(detail::as_dets(kets), eps1, eps2, counts, seed, mode);
+                return ham.local_conn(detail::as_dets(kets), eps1, eps2, counts, seed);
             } else {
-                return ham.local_conn(detail::as_paths(kets), eps1, eps2, counts, seed, mode);
+                return ham.local_conn(detail::as_paths(kets), eps1, eps2, counts, seed);
             }
         });
     }

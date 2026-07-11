@@ -19,11 +19,13 @@ class Backflow(Model):
         N = n_alpha + n_beta, K = 2 * norb.
 
     Network:
-        u_i = 2 n_i - 1,
-        u -> M(u) in R^{N x K}.
+        q_p = n_{p alpha} + n_{p beta} - 1,
+        mu_p = n_{p alpha} - n_{p beta},
+        nu_p = 1_{n_{p alpha} != n_{p beta}},
+        (q, mu, nu) -> M in R^{N x K}.
 
     Amplitude:
-        psi(C) = det M(u)[:, C].
+        psi(C) = det M[:, C].
     """
 
     norb: int
@@ -34,7 +36,7 @@ class Backflow(Model):
     init_scale: float = 1.0e-3
     dtype: Any | None = None
 
-    def setup(self):
+    def setup(self) -> None:
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -69,16 +71,24 @@ class Backflow(Model):
         n_elec = int(self.n_elec)
         n_sorb = int(self.n_sorb)
 
+        # Decode spin occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
         bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
         bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
 
         alpha = bits[:, 0]
         beta = bits[:, 1]
-        occ = jnp.concatenate((alpha, beta), axis=-1)
 
-        h = 2.0 * occ.astype(dtype) - 1.0
+        af = alpha.astype(dtype)
+        bf = beta.astype(dtype)
 
+        # Build charge-spin-seniority channels.
+        q = af + bf - 1.0
+        mu = af - bf
+        nu = jnp.logical_xor(alpha, beta).astype(dtype)
+        h = jnp.concatenate((q, mu, nu), axis=-1)
+
+        # Apply dense backbone.
         for i, width in enumerate(self.hidden):
             h = nn.Dense(
                 int(width),
@@ -95,6 +105,7 @@ class Backflow(Model):
             ref = jnp.asarray(self.ref, dtype=dtype)
             bias_init = lambda key, shape, dtype=dtype: ref.astype(dtype).reshape(shape)
 
+        # Build spin-orbital matrix.
         out = nn.Dense(
             n_elec * n_sorb,
             use_bias=True,
@@ -107,6 +118,8 @@ class Backflow(Model):
 
         mat = out.reshape(batch, n_elec, n_sorb)
 
+        # Select occupied columns.
+        occ = jnp.concatenate((alpha, beta), axis=-1)
         sorb = jnp.arange(n_sorb, dtype=jnp.int32)
         score = jnp.where(occ, n_sorb - 1 - sorb[None, :], -1)
         _, col = jax.lax.top_k(score, n_elec)
@@ -126,14 +139,16 @@ class GBackflow(Model):
         N = n_alpha + n_beta, K = 2 * norb, d = min(N, K - N).
 
     Network:
-        m = n in electron representation,
-        m = 1 - n in hole representation,
-        u_i = 2 m_i - 1,
-        u -> M(u) in R^{d x K}.
+        m_i = n_i in electron representation,
+        m_i = 1 - n_i in hole representation,
+        q_p = m_{p alpha} + m_{p beta} - 1,
+        mu_p = m_{p alpha} - m_{p beta},
+        nu_p = 1_{m_{p alpha} != m_{p beta}},
+        (q, mu, nu) -> M in R^{d x K}.
 
     Amplitude:
-        electron: psi(C) = det M(u)[:, C],
-        hole:     psi(C) = chi_ph(C) det M(u)[:, C^c].
+        electron: psi(C) = det M[:, C],
+        hole:     psi(C) = chi_ph(C) det M[:, C^c].
     """
 
     norb: int
@@ -144,7 +159,7 @@ class GBackflow(Model):
     init_scale: float = 1.0e-3
     dtype: Any | None = None
 
-    def setup(self):
+    def setup(self) -> None:
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -189,17 +204,27 @@ class GBackflow(Model):
         n_det = int(self.n_det)
         use_hole = bool(self.use_hole)
 
+        # Decode spin occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
         bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
         bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
 
         alpha = bits[:, 0]
         beta = bits[:, 1]
-        occ = jnp.concatenate((alpha, beta), axis=-1)
 
-        mask = jnp.logical_not(occ) if use_hole else occ
-        h = 2.0 * mask.astype(dtype) - 1.0
+        eff_alpha = jnp.logical_not(alpha) if use_hole else alpha
+        eff_beta = jnp.logical_not(beta) if use_hole else beta
 
+        af = eff_alpha.astype(dtype)
+        bf = eff_beta.astype(dtype)
+
+        # Build effective charge-spin-seniority channels.
+        q = af + bf - 1.0
+        mu = af - bf
+        nu = jnp.logical_xor(eff_alpha, eff_beta).astype(dtype)
+        h = jnp.concatenate((q, mu, nu), axis=-1)
+
+        # Apply dense backbone.
         for i, width in enumerate(self.hidden):
             h = nn.Dense(
                 int(width),
@@ -216,6 +241,7 @@ class GBackflow(Model):
             ref = jnp.asarray(self.ref, dtype=dtype)
             bias_init = lambda key, shape, dtype=dtype: ref.astype(dtype).reshape(shape)
 
+        # Build spin-orbital matrix.
         out = nn.Dense(
             n_det * n_sorb,
             use_bias=True,
@@ -228,6 +254,10 @@ class GBackflow(Model):
 
         mat = out.reshape(batch, n_det, n_sorb)
 
+        # Select electron/hole columns.
+        occ = jnp.concatenate((alpha, beta), axis=-1)
+        mask = jnp.logical_not(occ) if use_hole else occ
+
         sorb = jnp.arange(n_sorb, dtype=jnp.int32)
         score = jnp.where(mask, n_sorb - 1 - sorb[None, :], -1)
         _, col = jax.lax.top_k(score, n_det)
@@ -237,6 +267,7 @@ class GBackflow(Model):
 
         sign, logabs = jnp.linalg.slogdet(mat)
 
+        # Apply particle-hole phase.
         if use_hole:
             exponent = (
                 jnp.sum(mask.astype(jnp.int32) * sorb[None, :], axis=-1)
@@ -258,15 +289,14 @@ class SBackflow(Model):
         n_open = n_alpha - n_beta.
 
     Network:
-        s_p = n_{p alpha} + n_{p beta},
-        z_p = s_p - 1 in electron representation,
-        z_p = 1 - s_p in hole representation,
-        r_p = 1_{s_p = 1},
-        (z, r) -> K(s), U(s).
+        q_p = s_p - 1 in electron representation,
+        q_p = 1 - s_p in hole representation,
+        nu_p = 1_{s_p = 1},
+        (q, nu) -> K in R^{norb x norb}, U in R^{norb x n_open}.
 
     Amplitude:
-        psi(A, B) = det [K(s)[A, B], U(s)[A]],
-        K(s) = K(s)^T.
+        psi(A, B) = det [K[A, B], U[A]],
+        K = K^T.
     """
 
     norb: int
@@ -277,7 +307,7 @@ class SBackflow(Model):
     init_scale: float = 1.0e-3
     dtype: Any | None = None
 
-    def setup(self):
+    def setup(self) -> None:
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -336,6 +366,7 @@ class SBackflow(Model):
         n_out = int(self.n_out)
         use_hole = bool(self.use_hole)
 
+        # Decode spin occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
         bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
         bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
@@ -346,10 +377,12 @@ class SBackflow(Model):
         af = alpha.astype(dtype)
         bf = beta.astype(dtype)
 
-        z = (1.0 - af - bf) if use_hole else (af + bf - 1.0)
-        r = jnp.logical_xor(alpha, beta).astype(dtype)
-        h = jnp.concatenate((z, r), axis=-1)
+        # Build spin-scalar charge-seniority channels.
+        q = (1.0 - af - bf) if use_hole else (af + bf - 1.0)
+        nu = jnp.logical_xor(alpha, beta).astype(dtype)
+        h = jnp.concatenate((q, nu), axis=-1)
 
+        # Apply dense backbone.
         for i, width in enumerate(self.hidden):
             h = nn.Dense(
                 int(width),
@@ -366,6 +399,7 @@ class SBackflow(Model):
             ref = jnp.asarray(self.ref, dtype=dtype)
             bias_init = lambda key, shape, dtype=dtype: ref.astype(dtype).reshape(shape)
 
+        # Build pair and open-shell matrices.
         out = nn.Dense(
             n_out,
             use_bias=True,
@@ -380,8 +414,8 @@ class SBackflow(Model):
         k = 0.5 * (k + jnp.swapaxes(k, -1, -2))
         open_val = out[:, norb * norb :].reshape(batch, norb, n_open)
 
+        # Select paired rows and columns.
         orb = jnp.arange(norb, dtype=jnp.int32)
-
         row_mask = jnp.logical_not(beta) if use_hole else alpha
         col_mask = jnp.logical_not(alpha) if use_hole else beta
 
@@ -405,6 +439,7 @@ class SBackflow(Model):
 
         sign, logabs = jnp.linalg.slogdet(mat)
 
+        # Apply particle-hole phase.
         if use_hole:
             exponent = (
                 n_pair
@@ -430,18 +465,15 @@ class PBackflow(Model):
         S = M = (n_alpha - n_beta) / 2.
 
     Network:
-        effective occupation m is electron or hole occupation,
-        z_p = m_{p alpha} + m_{p beta} - 1,
-        r_p = 1_{m_{p alpha} != m_{p beta}},
-        (z, r) -> Y(m) in R^{d x norb}.
+        m is electron or hole occupation,
+        q_p = m_{p alpha} + m_{p beta} - 1,
+        nu_p = 1_{m_{p alpha} != m_{p beta}},
+        (q, nu) -> Y in R^{d x norb}.
 
     Amplitude:
-        psi(C) = sum_q c_q det M_q(m)[:, C],
+        psi(C) = sum_q c_q det M_q[:, C],
         M_q[i, p alpha] = Y[i, p] a[q, i],
         M_q[i, p beta ] = Y[i, p] b[q, i].
-
-    Note:
-        in hole representation, beta holes are effective alpha particles.
     """
 
     norb: int
@@ -452,7 +484,7 @@ class PBackflow(Model):
     init_scale: float = 1.0e-3
     dtype: Any | None = None
 
-    def setup(self):
+    def setup(self) -> None:
         norb = int(self.norb)
         n_alpha = int(self.n_alpha)
         n_beta = int(self.n_beta)
@@ -534,6 +566,7 @@ class PBackflow(Model):
         n_sorb = 2 * norb
         use_hole = bool(self.use_hole)
 
+        # Decode spin occupations.
         shifts = jnp.arange(64, dtype=jnp.uint64)
         bits = ((x[:, :, :, None] >> shifts[None, None, None, :]) & jnp.uint64(1)) != 0
         bits = bits.reshape(batch, 2, nword * 64)[:, :, :norb]
@@ -547,10 +580,12 @@ class PBackflow(Model):
         af = eff_alpha.astype(dtype)
         bf = eff_beta.astype(dtype)
 
-        z = af + bf - 1.0
-        r = jnp.logical_xor(eff_alpha, eff_beta).astype(dtype)
-        h = jnp.concatenate((z, r), axis=-1)
+        # Build spin-scalar charge-seniority channels.
+        q = af + bf - 1.0
+        nu = jnp.logical_xor(eff_alpha, eff_beta).astype(dtype)
+        h = jnp.concatenate((q, nu), axis=-1)
 
+        # Apply dense backbone.
         for i, width in enumerate(self.hidden):
             h = nn.Dense(
                 int(width),
@@ -567,6 +602,7 @@ class PBackflow(Model):
             ref = jnp.asarray(self.ref, dtype=dtype)
             bias_init = lambda key, shape, dtype=dtype: ref.astype(dtype).reshape(shape)
 
+        # Build spatial orbital matrix.
         out = nn.Dense(
             n_det * norb,
             use_bias=True,
@@ -579,6 +615,7 @@ class PBackflow(Model):
 
         y = out.reshape(batch, n_det, norb)
 
+        # Select electron/hole spin-orbitals.
         occ = jnp.concatenate((alpha, beta), axis=-1)
         mask = jnp.logical_not(occ) if use_hole else occ
 
@@ -588,12 +625,13 @@ class PBackflow(Model):
 
         orb = jnp.where(col < norb, col, col - norb)
         is_alpha_col = col < norb
-
         spin_is_alpha = jnp.logical_not(is_alpha_col) if use_hole else is_alpha_col
 
+        # Gather spatial amplitudes.
         orb = jnp.broadcast_to(orb[:, None, :], (batch, n_det, n_det))
         mat = jnp.take_along_axis(y, orb, axis=2)
 
+        # Apply spin-projection quadrature.
         spin_a = jnp.asarray(self.spin_a, dtype=dtype)
         spin_b = jnp.asarray(self.spin_b, dtype=dtype)
 
@@ -612,6 +650,7 @@ class PBackflow(Model):
 
         sign, logabs = math.signed_logsumexp(det_sign, term_log, axis=-1)
 
+        # Apply particle-hole phase.
         if use_hole:
             exponent = (
                 jnp.sum(mask.astype(jnp.int32) * sorb[None, :], axis=-1)

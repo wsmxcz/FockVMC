@@ -12,14 +12,10 @@ int main() {
 
     check_diag(ham, basis);
     check_action(ham, basis);
-    check_conn(ham, basis, 0.08, AssembleMode::unique);
-    check_conn(ham, basis, 0.08, AssembleMode::flat);
-    check_sample(ham, basis, 0.18, 0.03, AssembleMode::unique);
-    check_sample(ham, basis, 0.18, 0.03, AssembleMode::flat);
-    check_local(ham, basis, 0.18, 0.03, 0, AssembleMode::unique);
-    check_local(ham, basis, 0.18, 0.03, 5, AssembleMode::unique);
-    check_local(ham, basis, 0.18, 0.03, 0, AssembleMode::flat);
-    check_local(ham, basis, 0.18, 0.03, 5, AssembleMode::flat);
+    check_conn(ham, basis, 0.08);
+    check_sample(ham, basis, 0.18, 0.03);
+    check_local(ham, basis, 0.18, 0.03, 0);
+    check_local(ham, basis, 0.18, 0.03, 5);
     check_project(ham, basis, 0.04);
     check_sample_project(ham, basis);
 

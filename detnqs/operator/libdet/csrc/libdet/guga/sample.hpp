@@ -37,55 +37,6 @@ struct Item {
     std::vector<double> h;
 };
 
-struct Bin {
-    std::vector<i32> slot;
-    std::vector<u64> words;
-    std::vector<i32> bra;
-};
-
-struct Part {
-    explicit Part(std::size_t n) : bin(n) {}
-    std::vector<Bin> bin;
-};
-
-struct Shard {
-    Shard(u32 nw, PathBatchView ks) : nword(nw), kets(ks) {}
-
-    u32 nword = 0;
-    PathBatchView kets{};
-    std::vector<u64> words;
-    ankerl::unordered_dense::map<u64, std::vector<i32>> map;
-
-    [[nodiscard]] std::size_t size() const noexcept {
-        return words.size() / path_size(nword);
-    }
-
-    void add_ket(i32 iket) {
-        map[path_fingerprint(kets[static_cast<std::size_t>(iket)])].push_back(iket);
-    }
-
-    [[nodiscard]] bool same(i32 code, PathRef path) const noexcept {
-        if (code >= 0) {
-            return path_equal(kets[static_cast<std::size_t>(code)], path);
-        }
-        const std::size_t idx = static_cast<std::size_t>(-1 - code);
-        return path_equal(path_at(words, nword, idx), path);
-    }
-
-    [[nodiscard]] i32 find_add(PathRef path) {
-        const u64 fingerprint = path_fingerprint(path);
-        auto& hits = map[fingerprint];
-        for (i32 code : hits) {
-            if (same(code, path)) return code;
-        }
-
-        const i32 code = -1 - to_i32(size());
-        append_path(words, path);
-        hits.push_back(code);
-        return code;
-    }
-};
-
 inline void copy_path_to(std::vector<u64>& words, std::size_t ipath, PathRef path) {
     const std::size_t stride = path_size(path.nword());
     u64* dst = words.data() + ipath * stride;
@@ -98,17 +49,10 @@ inline void copy_path_to(std::vector<u64>& words, std::size_t ipath, PathRef pat
     std::span<const Item> items,
     std::span<const double> diag,
     std::span<const double> degree,
-    std::size_t n_streams,
-    ::libdet::AssembleMode mode
+    std::size_t n_streams
 ) {
     const u32 nword = kets.nword;
     const std::size_t n_kets = kets.n_paths;
-    if (items.size() != n_streams * n_kets) {
-        throw std::invalid_argument("assemble_conn: item shape mismatch");
-    }
-    if (diag.size() != n_kets || degree.size() != n_kets) {
-        throw std::invalid_argument("assemble_conn: meta shape mismatch");
-    }
 
     ::libdet::Conns out;
     out.nword = nword;
@@ -124,113 +68,20 @@ inline void copy_path_to(std::vector<u64>& words, std::size_t ipath, PathRef pat
         n_term += items[row].h.size();
     }
     out.ptr[items.size()] = to_i32(n_term);
-    out.idx.resize(n_term);
     out.h.resize(n_term);
 
-    if (mode == ::libdet::AssembleMode::flat) {
-        const std::size_t stride = path_size(nword);
-        copy_paths(out.bra, kets);
-        out.bra.resize((n_kets + n_term) * stride);
+    const std::size_t stride = path_size(nword);
+    copy_paths(out.bra, kets);
+    out.bra.resize((n_kets + n_term) * stride);
 
 #pragma omp parallel for schedule(guided)
-        for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
-            const std::size_t row = static_cast<std::size_t>(rr);
-            const Item& item = items[row];
-            for (std::size_t k = 0; k < item.h.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
-                const std::size_t ibra = n_kets + slot;
-                copy_path_to(out.bra, ibra, path_at(item.words, nword, k));
-                out.idx[slot] = to_i32(ibra);
-                out.h[slot] = item.h[k];
-            }
-        }
-        return out;
-    }
-
-    const int nthread = std::max(1, omp_get_max_threads());
-    const std::size_t n_shard = ceil_pow2(2u * static_cast<std::size_t>(nthread));
-    const std::size_t mask = n_shard - 1u;
-
-    std::vector<Part> parts;
-    parts.reserve(static_cast<std::size_t>(nthread));
-    for (int t = 0; t < nthread; ++t) parts.emplace_back(n_shard);
-
-#pragma omp parallel
-    {
-        const int tid = omp_get_thread_num();
-        Part& part = parts[static_cast<std::size_t>(tid)];
-
-#pragma omp for schedule(guided)
-        for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
-            const std::size_t row = static_cast<std::size_t>(rr);
-            const Item& item = items[row];
-            for (std::size_t k = 0; k < item.h.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
-                const PathRef bra = path_at(item.words, nword, k);
-                Bin& bin = part.bin[path_fingerprint(bra) & mask];
-                bin.slot.push_back(to_i32(slot));
-                append_path(bin.words, bra);
-                out.h[slot] = item.h[k];
-            }
-        }
-    }
-
-    std::vector<std::vector<i32>> ket_bin(n_shard);
-    for (std::size_t iket = 0; iket < n_kets; ++iket) {
-        ket_bin[path_fingerprint(kets[iket]) & mask].push_back(to_i32(iket));
-    }
-
-    std::vector<Shard> shard;
-    shard.reserve(n_shard);
-    for (std::size_t s = 0; s < n_shard; ++s) shard.emplace_back(nword, kets);
-
-#pragma omp parallel for schedule(static)
-    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
-        const std::size_t s = static_cast<std::size_t>(ss);
-        Shard& unique = shard[s];
-        std::size_t n_route = ket_bin[s].size();
-        for (const Part& part : parts) n_route += part.bin[s].slot.size();
-        unique.map.reserve(n_route);
-        unique.words.reserve(n_route * path_size(nword));
-
-        for (i32 iket : ket_bin[s]) unique.add_ket(iket);
-
-        for (Part& part : parts) {
-            Bin& bin = part.bin[s];
-            const std::size_t n = bin.slot.size();
-            bin.bra.resize(n);
-            for (std::size_t k = 0; k < n; ++k) {
-                bin.bra[k] = unique.find_add(path_at(bin.words, nword, k));
-            }
-        }
-    }
-
-    std::vector<std::size_t> start(n_shard + 1u, 0u);
-    start[0] = n_kets;
-    for (std::size_t s = 0; s < n_shard; ++s) start[s + 1u] = start[s] + shard[s].size();
-
-    copy_paths(out.bra, kets);
-    out.bra.resize(start.back() * path_size(nword));
-
-#pragma omp parallel for schedule(static)
-    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
-        const std::size_t s = static_cast<std::size_t>(ss);
-        const std::size_t stride = path_size(nword);
-        std::copy(
-            shard[s].words.begin(),
-            shard[s].words.end(),
-            out.bra.begin() + static_cast<std::ptrdiff_t>(start[s] * stride)
-        );
-
-        for (const Part& part : parts) {
-            const Bin& bin = part.bin[s];
-            for (std::size_t k = 0; k < bin.slot.size(); ++k) {
-                const i32 code = bin.bra[k];
-                const i32 ibra = code >= 0
-                    ? code
-                    : to_i32(start[s] + static_cast<std::size_t>(-1 - code));
-                out.idx[static_cast<std::size_t>(bin.slot[k])] = ibra;
-            }
+    for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
+        const std::size_t row = static_cast<std::size_t>(rr);
+        const Item& item = items[row];
+        for (std::size_t k = 0; k < item.h.size(); ++k) {
+            const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
+            copy_path_to(out.bra, n_kets + slot, path_at(item.words, nword, k));
+            out.h[slot] = item.h[k];
         }
     }
 
@@ -245,8 +96,7 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
     std::size_t n_streams,
     double eps1,
     double eps2,
-    u64 seed,
-    ::libdet::AssembleMode mode
+    u64 seed
 ) const {
     check_paths(kets, "sample_conn(kets)");
     check_sample_eps(eps1, eps2);
@@ -393,8 +243,7 @@ inline ::libdet::Conns Hamiltonian::sample_conn(
         items,
         ket_diag,
         ket_degree,
-        n_streams,
-        mode
+        n_streams
     );
 }
 
@@ -403,8 +252,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     double eps1,
     double eps2,
     std::span<const i64> counts,
-    u64 seed,
-    ::libdet::AssembleMode mode
+    u64 seed
 ) const {
     check_paths(kets, "local_conn(kets)");
     check_sample_eps(eps1, eps2);
@@ -549,61 +397,6 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         }
     }
 
-
-    struct Bin {
-        std::vector<i32> slot;
-        std::vector<u64> words;
-        std::vector<i32> bra;
-    };
-
-    struct Part {
-        explicit Part(std::size_t n) : bin(n) {}
-        std::vector<Bin> bin;
-    };
-
-    struct Shard {
-        Shard(u32 nw, PathBatchView ks) : nword(nw), kets(ks) {}
-
-        u32 nword = 0;
-        PathBatchView kets{};
-        std::vector<u64> words;
-        ankerl::unordered_dense::map<u64, std::vector<i32>> map;
-
-        [[nodiscard]] std::size_t size() const noexcept {
-            return words.size() / path_size(nword);
-        }
-
-        void add_ket(i32 iket) {
-            map[path_fingerprint(kets[static_cast<std::size_t>(iket)])].push_back(iket);
-        }
-
-        [[nodiscard]] bool same(i32 code, PathRef path) const noexcept {
-            if (code >= 0) {
-                return path_equal(kets[static_cast<std::size_t>(code)], path);
-            }
-            const std::size_t idx = static_cast<std::size_t>(-1 - code);
-            return path_equal(path_at(words, nword, idx), path);
-        }
-
-        [[nodiscard]] i32 find_add(PathRef path) {
-            const u64 fingerprint = path_fingerprint(path);
-            auto& hits = map[fingerprint];
-            for (i32 code : hits) {
-                if (same(code, path)) return code;
-            }
-
-            const i32 code = -1 - to_i32(size());
-            append_path(words, path);
-            hits.push_back(code);
-            return code;
-        }
-    };
-
-
-    const int nthread = std::max(1, omp_get_max_threads());
-    const std::size_t n_shard = ceil_pow2(2u * static_cast<std::size_t>(nthread));
-    const std::size_t mask = n_shard - 1u;
-
     ::libdet::LocalConn out;
     out.nword = sector_.nword;
     out.n_kets = kets.n_paths;
@@ -628,157 +421,38 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     out.strong_ptr[kets.n_paths] = to_i32(n_strong);
     out.weak_ptr[kets.n_paths] = to_i32(n_weak);
 
-    out.strong_bra.resize(n_strong);
     out.strong_h.resize(n_strong);
-    out.weak_bra.resize(n_weak);
     out.weak_h.resize(n_weak);
     out.weak_count.resize(n_weak);
 
-    if (mode == ::libdet::AssembleMode::flat) {
-        const std::size_t stride = path_size(sector_.nword);
-        copy_paths(out.bra, kets);
-        out.bra.resize((kets.n_paths + n_strong + n_weak) * stride);
+    const std::size_t stride = path_size(sector_.nword);
+    copy_paths(out.bra, kets);
+    out.bra.resize((kets.n_paths + n_strong + n_weak) * stride);
 
 #pragma omp parallel for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
-            const std::size_t iket = static_cast<std::size_t>(ii);
-            const Item& item = items[iket];
+    for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
+        const std::size_t iket = static_cast<std::size_t>(ii);
+        const Item& item = items[iket];
 
-            for (std::size_t k = 0; k < item.strong_h.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.strong_ptr[iket]) + k;
-                const std::size_t ibra = kets.n_paths + slot;
-                const PathRef bra = path_at(item.strong_words, sector_.nword, k);
-                u64* dst = out.bra.data() + ibra * stride;
-                std::copy(bra.up().begin(), bra.up().end(), dst);
-                std::copy(
-                    bra.down().begin(),
-                    bra.down().end(),
-                    dst + static_cast<std::size_t>(sector_.nword)
-                );
-                out.strong_bra[slot] = to_i32(ibra);
-                out.strong_h[slot] = item.strong_h[k];
-            }
-
-            for (std::size_t k = 0; k < item.weak_h.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.weak_ptr[iket]) + k;
-                const std::size_t ibra = kets.n_paths + n_strong + slot;
-                const PathRef bra = path_at(item.weak_words, sector_.nword, k);
-                u64* dst = out.bra.data() + ibra * stride;
-                std::copy(bra.up().begin(), bra.up().end(), dst);
-                std::copy(
-                    bra.down().begin(),
-                    bra.down().end(),
-                    dst + static_cast<std::size_t>(sector_.nword)
-                );
-                out.weak_bra[slot] = to_i32(ibra);
-                out.weak_h[slot] = item.weak_h[k];
-                out.weak_count[slot] = item.weak_count[k];
-            }
+        for (std::size_t k = 0; k < item.strong_h.size(); ++k) {
+            const std::size_t slot = static_cast<std::size_t>(out.strong_ptr[iket]) + k;
+            detail::copy_path_to(
+                out.bra,
+                kets.n_paths + slot,
+                path_at(item.strong_words, sector_.nword, k)
+            );
+            out.strong_h[slot] = item.strong_h[k];
         }
 
-        return out;
-    }
-
-    std::vector<Part> parts;
-    parts.reserve(static_cast<std::size_t>(nthread));
-    for (int t = 0; t < nthread; ++t) parts.emplace_back(n_shard);
-
-#pragma omp parallel
-    {
-        const int tid = omp_get_thread_num();
-        auto& part = parts[static_cast<std::size_t>(tid)];
-
-#pragma omp for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(kets.n_paths); ++ii) {
-            const std::size_t iket = static_cast<std::size_t>(ii);
-            const Item& item = items[iket];
-
-            for (std::size_t k = 0; k < item.strong_h.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.strong_ptr[iket]) + k;
-                const PathRef bra = path_at(item.strong_words, sector_.nword, k);
-                Bin& bin = part.bin[path_fingerprint(bra) & mask];
-                bin.slot.push_back(to_i32(slot));
-                append_path(bin.words, bra);
-                out.strong_h[slot] = item.strong_h[k];
-            }
-
-            for (std::size_t k = 0; k < item.weak_h.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.weak_ptr[iket]) + k;
-                const PathRef bra = path_at(item.weak_words, sector_.nword, k);
-                Bin& bin = part.bin[path_fingerprint(bra) & mask];
-                bin.slot.push_back(-1 - to_i32(slot));
-                append_path(bin.words, bra);
-                out.weak_h[slot] = item.weak_h[k];
-                out.weak_count[slot] = item.weak_count[k];
-            }
-        }
-    }
-
-    std::vector<std::vector<i32>> ket_bin(n_shard);
-    for (std::size_t iket = 0; iket < kets.n_paths; ++iket) {
-        ket_bin[path_fingerprint(kets[iket]) & mask].push_back(to_i32(iket));
-    }
-
-    std::vector<Shard> shard;
-    shard.reserve(n_shard);
-    for (std::size_t s = 0; s < n_shard; ++s) {
-        shard.emplace_back(sector_.nword, kets);
-    }
-
-#pragma omp parallel for schedule(static)
-    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
-        const std::size_t s = static_cast<std::size_t>(ss);
-        Shard& unique = shard[s];
-        std::size_t n_route = ket_bin[s].size();
-        for (const Part& part : parts) n_route += part.bin[s].slot.size();
-        unique.map.reserve(n_route);
-        unique.words.reserve(n_route * path_size(sector_.nword));
-
-        for (i32 iket : ket_bin[s]) unique.add_ket(iket);
-
-        for (Part& part : parts) {
-            Bin& bin = part.bin[s];
-            const std::size_t n = bin.slot.size();
-            bin.bra.resize(n);
-            for (std::size_t k = 0; k < n; ++k) {
-                bin.bra[k] = unique.find_add(path_at(bin.words, sector_.nword, k));
-            }
-        }
-    }
-
-    std::vector<std::size_t> base(n_shard + 1u, 0u);
-    base[0] = kets.n_paths;
-    for (std::size_t s = 0; s < n_shard; ++s) {
-        base[s + 1u] = base[s] + shard[s].size();
-    }
-
-    copy_paths(out.bra, kets);
-    out.bra.resize(base.back() * path_size(sector_.nword));
-
-#pragma omp parallel for schedule(static)
-    for (i64 ss = 0; ss < static_cast<i64>(n_shard); ++ss) {
-        const std::size_t s = static_cast<std::size_t>(ss);
-        const std::size_t stride = path_size(sector_.nword);
-        std::copy(
-            shard[s].words.begin(),
-            shard[s].words.end(),
-            out.bra.begin() + static_cast<std::ptrdiff_t>(base[s] * stride)
-        );
-
-        for (const Part& part : parts) {
-            const Bin& bin = part.bin[s];
-            for (std::size_t k = 0; k < bin.slot.size(); ++k) {
-                const i32 code = bin.bra[k];
-                const i32 ibra = code >= 0
-                    ? code
-                    : to_i32(base[s] + static_cast<std::size_t>(-1 - code));
-                const i32 slot = bin.slot[k];
-                if (slot >= 0) {
-                    out.strong_bra[static_cast<std::size_t>(slot)] = ibra;
-                } else {
-                    out.weak_bra[static_cast<std::size_t>(-1 - slot)] = ibra;
-                }
-            }
+        for (std::size_t k = 0; k < item.weak_h.size(); ++k) {
+            const std::size_t slot = static_cast<std::size_t>(out.weak_ptr[iket]) + k;
+            detail::copy_path_to(
+                out.bra,
+                kets.n_paths + n_strong + slot,
+                path_at(item.weak_words, sector_.nword, k)
+            );
+            out.weak_h[slot] = item.weak_h[k];
+            out.weak_count[slot] = item.weak_count[k];
         }
     }
 

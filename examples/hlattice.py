@@ -160,7 +160,6 @@ def main() -> None:
         eps1=1.0e-3,
         eps2=1.0e-6,
         eloc_sample=1024,
-        assemble_mode="unique",
     )
 
     scale = optax.linear_schedule(

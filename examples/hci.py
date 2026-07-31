@@ -302,7 +302,7 @@ def main() -> None:
     )
 
     # Build Hamiltonian.
-    sector = hilbert.SpinSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
+    sector = hilbert.DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
     H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
     # Run variational stage.

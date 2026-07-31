@@ -1,8 +1,8 @@
 # libdet design notes
 
 `libdet` is the Fock-space Hamiltonian backend used by `detnqs.operator`.
-It provides compact C++ primitives for determinant and spin-adapted CSF
-calculations, with nanobind bindings for Python.
+It provides compact C++ primitives for determinant calculations, with nanobind
+bindings for Python.
 
 The implementation follows one data path:
 
@@ -10,17 +10,11 @@ The implementation follows one data path:
 bit/hash -> integral -> element -> screen table -> cache -> action -> binding
 ```
 
-Two backends share the same public semantics:
+The backend stores Slater determinants in alpha/beta occupation form:
 
 ```text
-rhf/   Slater determinants in alpha/beta occupation form
-guga/  Shavitt paths for spin-adapted CSFs
+rhf/   determinant Hamiltonian kernels and actions
 ```
-
-The outer interface is uniform.
-The inner algorithms are backend-specific.
-RHF is excitation based.
-GUGA is occupation-move and Shavitt-segment based.
 
 ---
 
@@ -33,20 +27,11 @@ state.shape = (2, nword)
 batch.shape = (N, 2, nword)
 ```
 
-For RHF:
+The two blocks are:
 
 ```text
 block 0 = alpha occupation bits
 block 1 = beta occupation bits
-```
-
-For GUGA:
-
-```text
-block 0 = Shavitt up-step bits
-block 1 = Shavitt down-step bits
-step = 2 * up + down
-0 = empty, 1 = down, 2 = up, 3 = doubly occupied
 ```
 
 All Hamiltonian matrix elements use Dirac order:
@@ -55,8 +40,7 @@ $$
 H_{bk}=\langle b|H|k\rangle .
 $$
 
-All excitations, occupation moves, and path differences are oriented from
-`ket` to `bra`.
+All excitations are oriented from `ket` to `bra`.
 
 The integral convention follows PySCF:
 
@@ -86,31 +70,6 @@ A ket-local scratch object stores the diagonal value and single-excitation
 Fock-like tables, so repeated single elements are `O(1)` lookups after loading
 the ket.
 
-GUGA element kernels evaluate the spin-free Hamiltonian directly between
-Shavitt-path CSFs. The public semantics are the same as in the RHF backend,
-
-$$
-H_{bk}=\langle b|H|k\rangle ,
-$$
-
-but the internal representation and contraction path are spin-adapted.
-
-The implementation separates three concerns:
-
-```text
-path analysis      ket-to-bra path difference and active orbital span
-segment algebra    reusable one- and two-body Shavitt segment factors
-ket-local work     occupation data and dynamic-programming workspace
-```
-
-Low-degree Hamiltonian connections use specialized kernels. Degree-zero terms,
-single occupation moves, double occupation moves, and same-occupation open-shell
-couplings are handled by direct paths. General segment contractions are kept for
-checked or less frequent cases.
-
-This keeps the outer interface determinant-like while allowing the GUGA backend
-to use spin-adapted path algebra internally.
-
 ---
 
 ## 2. Screen tables and caches
@@ -127,31 +86,13 @@ Any requested cutoff satisfying `eps >= base_eps` is served by a prefix or slice
 of the same table. Requests with `eps <= 0` do not build a `ScreenTable`;
 those paths use direct enumeration.
 
-RHF `ScreenTable` stores exact double-excitation candidates:
+`ScreenTable` stores exact double-excitation candidates:
 
 ```text
 ScreenPair { a, b, h }
 same_spin(i, j, eps)
 mixed_spin(ia, ib, eps)
 ```
-
-GUGA `ScreenTable` stores safe occupation-move bounds:
-
-```text
-ScreenMove { move, bound }
-singles(eps)
-doubles(eps)
-same_bound(ket)
-bound(ket, move)
-```
-
-For GUGA,
-
-$$
-B(k,m)\ge |H_{bk}|,
-$$
-
-so exact element evaluation and filtering remain mandatory.
 
 `ConnCache` stores exact sorted connections for one ket and one positive cutoff.
 It is a fixed-capacity 4-way set-associative cache with set-local recency and a
@@ -308,8 +249,8 @@ Connection assembly separates:
 ket work -> pointer prefix -> contiguous flat output
 ```
 
-External projection uses sharded exact accumulation. RHF and GUGA keep
-specialized kernels but expose the same flat connection-batch semantics.
+External projection uses sharded exact accumulation with the same flat
+connection-batch semantics as the other action paths.
 
 The design prioritizes:
 
@@ -361,5 +302,5 @@ integral.hpp  integral storage and projected tables
 hamiltonian.hpp public facade
 ```
 
-Backend-specific logic stays in `rhf/` and `guga/`.
+Determinant-specific logic stays in `rhf/`.
 Shared abstractions are kept minimal; physical kernels remain specialized.

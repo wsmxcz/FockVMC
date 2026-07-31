@@ -104,57 +104,6 @@ inline Basis det_basis(int norb, int na, int nb, u32 nword) {
     return basis;
 }
 
-inline void put_path(Basis& basis, std::span<const int> step) {
-    std::vector<u64> word(libdet::word_pair_size(basis.nword), 0u);
-    for (int p = 0; p < static_cast<int>(step.size()); ++p) {
-        const std::size_t w = static_cast<std::size_t>(p >> 6);
-        const u64 bit = u64{1} << static_cast<unsigned>(p & 63);
-        if (step[static_cast<std::size_t>(p)] == 2 || step[static_cast<std::size_t>(p)] == 3) {
-            word[w] |= bit;
-        }
-        if (step[static_cast<std::size_t>(p)] == 1 || step[static_cast<std::size_t>(p)] == 3) {
-            word[static_cast<std::size_t>(basis.nword) + w] |= bit;
-        }
-    }
-    basis.words.insert(basis.words.end(), word.begin(), word.end());
-}
-
-inline void path_rec(
-    Basis& basis,
-    std::vector<int>& step,
-    int p,
-    int nelec,
-    int spin,
-    int target_e,
-    int target_s
-) {
-    const int norb = static_cast<int>(step.size());
-    if (p == norb) {
-        if (nelec == target_e && spin == target_s) put_path(basis, step);
-        return;
-    }
-
-    const int rem = norb - p - 1;
-    for (int st : {0, 1, 2, 3}) {
-        const int occ = st == 3 ? 2 : (st == 0 ? 0 : 1);
-        const int ds = st == 2 ? 1 : (st == 1 ? -1 : 0);
-        const int e1 = nelec + occ;
-        const int s1 = spin + ds;
-        if (s1 < 0) continue;
-        if (e1 > target_e) continue;
-        if (e1 + 2 * rem < target_e) continue;
-        step[static_cast<std::size_t>(p)] = st;
-        path_rec(basis, step, p + 1, e1, s1, target_e, target_s);
-    }
-}
-
-inline Basis spin_basis(int norb, int na, int nb, u32 nword) {
-    Basis basis{nword, {}};
-    std::vector<int> step(static_cast<std::size_t>(norb), 0);
-    path_rec(basis, step, 0, 0, 0, na + nb, na - nb);
-    return basis;
-}
-
 inline bool same_state(StateRef a, StateRef b) noexcept {
     if (a.nword() != b.nword()) return false;
     const std::size_t n = libdet::word_pair_size(a.nword());

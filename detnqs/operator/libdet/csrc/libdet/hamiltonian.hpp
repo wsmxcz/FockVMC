@@ -2,17 +2,15 @@
 
 #include <cstddef>
 #include <span>
-#include <stdexcept>
-#include <type_traits>
 #include <utility>
-#include <variant>
+#include <vector>
 
 #include <libdet/bit.hpp>
 #include <libdet/results.hpp>
 
 namespace libdet {
 
-// Public packed-word view used only at the facade boundary.
+// Public packed-word view used at the facade boundary.
 class StateRef {
 public:
     constexpr StateRef() noexcept = default;
@@ -39,7 +37,6 @@ struct StateBatchView {
 
 } // namespace libdet
 
-#include <libdet/guga/hamiltonian.hpp>
 #include <libdet/rhf/hamiltonian.hpp>
 
 namespace libdet {
@@ -58,32 +55,13 @@ namespace detail {
     return rhf::DetBatchView{states.data, states.n_states, states.nword};
 }
 
-[[nodiscard]] inline guga::PathRef as_path(StateRef state) noexcept {
-    return guga::PathRef(
-        state.data(),
-        state.data() + static_cast<std::size_t>(state.nword()),
-        state.nword()
-    );
-}
-
-[[nodiscard]] inline guga::PathBatchView as_paths(StateBatchView states) noexcept {
-    return guga::PathBatchView{states.data, states.n_states, states.nword};
-}
-
 } // namespace detail
 
 class Hamiltonian {
 private:
-    using Backend = std::variant<rhf::Hamiltonian, guga::Hamiltonian>;
+    explicit Hamiltonian(rhf::Hamiltonian backend) : backend_(std::move(backend)) {}
 
-    explicit Hamiltonian(Backend backend) : backend_(std::move(backend)) {}
-
-    template <class F>
-    decltype(auto) visit(F&& f) const {
-        return std::visit(std::forward<F>(f), backend_);
-    }
-
-    Backend backend_;
+    rhf::Hamiltonian backend_;
 
 public:
     [[nodiscard]] static Hamiltonian det(
@@ -95,54 +73,20 @@ public:
         return Hamiltonian(rhf::Hamiltonian::make(h1, norb, eri, ecore));
     }
 
-    [[nodiscard]] static Hamiltonian spin(
-        std::span<const double> h1,
-        int norb,
-        std::span<const double> eri,
-        int n_alpha,
-        int n_beta,
-        double ecore = 0.0
-    ) {
-        return Hamiltonian(
-            guga::Hamiltonian::make(
-                h1,
-                norb,
-                eri,
-                n_alpha,
-                n_beta,
-                ecore
-            )
-        );
-    }
-
     [[nodiscard]] int norb() const {
-        return visit([](const auto& ham) { return ham.norb(); });
+        return backend_.norb();
     }
 
     [[nodiscard]] u32 nword() const {
-        return visit([](const auto& ham) { return ham.nword(); });
+        return backend_.nword();
     }
 
     [[nodiscard]] double hij(StateRef bra, StateRef ket) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.hij(detail::as_det(bra), detail::as_det(ket));
-            } else {
-                return ham.hij(detail::as_path(bra), detail::as_path(ket));
-            }
-        });
+        return backend_.hij(detail::as_det(bra), detail::as_det(ket));
     }
 
     [[nodiscard]] std::vector<double> diags(StateBatchView states) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.diags(detail::as_dets(states));
-            } else {
-                return ham.diags(detail::as_paths(states));
-            }
-        });
+        return backend_.diags(detail::as_dets(states));
     }
 
     [[nodiscard]] std::vector<u64> expand(
@@ -151,16 +95,13 @@ public:
         std::span<const double> scale = {},
         const StateBatchView* exclude = nullptr
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                const auto ek = exclude ? detail::as_dets(*exclude) : rhf::DetBatchView{};
-                return ham.expand(detail::as_dets(kets), eps, scale, exclude ? &ek : nullptr);
-            } else {
-                const auto ep = exclude ? detail::as_paths(*exclude) : guga::PathBatchView{};
-                return ham.expand(detail::as_paths(kets), eps, scale, exclude ? &ep : nullptr);
-            }
-        });
+        const auto ex = exclude ? detail::as_dets(*exclude) : rhf::DetBatchView{};
+        return backend_.expand(
+            detail::as_dets(kets),
+            eps,
+            scale,
+            exclude ? &ex : nullptr
+        );
     }
 
     [[nodiscard]] Projection project(
@@ -169,14 +110,12 @@ public:
         std::span<const double> scale,
         double eps = 0.0
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.project(detail::as_dets(bras), detail::as_dets(kets), scale, eps);
-            } else {
-                return ham.project(detail::as_paths(bras), detail::as_paths(kets), scale, eps);
-            }
-        });
+        return backend_.project(
+            detail::as_dets(bras),
+            detail::as_dets(kets),
+            scale,
+            eps
+        );
     }
 
     [[nodiscard]] Projection project(
@@ -185,30 +124,20 @@ public:
         double eps,
         const StateBatchView* exclude
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                const auto ex = exclude ? detail::as_dets(*exclude) : rhf::DetBatchView{};
-                return ham.project(detail::as_dets(kets), scale, eps, exclude ? &ex : nullptr);
-            } else {
-                const auto ex = exclude ? detail::as_paths(*exclude) : guga::PathBatchView{};
-                return ham.project(detail::as_paths(kets), scale, eps, exclude ? &ex : nullptr);
-            }
-        });
+        const auto ex = exclude ? detail::as_dets(*exclude) : rhf::DetBatchView{};
+        return backend_.project(
+            detail::as_dets(kets),
+            scale,
+            eps,
+            exclude ? &ex : nullptr
+        );
     }
 
     [[nodiscard]] Conns conn(
         StateBatchView kets,
         double eps = 0.0
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.conn(detail::as_dets(kets), eps);
-            } else {
-                return ham.conn(detail::as_paths(kets), eps);
-            }
-        });
+        return backend_.conn(detail::as_dets(kets), eps);
     }
 
     [[nodiscard]] Conns sample_conn(
@@ -219,16 +148,15 @@ public:
         double eps2,
         u64 seed = 0
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.sample_conn(detail::as_dets(kets), counts, n_streams, eps1, eps2, seed);
-            } else {
-                return ham.sample_conn(detail::as_paths(kets), counts, n_streams, eps1, eps2, seed);
-            }
-        });
+        return backend_.sample_conn(
+            detail::as_dets(kets),
+            counts,
+            n_streams,
+            eps1,
+            eps2,
+            seed
+        );
     }
-
 
     [[nodiscard]] LocalConn local_conn(
         StateBatchView kets,
@@ -237,14 +165,13 @@ public:
         std::span<const i64> counts,
         u64 seed = 0
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.local_conn(detail::as_dets(kets), eps1, eps2, counts, seed);
-            } else {
-                return ham.local_conn(detail::as_paths(kets), eps1, eps2, counts, seed);
-            }
-        });
+        return backend_.local_conn(
+            detail::as_dets(kets),
+            eps1,
+            eps2,
+            counts,
+            seed
+        );
     }
 
     [[nodiscard]] Projections sample_project(
@@ -257,27 +184,21 @@ public:
         const StateBatchView* exclude = nullptr,
         u64 seed = 0
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                const auto ex = exclude ? detail::as_dets(*exclude) : rhf::DetBatchView{};
-                return ham.sample_project(detail::as_dets(kets), scale, counts, n_streams, eps1, eps2, exclude ? &ex : nullptr, seed);
-            } else {
-                const auto ex = exclude ? detail::as_paths(*exclude) : guga::PathBatchView{};
-                return ham.sample_project(detail::as_paths(kets), scale, counts, n_streams, eps1, eps2, exclude ? &ex : nullptr, seed);
-            }
-        });
+        const auto ex = exclude ? detail::as_dets(*exclude) : rhf::DetBatchView{};
+        return backend_.sample_project(
+            detail::as_dets(kets),
+            scale,
+            counts,
+            n_streams,
+            eps1,
+            eps2,
+            exclude ? &ex : nullptr,
+            seed
+        );
     }
 
     [[nodiscard]] Matrix matrix(StateBatchView bras, StateBatchView kets) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.matrix(detail::as_dets(bras), detail::as_dets(kets));
-            } else {
-                return ham.matrix(detail::as_paths(bras), detail::as_paths(kets));
-            }
-        });
+        return backend_.matrix(detail::as_dets(bras), detail::as_dets(kets));
     }
 
     [[nodiscard]] std::vector<double> matvec(
@@ -285,14 +206,11 @@ public:
         StateBatchView kets,
         std::span<const double> x
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.matvec(detail::as_dets(bras), detail::as_dets(kets), x);
-            } else {
-                return ham.matvec(detail::as_paths(bras), detail::as_paths(kets), x);
-            }
-        });
+        return backend_.matvec(
+            detail::as_dets(bras),
+            detail::as_dets(kets),
+            x
+        );
     }
 
     [[nodiscard]] std::vector<double> matmat(
@@ -301,14 +219,12 @@ public:
         std::span<const double> x,
         std::size_t nrhs
     ) const {
-        return visit([&](const auto& ham) {
-            using H = std::decay_t<decltype(ham)>;
-            if constexpr (std::is_same_v<H, rhf::Hamiltonian>) {
-                return ham.matmat(detail::as_dets(bras), detail::as_dets(kets), x, nrhs);
-            } else {
-                return ham.matmat(detail::as_paths(bras), detail::as_paths(kets), x, nrhs);
-            }
-        });
+        return backend_.matmat(
+            detail::as_dets(bras),
+            detail::as_dets(kets),
+            x,
+            nrhs
+        );
     }
 };
 

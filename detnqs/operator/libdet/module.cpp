@@ -243,16 +243,6 @@ NB_MODULE(libdet, m) {
             });
         }, "h1"_a.noconvert(), "eri"_a.noconvert(), "ecore"_a = 0.0)
 
-        .def_static("spin", [](const F64Mat& h1, const F64Vec& eri, int n_alpha, int n_beta, double ecore) {
-            if (h1.shape(0) != h1.shape(1)) throw std::invalid_argument("h1 must be square");
-            const int norb = static_cast<int>(h1.shape(0));
-            const auto h1v = f64(h1);
-            const auto eriv = f64(eri);
-            return no_gil([&] {
-                return libdet::Hamiltonian::spin(h1v, norb, eriv, n_alpha, n_beta, ecore);
-            });
-        }, "h1"_a.noconvert(), "eri"_a.noconvert(), "n_alpha"_a, "n_beta"_a, "ecore"_a = 0.0)
-
         .def_prop_ro("norb", &libdet::Hamiltonian::norb)
         .def_prop_ro("nword", &libdet::Hamiltonian::nword)
 

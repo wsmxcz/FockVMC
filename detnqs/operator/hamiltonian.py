@@ -8,7 +8,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.sparse import csr_matrix
 from pyscf.tools import fcidump
 
-from ..hilbert import DetSector, Sector, SpinSector
+from ..hilbert import DetSector
 from . import libdet
 
 
@@ -17,7 +17,7 @@ class Hamiltonian:
 
     def __init__(
         self,
-        sector: Sector,
+        sector: DetSector,
         h1: ArrayLike,
         eri: ArrayLike,
         *,
@@ -32,25 +32,17 @@ class Hamiltonian:
         self._h1 = h1
         self._eri = eri
 
-        if isinstance(sector, DetSector):
-            self._raw = libdet.Hamiltonian.det(h1, eri, self._ecore)
-        elif isinstance(sector, SpinSector):
-            self._raw = libdet.Hamiltonian.spin(
-                h1,
-                eri,
-                int(sector.n_alpha),
-                int(sector.n_beta),
-                self._ecore,
-            )
-        else:
+        if not isinstance(sector, DetSector):
             raise TypeError(f"unsupported sector: {type(sector).__name__}")
+
+        self._raw = libdet.Hamiltonian.det(h1, eri, self._ecore)
 
     @classmethod
     def load(
         cls,
         file: str | Path,
         *,
-        sector: type[Sector] = DetSector,
+        sector: type[DetSector] = DetSector,
         spin: int | None = None,
     ) -> Self:
         """Load a standard FCIDUMP Hamiltonian."""

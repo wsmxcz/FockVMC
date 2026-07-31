@@ -8,7 +8,6 @@ current focus on quantum-chemistry Hamiltonians.
 Current strengths:
 
 - Determinant Fock-space sectors.
-- Spin-adapted/GUGA support is experimental, unfinished, and actively evolving.
 - Exact, selected-basis, and Monte Carlo variational states.
 - Backflow/RBM wavefunction models.
 - SR, minSR, and PSR optimizers through Optax.

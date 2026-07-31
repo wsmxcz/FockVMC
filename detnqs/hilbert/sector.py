@@ -12,7 +12,6 @@ class Sector(ABC):
     """Fock-space sector using the PySCF convention.
 
     spin = n_alpha - n_beta.
-    For SpinSector, the highest-weight convention is used: spin = 2S.
     """
 
     norb: int

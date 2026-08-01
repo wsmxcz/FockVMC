@@ -49,7 +49,6 @@ xla_cache/
 
 # Local experiment outputs and generated data
 .benchmarks/
-data/
 documents/
 performance/
 runs/

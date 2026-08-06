@@ -7,8 +7,8 @@ int main() {
     const double ecore = -0.13;
     const auto h1 = make_h1(norb);
     const auto eri = make_eri(norb);
-    const auto ham = Hamiltonian::det(h1, norb, eri, ecore);
-    const auto basis = det_basis(norb, na, nb, ham.nword());
+    const Hamiltonian ham(h1, norb, eri, ecore);
+    const auto basis = det_basis(norb, na, nb);
 
     check_matrix(ham, basis);
     check_conn(ham, basis, 0.10);

@@ -27,7 +27,7 @@ class Hamiltonian:
             raise TypeError(f"unsupported sector: {type(sector).__name__}")
 
         self.sector = sector
-        self._ecore = float(ecore)
+        self.ecore = float(ecore)
 
         h1 = np.ascontiguousarray(h1, dtype=np.float64)
         eri = np.ascontiguousarray(eri, dtype=np.float64).reshape(-1)
@@ -35,10 +35,9 @@ class Hamiltonian:
         if h1.shape != (sector.norb, sector.norb):
             raise ValueError("h1 shape must match sector.norb")
 
-        self._h1 = h1
-        self._eri = eri
+        self.integrals = h1, eri
 
-        self._raw = libdet.Hamiltonian.det(h1, eri, self._ecore)
+        self._raw = libdet.Hamiltonian(h1, eri, self.ecore)
 
     @classmethod
     def load(
@@ -66,37 +65,17 @@ class Hamiltonian:
         """Save a PySCF FCIDUMP Hamiltonian."""
         path = Path(file)
         path.parent.mkdir(parents=True, exist_ok=True)
+        h1, eri = self.integrals
         fcidump.from_integrals(
             str(path),
-            self._h1,
-            self._eri,
+            h1,
+            eri,
             self.sector.norb,
             self.sector.nelec,
             nuc=self.ecore,
             ms=self.sector.spin,
         )
         return path
-
-    @property
-    def norb(self) -> int:
-        return int(self.sector.norb)
-
-    @property
-    def nelec(self) -> int:
-        return int(self.sector.nelec)
-
-    @property
-    def spin(self) -> int:
-        return int(self.sector.spin)
-
-    @property
-    def ecore(self) -> float:
-        return self._ecore
-
-    @property
-    def integrals(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return one- and two-electron integrals in constructor format."""
-        return self._h1, self._eri
 
     def hij(self, bra: ArrayLike, ket: ArrayLike) -> float:
         """Return a single matrix element `H[bra, ket]`."""

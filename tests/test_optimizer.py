@@ -27,7 +27,7 @@ def test_optimizers() -> None:
     )
     hamiltonian = Hamiltonian.load(FCIDUMP)
     state = ExactState.init(
-        model=RBM(norb=hamiltonian.norb, alpha=1),
+        model=RBM(norb=hamiltonian.sector.norb, alpha=1),
         hamiltonian=hamiltonian,
         key=jax.random.key(0),
     )

@@ -406,7 +406,7 @@ inline Projection Hamiltonian::project(
 
     if (start.back() > 0) {
         const DetBatchView bras{out.bra.data(), start.back(), nword_};
-        out.diag = diags(bras);
+        out.diag = diag(bras);
     }
     return out;
 }

@@ -15,8 +15,8 @@ inline void near(double actual, double expected, const char* message) {
     }
 }
 
-inline StateBatchView batch_view(u32 nword, const std::vector<u64>& words) {
-    return StateBatchView{
+inline DetBatchView batch_view(u32 nword, const std::vector<u64>& words) {
+    return DetBatchView{
         words.data(),
         words.size() / libdet::word_pair_size(nword),
         nword
@@ -55,7 +55,7 @@ inline double degree(
 inline void check_matrix(const Hamiltonian& hamiltonian, const Basis& basis) {
     const std::size_t n = basis.size();
     const auto expected = dense(hamiltonian, basis);
-    const auto diagonal = hamiltonian.diags(basis.view());
+    const auto diagonal = hamiltonian.diag(basis.view());
     const auto matrix = hamiltonian.matrix(basis.view(), basis.view());
 
     if (diagonal.size() != n || matrix.indptr.size() != n + 1u) {

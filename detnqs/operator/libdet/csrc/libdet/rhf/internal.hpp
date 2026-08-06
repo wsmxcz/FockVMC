@@ -173,8 +173,8 @@ inline void visit_internal(
     }
 }
 
-inline std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
-    check_dets(dets, "diags");
+inline std::vector<double> Hamiltonian::diag(DetBatchView dets) const {
+    check_dets(dets, "diag");
     std::vector<double> out(dets.n_dets, 0.0);
 
 #pragma omp parallel
@@ -185,7 +185,7 @@ inline std::vector<double> Hamiltonian::diags(DetBatchView dets) const {
         for (i64 ii = 0; ii < static_cast<i64>(dets.n_dets); ++ii) {
             const std::size_t idet = static_cast<std::size_t>(ii);
             fill_occ(dets[idet], ints_.norb(), occ);
-            out[idet] = diag(ints_, occ);
+            out[idet] = ::libdet::rhf::diag(ints_, occ);
         }
     }
 

@@ -9,7 +9,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <libdet/rhf/cache.hpp>
@@ -22,23 +21,15 @@ namespace libdet::rhf {
 class Hamiltonian {
 public:
     Hamiltonian() = delete;
-    Hamiltonian(const Hamiltonian& other);
-    Hamiltonian& operator=(const Hamiltonian& other);
-    Hamiltonian(Hamiltonian&& other) noexcept;
-    Hamiltonian& operator=(Hamiltonian&& other) noexcept;
-
-    [[nodiscard]] static Hamiltonian make(
+    Hamiltonian(
         std::span<const double> h1,
         int norb,
         std::span<const double> eri,
         double ecore = 0.0
     );
 
-    [[nodiscard]] int norb() const noexcept;
-    [[nodiscard]] u32 nword() const noexcept;
-
     [[nodiscard]] double hij(DetRef bra, DetRef ket) const;
-    [[nodiscard]] std::vector<double> diags(DetBatchView dets) const;
+    [[nodiscard]] std::vector<double> diag(DetBatchView dets) const;
 
     [[nodiscard]] std::vector<u64> expand(
         DetBatchView kets,
@@ -110,8 +101,6 @@ public:
     ) const;
 
 private:
-    explicit Hamiltonian(Integral ints);
-
     Integral ints_;
     u32 nword_ = 0;
 
@@ -164,60 +153,14 @@ private:
 
 namespace libdet::rhf {
 
-inline Hamiltonian::Hamiltonian(Integral ints)
-    : ints_(std::move(ints)),
-      nword_(bits::words_for(ints_.norb())),
-      conn_cache_(nword_) {}
-
-inline Hamiltonian::Hamiltonian(const Hamiltonian& other)
-    : ints_(other.ints_),
-      nword_(other.nword_),
-      conn_cache_(other.nword_) {}
-
-inline Hamiltonian& Hamiltonian::operator=(const Hamiltonian& other) {
-    if (this != &other) {
-        ints_ = other.ints_;
-        nword_ = other.nword_;
-        screen_table_.reset();
-        conn_cache_ = ConnCache(nword_);
-        space_cache_ = SpaceCache();
-    }
-    return *this;
-}
-
-inline Hamiltonian::Hamiltonian(Hamiltonian&& other) noexcept
-    : ints_(std::move(other.ints_)),
-      nword_(other.nword_),
-      screen_table_(std::move(other.screen_table_)),
-      conn_cache_(other.nword_) {}
-
-inline Hamiltonian& Hamiltonian::operator=(Hamiltonian&& other) noexcept {
-    if (this != &other) {
-        ints_ = std::move(other.ints_);
-        nword_ = other.nword_;
-        screen_table_ = std::move(other.screen_table_);
-        conn_cache_ = ConnCache(nword_);
-        space_cache_ = SpaceCache();
-    }
-    return *this;
-}
-
-inline Hamiltonian Hamiltonian::make(
+inline Hamiltonian::Hamiltonian(
     std::span<const double> h1,
     int norb,
     std::span<const double> eri,
     double ecore
-) {
-    return Hamiltonian(Integral(norb, h1, eri, ecore));
-}
-
-inline int Hamiltonian::norb() const noexcept {
-    return ints_.norb();
-}
-
-inline u32 Hamiltonian::nword() const noexcept {
-    return nword_;
-}
+) : ints_(norb, h1, eri, ecore),
+    nword_(bits::words_for(norb)),
+    conn_cache_(nword_) {}
 
 inline void Hamiltonian::check_one(DetRef det, const char* where) const {
     if (det.nword() != nword_) {
@@ -305,7 +248,7 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
     DetOcc occ(ints_.norb());
     fill_occ(ket, ints_.norb(), occ);
 
-    if (ex.degree == 0) return diag(ints_, occ);
+    if (ex.degree == 0) return ::libdet::rhf::diag(ints_, occ);
 
     const Excitation& e = ex.excitation;
     switch (e.kind) {

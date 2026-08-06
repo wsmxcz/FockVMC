@@ -12,14 +12,14 @@
 #include <string>
 #include <vector>
 
-#include <libdet/hamiltonian.hpp>
+#include <libdet/rhf/hamiltonian.hpp>
 
-using libdet::Hamiltonian;
 using libdet::i64;
-using libdet::StateBatchView;
-using libdet::StateRef;
 using libdet::u32;
 using libdet::u64;
+using libdet::rhf::DetBatchView;
+using libdet::rhf::DetRef;
+using libdet::rhf::Hamiltonian;
 
 struct Basis {
     u32 nword = 0;
@@ -29,11 +29,11 @@ struct Basis {
         return words.size() / libdet::word_pair_size(nword);
     }
 
-    [[nodiscard]] StateBatchView view() const noexcept {
-        return StateBatchView{words.data(), size(), nword};
+    [[nodiscard]] DetBatchView view() const noexcept {
+        return DetBatchView{words.data(), size(), nword};
     }
 
-    [[nodiscard]] StateRef get(std::size_t i) const noexcept {
+    [[nodiscard]] DetRef get(std::size_t i) const noexcept {
         return view()[i];
     }
 };
@@ -91,7 +91,8 @@ void choose(int n, int k, int first, u64 bits, F&& visit) {
     }
 }
 
-inline Basis det_basis(int norb, int na, int nb, u32 nword) {
+inline Basis det_basis(int norb, int na, int nb) {
+    const u32 nword = libdet::bits::words_for(norb);
     Basis basis{nword, {}};
     choose(norb, na, 0, u64{0}, [&](u64 a) {
         choose(norb, nb, 0, u64{0}, [&](u64 b) {
@@ -104,14 +105,14 @@ inline Basis det_basis(int norb, int na, int nb, u32 nword) {
     return basis;
 }
 
-inline bool same_state(StateRef a, StateRef b) noexcept {
+inline bool same_state(DetRef a, DetRef b) noexcept {
     if (a.nword() != b.nword()) return false;
-    const std::size_t n = libdet::word_pair_size(a.nword());
-    return std::equal(a.data(), a.data() + n, b.data());
+    return std::equal(a.alpha().begin(), a.alpha().end(), b.alpha().begin())
+        && std::equal(a.beta().begin(), a.beta().end(), b.beta().begin());
 }
 
-inline int find_state(StateBatchView x, StateRef y) {
-    for (std::size_t i = 0; i < x.n_states; ++i) {
+inline int find_state(DetBatchView x, DetRef y) {
+    for (std::size_t i = 0; i < x.n_dets; ++i) {
         if (same_state(x[i], y)) return static_cast<int>(i);
     }
     return -1;

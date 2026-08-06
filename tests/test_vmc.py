@@ -76,7 +76,7 @@ def test_checkpoint() -> None:
         bucket_min=64,
     )
     hamiltonian = Hamiltonian.load(FCIDUMP)
-    model = RBM(norb=hamiltonian.norb, alpha=1)
+    model = RBM(norb=hamiltonian.sector.norb, alpha=1)
     sampler = MCSampler(n_samples=64, n_chains=16, thermal_steps=2)
     state = MCState.init(
         model=model,

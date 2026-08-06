@@ -9,7 +9,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
-#include <libdet/hamiltonian.hpp>
+#include <libdet/rhf/hamiltonian.hpp>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -44,7 +44,7 @@ using I64Array = nb::ndarray<
     nb::device::cpu
 >;
 
-[[nodiscard]] libdet::StateBatchView states(const StateArray& x) noexcept {
+[[nodiscard]] libdet::rhf::DetBatchView states(const StateArray& x) noexcept {
     return {
         x.data(),
         static_cast<std::size_t>(x.shape(0)),
@@ -52,9 +52,9 @@ using I64Array = nb::ndarray<
     };
 }
 
-[[nodiscard]] libdet::StateRef state(const StateArray& x) {
+[[nodiscard]] libdet::rhf::DetRef state(const StateArray& x) {
     const auto view = states(x);
-    if (view.n_states != 1) throw std::invalid_argument("expected exactly one state");
+    if (view.n_dets != 1) throw std::invalid_argument("expected exactly one state");
     return view[0];
 }
 
@@ -80,24 +80,12 @@ struct OptionalStates {
         }
     }
 
-    [[nodiscard]] const libdet::StateBatchView* ptr() const noexcept {
+    [[nodiscard]] const libdet::rhf::DetBatchView* ptr() const noexcept {
         return view ? &*view : nullptr;
     }
 
     std::optional<StateArray> array;
-    std::optional<libdet::StateBatchView> view;
-};
-
-struct OptionalF64 {
-    explicit OptionalF64(nb::object obj) {
-        if (!obj.is_none()) {
-            array.emplace(nb::cast<F64Vec>(obj));
-            data = f64(*array);
-        }
-    }
-
-    std::optional<F64Vec> array;
-    std::span<const double> data;
+    std::optional<libdet::rhf::DetBatchView> view;
 };
 
 struct Counts {
@@ -232,49 +220,51 @@ NB_MODULE(libdet, m) {
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("diag", [](const libdet::Projections& x) { return view(x.diag); }, nb::rv_policy::reference_internal);
 
-    nb::class_<libdet::Hamiltonian>(m, "Hamiltonian")
-        .def_static("det", [](const F64Mat& h1, const F64Vec& eri, double ecore) {
+    nb::class_<libdet::rhf::Hamiltonian>(m, "Hamiltonian")
+        .def("__init__", [](libdet::rhf::Hamiltonian* self, const F64Mat& h1, const F64Vec& eri, double ecore) {
             if (h1.shape(0) != h1.shape(1)) throw std::invalid_argument("h1 must be square");
             const int norb = static_cast<int>(h1.shape(0));
             const auto h1v = f64(h1);
             const auto eriv = f64(eri);
-            return no_gil([&] {
-                return libdet::Hamiltonian::det(h1v, norb, eriv, ecore);
+            no_gil([&] {
+                new (self) libdet::rhf::Hamiltonian(h1v, norb, eriv, ecore);
             });
         }, "h1"_a.noconvert(), "eri"_a.noconvert(), "ecore"_a = 0.0)
 
-        .def_prop_ro("norb", &libdet::Hamiltonian::norb)
-        .def_prop_ro("nword", &libdet::Hamiltonian::nword)
-
-        .def("hij", [](const libdet::Hamiltonian& ham, const StateArray& bra, const StateArray& ket) {
+        .def("hij", [](const libdet::rhf::Hamiltonian& ham, const StateArray& bra, const StateArray& ket) {
             const auto b = state(bra);
             const auto k = state(ket);
             return no_gil([&] { return ham.hij(b, k); });
         }, "bra"_a.noconvert(), "ket"_a.noconvert())
 
-        .def("diag", [](const libdet::Hamiltonian& ham, const StateArray& x) {
+        .def("diag", [](const libdet::rhf::Hamiltonian& ham, const StateArray& x) {
             const auto xv = states(x);
-            return own(no_gil([&] { return ham.diags(xv); }));
+            return own(no_gil([&] { return ham.diag(xv); }));
         }, "x"_a.noconvert())
 
         .def("expand", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& kets,
             double eps,
             nb::object scale,
             nb::object exclude
         ) {
             const auto kv = states(kets);
-            const OptionalF64 scale_v(scale);
+            std::optional<F64Vec> scale_array;
+            std::span<const double> scale_view;
+            if (!scale.is_none()) {
+                scale_array.emplace(nb::cast<F64Vec>(scale));
+                scale_view = f64(*scale_array);
+            }
             const OptionalStates exclude_v(exclude);
             return own_states(
-                no_gil([&] { return ham.expand(kv, eps, scale_v.data, exclude_v.ptr()); }),
-                ham.nword()
+                no_gil([&] { return ham.expand(kv, eps, scale_view, exclude_v.ptr()); }),
+                kv.nword
             );
         }, "kets"_a.noconvert(), "eps"_a, "scale"_a = nb::none(), "exclude"_a = nb::none())
 
         .def("project", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             nb::object bras,
             const StateArray& kets,
             const F64Vec& scale,
@@ -296,7 +286,7 @@ NB_MODULE(libdet, m) {
         }, "bras"_a.none(), "kets"_a.noconvert(), "scale"_a.noconvert(), "eps"_a = 0.0, "exclude"_a = nb::none())
 
         .def("conn", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& kets,
             double eps
         ) {
@@ -305,7 +295,7 @@ NB_MODULE(libdet, m) {
         }, "kets"_a.noconvert(), "eps"_a = 0.0)
 
         .def("sample_conn", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& kets,
             const I64Array& counts_arr,
             double eps1,
@@ -313,7 +303,7 @@ NB_MODULE(libdet, m) {
             std::uint64_t seed
         ) {
             const auto kv = states(kets);
-            const auto cv = counts(counts_arr, kv.n_states);
+            const auto cv = counts(counts_arr, kv.n_dets);
             return no_gil([&] {
                 return ham.sample_conn(
                     kv,
@@ -328,7 +318,7 @@ NB_MODULE(libdet, m) {
 
 
         .def("local_conn", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& kets,
             double eps1,
             double eps2,
@@ -336,7 +326,7 @@ NB_MODULE(libdet, m) {
             std::uint64_t seed
         ) {
             const auto kv = states(kets);
-            const auto cv = counts(counts_arr, kv.n_states);
+            const auto cv = counts(counts_arr, kv.n_dets);
             if (cv.n_stream != 1u) {
                 throw std::invalid_argument("local_conn: counts must have shape (N,)");
             }
@@ -346,7 +336,7 @@ NB_MODULE(libdet, m) {
         }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "counts"_a.noconvert(), "seed"_a = std::uint64_t{0})
 
         .def("sample_project", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& kets,
             const F64Vec& scale,
             const I64Array& counts_arr,
@@ -357,7 +347,7 @@ NB_MODULE(libdet, m) {
         ) {
             const auto kv = states(kets);
             const auto sv = f64(scale);
-            const auto cv = counts(counts_arr, kv.n_states);
+            const auto cv = counts(counts_arr, kv.n_dets);
             const OptionalStates exclude_v(exclude);
             return no_gil([&] {
                 return ham.sample_project(
@@ -374,7 +364,7 @@ NB_MODULE(libdet, m) {
         }, "kets"_a.noconvert(), "scale"_a.noconvert(), "counts"_a.noconvert(), "eps1"_a, "eps2"_a = 0.0, "exclude"_a = nb::none(), "seed"_a = std::uint64_t{0})
 
         .def("matrix", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& bras,
             const StateArray& kets
         ) {
@@ -390,7 +380,7 @@ NB_MODULE(libdet, m) {
         }, "bras"_a.noconvert(), "kets"_a.noconvert())
 
         .def("matvec", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& bras,
             const StateArray& kets,
             const F64Vec& x
@@ -402,7 +392,7 @@ NB_MODULE(libdet, m) {
         }, "bras"_a.noconvert(), "kets"_a.noconvert(), "x"_a.noconvert())
 
         .def("matmat", [](
-            const libdet::Hamiltonian& ham,
+            const libdet::rhf::Hamiltonian& ham,
             const StateArray& bras,
             const StateArray& kets,
             const F64Mat& x
@@ -413,7 +403,7 @@ NB_MODULE(libdet, m) {
             const std::size_t nrhs = static_cast<std::size_t>(x.shape(1));
             return own(
                 no_gil([&] { return ham.matmat(bv, kv, xv, nrhs); }),
-                bv.n_states,
+                bv.n_dets,
                 nrhs
             );
         }, "bras"_a.noconvert(), "kets"_a.noconvert(), "x"_a.noconvert());

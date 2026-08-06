@@ -8,7 +8,8 @@ import jax
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from ..model import Model, to_psi
+from ..model import Model
+from ..model.base import to_psi
 from ..optimizer.base import Geometry
 from ..utils import Timer, batch, precision, tree
 

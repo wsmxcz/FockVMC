@@ -1,8 +1,8 @@
 # DetNQS
 
-DetNQS is a compact research codebase for Fock space variational Monte Carlo. Now in active development.
+DetNQS is a compact research codebase for Fock-space variational Monte Carlo.
 
-## Start
+## Install and run
 
 Python 3.12+ and a C++20 compiler are required.
 
@@ -12,24 +12,33 @@ cd DetNQS_dev
 pip install -e .
 ```
 
-Run the small end-to-end check:
-
 ```bash
 python scripts/test.py
-```
-
-Run the complete VMC experiment:
-
-```bash
 python examples/vmc.py
 ```
 
-FCIDUMP inputs are kept in `scripts/FCIDUMP/`.
+`scripts/test.py` checks the complete small-system path. `examples/vmc.py` is
+the standard VMC experiment. FCIDUMP inputs are stored in `scripts/FCIDUMP/`.
+
+## Scope
+
+```text
+hilbert    sectors and configurations
+operator   electronic Hamiltonians and libdet primitives
+model      RBM and backflow wavefunctions
+sampler    Markov chains and proposals
+vstate     exact, selected-space, and Monte Carlo estimators
+optimizer  SR and predictive sample-space SR
+driver     optimization loop, logging, and MC checkpoints
+```
+
+Models include `RBM`, `Backflow`, `GBackflow`, `SBackflow`, and `PBackflow`.
+Optimizers include parameter-space SR and PSR; `psr(mu=0)` is sample-space SR.
 
 ## Documentation
 
 - [Design and conventions](detnqs/README.md)
-- [VMC sampling and estimation](detnqs/sampler/vmc.md)
+- [Monte Carlo estimator](detnqs/sampler/vmc.md)
 - [SR and PSR](detnqs/optimizer/sr.md)
 - [libdet](detnqs/operator/libdet/README.md)
 

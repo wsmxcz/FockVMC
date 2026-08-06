@@ -10,49 +10,28 @@ import numpy as np
 
 
 def main() -> None:
-    paths = (
-        Path("fe2s2/fe2s2_GBackflow.jsonl"),
-        Path("fe2s2/fe2s2_SBackflow.jsonl"),
-        Path("fe2s2/fe2s2_PBackflow.jsonl"),
-    )
-    colors = ("#EE4B96", "#347ED8", "#E8BB32")
+    path = Path("fe2s2.jsonl")
     benchmark = -116.6056091
-    runs = []
 
-    for path, color in zip(paths, colors, strict=True):
-        with path.open(encoding="utf-8") as stream:
-            rows = [json.loads(line) for line in stream if line.strip()]
+    with path.open(encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
 
-        keys = ("energy", "eloc_var", "accept", "alpha", "s2", "time_total")
-        data = {
-            key: np.asarray([row.get(key, np.nan) for row in rows], dtype=float)
-            for key in keys
-        }
-        step = np.asarray(
-            [row.get("step", i) for i, row in enumerate(rows)],
-            dtype=float,
-        )
-        energy = data["energy"]
-        runs.append(
-            {
-                "label": path.stem,
-                "color": color,
-                "step": step,
-                "energy": energy,
-                "error": np.abs(energy - benchmark),
-                "variance": data["eloc_var"],
-                "accept": data["accept"],
-                "alpha": data["alpha"],
-                "s2": data["s2"],
-                "time": np.cumsum(data["time_total"]),
-            }
-        )
+    keys = ("energy", "eloc_var", "accept", "alpha", "s2", "time_total")
+    data = {
+        key: np.asarray([row.get(key, np.nan) for row in rows], dtype=float)
+        for key in keys
+    }
+    step = np.asarray(
+        [row.get("step", i + 1) for i, row in enumerate(rows)],
+        dtype=float,
+    )
+    energy = data["energy"]
 
-        finite = energy[np.isfinite(energy)]
-        print(f"{path}: {len(rows)} records")
-        if finite.size:
-            print(f"  final energy: {finite[-1]:.8f}")
-            print(f"  final error: {finite[-1] - benchmark:+.8f}")
+    finite = energy[np.isfinite(energy)]
+    print(f"{path}: {len(rows)} records")
+    if finite.size:
+        print(f"final energy: {finite[-1]:.8f}")
+        print(f"final error : {finite[-1] - benchmark:+.8f}")
 
     figure, axes = plt.subplots(
         2,
@@ -62,17 +41,15 @@ def main() -> None:
     )
     axes = axes.ravel()
     alpha_axis = axes[3].twinx()
+    color = "#347ED8"
 
-    for run in runs:
-        color = run["color"]
-        step = run["step"]
-        axes[0].plot(step, run["energy"], color=color, label=run["label"])
-        axes[1].plot(step, run["error"], color=color)
-        axes[2].plot(step, run["variance"], color=color)
-        axes[3].plot(step, run["accept"], color=color)
-        alpha_axis.plot(step, run["alpha"], color=color, linestyle="--")
-        axes[4].plot(step, run["s2"], color=color)
-        axes[5].plot(step, run["time"], color=color)
+    axes[0].plot(step, energy, color=color, label=path.stem)
+    axes[1].plot(step, np.abs(energy - benchmark), color=color)
+    axes[2].plot(step, data["eloc_var"], color=color)
+    axes[3].plot(step, data["accept"], color=color)
+    alpha_axis.plot(step, data["alpha"], color=color, linestyle="--")
+    axes[4].plot(step, data["s2"], color=color)
+    axes[5].plot(step, np.cumsum(data["time_total"]), color=color)
 
     axes[0].axhline(
         benchmark,

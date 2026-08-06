@@ -24,32 +24,6 @@ def normalize(w: Any, mask: Any | None = None) -> jax.Array:
     return w / norm
 
 
-def masked_sum(x: Any, mask: Any, axis: int = 0) -> Any:
-    """Sum PyTree leaves after masking along one axis."""
-    axis = int(axis)
-    mask = jnp.asarray(mask, dtype=bool)
-
-    def one(a: Any) -> jax.Array:
-        a = jnp.asarray(a)
-        shape = [1] * a.ndim
-        shape[axis] = mask.shape[0]
-        keep = mask.reshape(shape)
-        return jnp.sum(jnp.where(keep, a, 0), axis=axis)
-
-    return jax.tree.map(one, x)
-
-
-def masked_logsumexp(x: Any, mask: Any, axis: int = -1) -> jax.Array:
-    """Log-sum-exp over active entries, returning -inf for empty segments."""
-    axis = int(axis)
-    x = jnp.asarray(x)
-    if not jnp.issubdtype(x.dtype, jnp.inexact):
-        x = x.astype(jnp.float64)
-    mask = jnp.asarray(mask, dtype=bool)
-
-    return jax.nn.logsumexp(jnp.where(mask, x, -jnp.inf), axis=axis)
-
-
 def signed_logsumexp(
     sign: Any,
     logabs: Any,

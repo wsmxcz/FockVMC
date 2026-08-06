@@ -74,11 +74,6 @@ def configure(
     jax.clear_caches()
 
 
-def policy() -> dict[str, str]:
-    """Return the active role precision policy."""
-    return dict(_ROLES)
-
-
 def _dtype(role: str, kind: str, *, host: bool = False) -> Any:
     if role not in _ROLES:
         raise ValueError("role must be 'model', 'calc', or 'sr'")
@@ -145,8 +140,3 @@ def device(x: Any, role: str = "model", kind: str | None = None) -> Any:
 def tiny(role: str = "calc") -> float:
     """Return the smallest positive normal real number for a role."""
     return float(np.finfo(real(role, host=True)).tiny)
-
-
-def eps(role: str = "calc") -> float:
-    """Return the machine epsilon of the real dtype assigned to a role."""
-    return float(np.finfo(real(role, host=True)).eps)

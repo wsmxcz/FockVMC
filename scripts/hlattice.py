@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import optax
 from pyscf import ao2mo, gto, lo, scf
@@ -13,7 +12,7 @@ from detnqs.hilbert import DetSector
 from detnqs.model import GBackflow, slater_reference
 from detnqs.operator import S2
 from detnqs.optimizer import psr
-from detnqs.sampler import MCSampler, init_chains
+from detnqs.sampler import MCSampler, sample_slater
 from detnqs.utils import Logger, batch, precision
 
 
@@ -96,12 +95,12 @@ class HydrogenLattice:
 
 def main() -> None:
     batch.configure(
-        forward_chunk=8192,
-        backward_chunk=1024,
+        forward_chunk=32768,
+        backward_chunk=4096,
         param_chunk=None,
-        bucket_min=1024,
+        bucket_min=4096,
     )
-    precision.configure("single")
+    precision.configure("double")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
@@ -137,27 +136,32 @@ def main() -> None:
     print(f"active     : ({n_alpha + n_beta}e, {norb}o)")
     print(f"orth err   : {np.linalg.norm(coeff.T @ s @ coeff - np.eye(norb)):.3e}")
 
-    # Build a spin-orbital reference in the OAO basis.
-    ref_mat = slater_reference(sector, np.linalg.solve(coeff, mf.mo_coeff))
+    # Express the occupied SCF orbitals in the OAO Hamiltonian basis.
+    orbitals = coeff.T @ s @ mf.mo_coeff
+    ref_mat = slater_reference(
+        orbitals[:, :n_alpha],
+        orbitals[:, :n_beta],
+    )
 
     model = GBackflow(
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
-        hidden=(64,),
-        ref_mat=jnp.asarray(ref_mat),
+        hidden=(256,),
+        ref_mat=ref_mat,
     )
 
     sampler = MCSampler(
-        n_samples=1024,
-        n_chains=1024,
-        thermal_steps=0,
+        n_samples=4096,
+        n_chains=4096,
+        thermal_steps=256,
+        discard_steps=8,
         proposal="ham",
         blur=0.5,
         alpha=None,
     )
 
-    chains = init_chains(sector, ref_mat, n_chains=sampler.n_chains, seed=0)
+    chains = sample_slater(sector, ref_mat, n=sampler.n_chains, seed=0)
 
     state = MCState.init(
         model=model,
@@ -170,14 +174,9 @@ def main() -> None:
         eloc_sample=1024,
     )
 
-    rate = optax.linear_schedule(
-        init_value=0.0,
-        end_value=5.0e-2,
-        transition_steps=100,
-    )
     optimizer = optax.chain(
         psr(shift=1.0e-3, mu=0.95),
-        optax.scale_by_learning_rate(rate),
+        optax.scale_by_learning_rate(5.0e-2),
     )
     vmc = VMC.init(state, optimizer)
 
@@ -185,12 +184,12 @@ def main() -> None:
     obs = {"s2": S2(sector)}
 
     vmc.run(
-        1000,
+        5000,
         obs=obs,
         logger=log,
         profile=True,
         checkpoint=f"{name}_{{step:05d}}.npz",
-        checkpoint_every=1000,
+        checkpoint_every=500,
     )
 
 

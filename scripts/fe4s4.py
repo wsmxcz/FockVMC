@@ -15,34 +15,44 @@ from detnqs.utils import Logger, batch, precision
 
 
 def main() -> None:
+    precision.configure("double")
+    jax.config.update("jax_debug_nans", False)
+    jax.config.update("jax_log_compiles", False)
     batch.configure(
         forward_chunk=32768,
         backward_chunk=4096,
         param_chunk=None,
         bucket_min=4096,
     )
-    precision.configure("double")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
 
-    name = "N2"
+    name = "fe4s4"
     seed = 0
-    path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / f"{name}.FCIDUMP"
+    path = Path(__file__).with_name("FCIDUMP") / f"{name}.FCIDUMP"
     hamiltonian = Hamiltonian.load(path)
     sector = hamiltonian.sector
 
+    fe1 = np.arange(2, 7)
+    fe2 = np.arange(7, 12)
+    fe3 = np.arange(24, 29)
+    fe4 = np.arange(29, 34)
+    iron = np.concatenate((fe1, fe2, fe3, fe4))
+    closed = np.setdiff1d(np.arange(sector.norb), iron)
+
+    extra_b = fe2[0]
+    extra_a = fe4[0]
+    occ_a = np.sort(np.concatenate((closed, fe1, fe2, [extra_a])))
+    occ_b = np.sort(np.concatenate((closed, fe3, fe4, [extra_b])))
+    assert len(occ_a) == sector.n_alpha and len(occ_b) == sector.n_beta
     orbitals = np.eye(sector.norb)
-    ref_mat = slater_reference(
-        orbitals[:, :sector.n_alpha],
-        orbitals[:, :sector.n_beta],
-    )
+    ref_mat = slater_reference(orbitals[:, occ_a], orbitals[:, occ_b])
+
     model = PBackflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
         hidden=(256,),
         ref_mat=ref_mat,
-        init_scale=1e-3,
+        init_scale=1.0e-3,
     )
 
     sampler = MCSampler(
@@ -54,7 +64,6 @@ def main() -> None:
         blur=0.5,
         alpha=None,
     )
-
     chains = sample_slater(
         sector,
         ref_mat,
@@ -72,19 +81,20 @@ def main() -> None:
         eps2=1.0e-6,
         eloc_sample=1024,
     )
-
     optimizer = optax.chain(
         psr(shift=1.0e-3, mu=0.95),
         optax.scale_by_learning_rate(5.0e-2),
     )
     vmc = VMC.init(state, optimizer)
-    obs = {"s2": S2(sector)}
-    log = Logger(file=f"{name}.jsonl", every=10)
+
+    print(f"active      : ({sector.nelec}e, {sector.norb}o)")
+    print("reference   : Fe1/Fe2 up, Fe3/Fe4 down")
+    print("Fe(II)      : Fe2 and Fe4")
 
     vmc.run(
         5000,
-        obs=obs,
-        logger=log,
+        obs={"s2": S2(sector)},
+        logger=Logger(file=f"{name}.jsonl", every=10),
         profile=True,
         checkpoint=f"{name}_{{step:05d}}.npz",
         checkpoint_every=500,

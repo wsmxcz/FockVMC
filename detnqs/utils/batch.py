@@ -68,13 +68,6 @@ def chunks(tree: Any, size: int | None):
         yield (pad(chunk, size) if hi - lo < size else chunk), hi - lo
 
 
-def mask(n: int, size: int | None = None) -> jax.Array:
-    """Return a leading-axis validity mask."""
-    n = int(n)
-    size = n if size is None else int(size)
-    return jnp.arange(size) < n
-
-
 def apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     """Evaluate `fun(theta, x)` over the leading axis."""
     size = config["forward_chunk"]

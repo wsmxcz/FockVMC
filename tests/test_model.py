@@ -5,7 +5,26 @@ import jax.numpy as jnp
 import numpy as np
 
 from detnqs.hilbert import DetSector
-from detnqs.model import Backflow, GBackflow, PBackflow, RBM, SBackflow
+from detnqs.model import (
+    Backflow,
+    GBackflow,
+    PBackflow,
+    RBM,
+    SBackflow,
+    slater_reference,
+)
+
+
+def test_reference() -> None:
+    alpha = np.eye(3)[:, :2]
+    beta = np.eye(3)[:, :1]
+    ref_mat = slater_reference(alpha, beta)
+
+    assert ref_mat.shape == (3, 6)
+    np.testing.assert_array_equal(ref_mat[:2, :3], alpha.T)
+    np.testing.assert_array_equal(ref_mat[2:, 3:], beta.T)
+    np.testing.assert_array_equal(ref_mat[:2, 3:], 0.0)
+    np.testing.assert_array_equal(ref_mat[2:, :3], 0.0)
 
 
 def test_models() -> None:

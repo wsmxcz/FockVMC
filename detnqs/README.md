@@ -1,19 +1,26 @@
-# Package design
+# Design and conventions
 
-DetNQS separates the VMC calculation by mathematical responsibility. A layer
-owns its data and operation, then passes a small explicit result to the next
-layer. This keeps the algorithm visible in ordinary Python code.
+DetNQS keeps the VMC algorithm visible through a small set of objects. Each
+layer owns one mathematical responsibility and depends only on upstream layers.
 
-## Layers and ownership
+## Architecture
+
+```text
+Sector
+  ↓
+Hamiltonian ──────┐
+                  ↓
+Model → Sampler → VState → Optimizer → VMC
+```
 
 ```text
 hilbert
     Sector, DetSector
-    configuration layout, particle number, spin sector, finite enumeration
+    configuration layout, particle number, spin, finite enumeration
 
 operator
     Hamiltonian, create, annihilate, number, S2
-    matrix elements, connections, projection, and finite-space action
+    matrix elements, connections, projections, finite-space action
 
 model
     RBM and backflow ansatzes
@@ -21,48 +28,26 @@ model
 
 sampler
     ChainState, MCSampler
-    burn-in, Markov transitions, proposals, and observation blur
+    burn-in, proposals, Markov transitions, observation blur
 
 vstate
     ExactState, SelectedState, MCState
-    energy, observables, gradient, and SR geometry
+    energy, observables, gradients, Geometry
 
 optimizer
     sr, psr
-    Optax-compatible geometry preconditioners
+    Optax-compatible geometry transformations
 
 driver
     VMC
-    estimator call, optimizer call, parameter update, logging, checkpointing
+    estimation, update, logging, MC checkpoints
 ```
 
-`utils` contains shared numerical operations such as batching, precision,
-statistics, timing, logging, and checkpoint serialization. It does not own a
-domain object.
+`utils` contains numerical operations without owning a physical object. New
+features should stay in the layer that owns their state and mathematics; shared
+syntax alone is not a reason to add a base class or manager.
 
-## End-to-end flow
-
-```text
-FCIDUMP
-  ↓
-Sector + Hamiltonian
-  ↓
-model parameters + ChainState
-  ↓
-ExactState / SelectedState / MCState
-  ↓
-energy + gradient + Geometry
-  ↓
-sr / psr + Optax learning-rate transform
-  ↓
-parameter update in VMC
-```
-
-Construction is explicit: a model does not know the Hamiltonian, a sampler does
-not compute energy, and an optimizer does not sample configurations. The
-variational state is the point where these objects meet to form an estimator.
-
-## Configuration convention
+## Configuration
 
 A configuration is a packed alpha/beta occupation bitstring:
 
@@ -76,71 +61,85 @@ nword    = ceil(norb / 64)
 ```
 
 Arrays are batch-first and C-contiguous at the Python/C++ boundary. `Sector`
-owns conversion, uniqueness, and sector properties; `DetSector` adds reference,
-random, and complete finite-sector construction.
+owns conversion, uniqueness, and sector properties; `DetSector` implements
+determinant reference, random sampling, and finite enumeration.
 
-Public documentation uses *configuration*. Code uses `x`. The word
-*determinant* is reserved for determinant-specific algorithms and data.
+Documentation uses *configuration*. Code uses `x`. Use *determinant* only when
+the determinant structure matters.
 
-## Hamiltonian convention
+## Hamiltonian
 
-Hamiltonian actions use Dirac order:
+Hamiltonian actions use Dirac order
 
 $$
 H_{bk}=\langle b|H|k\rangle.
 $$
 
-`ket` is the input configuration and `bra` is a connected output
-configuration. Excitations run from ket to bra, and wavefunction ratios are
-therefore written as
+`ket` is the input configuration and `bra` the connected output. Therefore
 
 $$
 \mathrm{ratio}=\frac{\psi(\mathrm{bra})}{\psi(\mathrm{ket})}.
 $$
 
-`operator.Hamiltonian` is the Python interface. Its compiled `libdet` backend
-provides matrix elements and connection data without owning sampling or
-wavefunction state.
+`Hamiltonian` owns the electronic action. It does not own a model, sampler, or
+estimator. Its compiled `libdet` backend follows the same convention.
 
-## Model convention
+## Model
 
-Every model supports:
+Every model implements
 
 ```python
 logpsi = model.apply(params, x)
 ```
 
-The raw logarithmic representation may be a positive real log-amplitude, a
-complex log-amplitude, or a signed-real pair. `Model.logabs`, `Model.coord`, and
-`Model.cotangent` provide the common views needed by sampling and real-coordinate
-autodiff.
+The result may be a real log-amplitude, a complex log-amplitude, or a
+signed-real pair. `Model.logabs`, `Model.coord`, and `Model.cotangent` provide
+the views used by sampling and real-coordinate autodiff. Parameters remain
+explicit; models do not contain Hamiltonians, chains, or optimizers.
 
-Model parameters are passed explicitly. Models do not contain a Hamiltonian,
-sampler, optimizer, or chain state.
+## Initialization
 
-## Variational-state convention
+Mean-field choice, model initialization, and chain initialization are separate.
+RHF, ROHF, UHF, broken symmetry, orbital localization, and perturbations belong
+to the preparation of occupied orbitals.
 
-The three estimator implementations share direct call shapes:
+```python
+ref_mat = slater_reference(alpha, beta)
+```
+
+The real arrays `alpha` and `beta` have shapes `(norb, n_alpha)` and
+`(norb, n_beta)` in the orthonormal Hamiltonian basis. For AO coefficients `C`,
+basis coefficients `B`, and overlap `S`, transform orbitals with
+`B.T @ S @ C`.
+
+For FCIDUMP in an ordered orbital basis, unit occupied orbitals define the
+ordered reference. Alternative references must be expressed in that same basis.
+
+Initial chains are chosen explicitly:
+
+```python
+chains = sector.reference(n)
+chains = sector.random(n, seed)
+chains = sample_slater(sector, ref_mat, n=n, seed=seed)
+```
+
+This choice changes burn-in, not the target distribution.
+
+## Estimation and optimization
+
+The estimator interface is direct:
 
 ```python
 state, stats = state.expect()
 state, energy, grad, stats, geometry = state.expect_and_grad(geometry=True)
 ```
 
-- `ExactState` sums the complete sector.
-- `SelectedState` sums a finite selected basis and can evolve that basis.
-- `MCState` samples an auxiliary law and reweights observations to the Born
-  target.
-
-Estimator calls return the next state because sampling can advance chains and
-adapt tempering. `MCState` checkpoints parameters and chain state. Exact and
-selected states are deterministic working objects and have no checkpoint
+`ExactState` uses the full sector, `SelectedState` a finite selected space, and
+`MCState` an importance-reweighted Monte Carlo estimate. Calls return the next
+state because chains and tempering may advance. Only `MCState` has a checkpoint
 contract.
 
-## Optimizer and driver convention
-
-`sr` and `psr` transform a gradient using `Geometry`. Learning rates and
-schedules are separate Optax transforms:
+SR and PSR consume `Geometry`; Optax supplies the learning rate:
 
 ```python
 optimizer = optax.chain(
@@ -149,21 +148,17 @@ optimizer = optax.chain(
 )
 ```
 
-The driver follows the ordinary Optax update flow with one additional geometry
-argument:
+`VMC` performs only
 
-```python
-state, energy, grad, stats, geometry = state.expect_and_grad(geometry=True)
-updates, opt_state = optimizer.update(
-    grad,
-    opt_state,
-    state.params,
-    geometry=geometry,
-)
-params = optax.apply_updates(state.params, updates)
-state = state.replace(params=params)
+```text
+estimate → optimizer update → parameter update → logging
 ```
 
-This is the complete optimization boundary: estimation belongs to the state,
-geometry transformation belongs to the optimizer, and orchestration belongs to
-`VMC`.
+## Stable development rules
+
+- Preserve the dependency direction and explicit object construction.
+- Keep configuration layout and bra/ket order unchanged across Python and C++.
+- Add parameters only when they represent a scientific method choice.
+- Prefer a complete mathematical function over a hierarchy of small wrappers.
+- Validate new algorithms against exact or selected-space results on a small
+  sector before extending large-system scripts.

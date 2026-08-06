@@ -1,57 +1,26 @@
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
-from pyscf import ao2mo
+from numpy.typing import ArrayLike
 
 
-def slater_reference(
-    sector: Any,
-    source: Any | None = None,
-    *,
-    seed: int = 0,
-) -> np.ndarray:
-    """Build a spin-orbital Slater reference.
+def slater_reference(alpha: ArrayLike, beta: ArrayLike) -> np.ndarray:
+    """Assemble occupied alpha/beta orbitals into a Slater reference.
 
-    The result has shape ``(nelec, 2 * norb)``. ``source`` may be an
-    ``(h1, eri)`` integral pair, a spatial-orbital coefficient matrix, or an
-    already assembled spin-orbital reference.
+    The orbitals are expressed in the Hamiltonian basis with shapes
+    ``(norb, n_alpha)`` and ``(norb, n_beta)``. The result has shape
+    ``(n_alpha + n_beta, 2 * norb)``.
     """
-    norb = int(sector.norb)
-    n_alpha = int(sector.n_alpha)
-    n_beta = int(sector.n_beta)
-    nelec = n_alpha + n_beta
+    alpha = np.asarray(alpha, dtype=np.float64, order="C")
+    beta = np.asarray(beta, dtype=np.float64, order="C")
 
-    if source is None:
-        coeff = np.eye(norb)
-    elif isinstance(source, tuple):
-        h1 = np.asarray(source[0], dtype=np.float64)
-        eri = np.asarray(source[1], dtype=np.float64)
-        eri = eri if eri.ndim == 4 else ao2mo.restore(1, eri, norb)
+    if alpha.ndim != 2 or beta.ndim != 2 or alpha.shape[0] != beta.shape[0]:
+        raise ValueError("alpha and beta must have shape (norb, n_elec)")
 
-        rng = np.random.default_rng(seed)
-        noise = rng.normal(size=(norb, norb))
-        fock = 0.5 * (h1 + h1.T) + 1.0e-10 * (noise + noise.T)
-        _, coeff = np.linalg.eigh(fock)
-        density = np.zeros_like(h1)
-
-        for _ in range(64):
-            ca = coeff[:, :n_alpha]
-            cb = coeff[:, :n_beta]
-            target = ca @ ca.T + cb @ cb.T
-            density = 0.65 * density + 0.35 * target
-            coulomb = np.einsum("pqrs,rs->pq", eri, density, optimize=True)
-            exchange = np.einsum("prqs,rs->pq", eri, density, optimize=True)
-            fock = h1 + coulomb - 0.5 * exchange
-            _, coeff = np.linalg.eigh(0.5 * (fock + fock.T))
-    else:
-        array = np.asarray(source, dtype=np.float64)
-        if array.shape == (nelec, 2 * norb):
-            return np.ascontiguousarray(array)
-        coeff = np.linalg.qr(array, mode="reduced")[0]
-
-    reference = np.zeros((nelec, 2 * norb), dtype=np.float64)
-    reference[:n_alpha, :norb] = coeff[:, :n_alpha].T
-    reference[n_alpha:, norb:] = coeff[:, :n_beta].T
-    return np.ascontiguousarray(reference)
+    norb = alpha.shape[0]
+    n_alpha = alpha.shape[1]
+    n_beta = beta.shape[1]
+    ref_mat = np.zeros((n_alpha + n_beta, 2 * norb), dtype=np.float64)
+    ref_mat[:n_alpha, :norb] = alpha.T
+    ref_mat[n_alpha:, norb:] = beta.T
+    return ref_mat

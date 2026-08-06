@@ -30,16 +30,17 @@ def main() -> None:
 
     sampler = MCSampler(
         n_samples=128,
-        n_chains=32,
+        n_chains=128,
         thermal_steps=4,
         proposal="ham",
         blur=0.5,
-        alpha=2.0,
+        alpha=None,
     )
     state = MCState.init(
         model=model,
         hamiltonian=hamiltonian,
         sampler=sampler,
+        chains=sector.random(sampler.n_chains, seed=0),
         key=jax.random.key(0),
         eps1=0.0,
         eps2=0.0,
@@ -59,7 +60,7 @@ def main() -> None:
 
     optimizer = optax.chain(
         psr(shift=1.0e-3, mu=0.0),
-        optax.scale_by_learning_rate(1.0e-2),
+        optax.scale_by_learning_rate(5.0e-2),
     )
     vmc = VMC.init(state, optimizer)
     record = vmc.step()

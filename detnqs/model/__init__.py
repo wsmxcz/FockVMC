@@ -1,24 +1,16 @@
 from __future__ import annotations
 
-from .backflow import Backflow, GBackflow, SBackflow, PBackflow
-from .base import (
-    Model,
-    to_logabs,
-    to_psi,
-    to_ratio,
-)
+from .backflow import Backflow, GBackflow, PBackflow, SBackflow
+from .base import Model
 from .init import slater_reference
 from .rbm import RBM
 
 __all__ = (
     "Backflow",
     "GBackflow",
-    "SBackflow",
-    "PBackflow",
     "Model",
+    "PBackflow",
     "RBM",
-    "to_logabs",
-    "to_psi",
-    "to_ratio",
+    "SBackflow",
     "slater_reference",
 )

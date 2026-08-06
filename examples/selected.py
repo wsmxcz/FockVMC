@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
+import numpy as np
 import optax
 
 from detnqs import Hamiltonian, SelectedState, VMC
@@ -14,10 +14,10 @@ from detnqs.vstate import topk_selector
 
 def main() -> None:
     batch.configure(
-        forward_chunk=32768,
-        backward_chunk=32768,
-        param_chunk=32768,
-        bucket_min=1024,
+        forward_chunk=128,
+        backward_chunk=128,
+        param_chunk=None,
+        bucket_min=128,
     )
     precision.configure("single")
     jax.config.update("jax_debug_nans", False)
@@ -27,13 +27,17 @@ def main() -> None:
     hamiltonian = Hamiltonian.load(path)
     sector = hamiltonian.sector
 
-    ref_mat = slater_reference(sector, hamiltonian.integrals)
+    orbitals = np.eye(sector.norb)
+    ref_mat = slater_reference(
+        orbitals[:, :sector.n_alpha],
+        orbitals[:, :sector.n_beta],
+    )
     model = Backflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
         hidden=(64,),
-        ref_mat=jnp.asarray(ref_mat),
+        ref_mat=ref_mat,
     )
 
     state = SelectedState.init(

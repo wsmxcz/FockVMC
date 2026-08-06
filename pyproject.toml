@@ -22,6 +22,7 @@ dependencies = [
   "flax>=0.12",
   "jax>=0.10",
   "jaxlib>=0.10",
+  "matplotlib>=3.8",
   "numpy>=2.4",
   "optax>=0.2",
   "pyscf>=2.13",

@@ -1,20 +1,12 @@
 # Stochastic reconfiguration
 
-`sr` and `psr` turn an energy gradient into a direction measured in local
-wavefunction geometry. They are Optax-compatible preconditioners: geometry is
-their responsibility, while the learning rate and update schedule remain
-ordinary Optax transforms.
+`sr` and `psr` transform an energy gradient using local wavefunction geometry.
+They do not own sampling, local energies, or learning rates.
 
 ## Geometry
 
-Models expose a real differentiable coordinate
-
-$$
-q_\theta(x)\in\mathbb R^d.
-$$
-
-Depending on the model, this coordinate represents a log-amplitude alone or a
-real view of log-amplitude and phase. For normalized Born weights $w_n$, define
+Let $q_\theta(x)\in\mathbb R^d$ be the real differentiable model coordinate.
+For normalized Born weights $w_n$, define
 
 $$
 J_n=\frac{\partial q_\theta(x_n)}{\partial\theta},
@@ -23,63 +15,45 @@ J_n=\frac{\partial q_\theta(x_n)}{\partial\theta},
 $$
 
 $$
-O_n=\sqrt{w_n}(J_n-\bar J).
+O_n=\sqrt{w_n}(J_n-\bar J),
+\qquad
+S=O^\dagger O.
 $$
 
-After flattening configuration and coordinate axes, $O$ is the centered
-weighted Jacobian and
-
-$$
-S=O^\dagger O
-$$
-
-is the sampled quantum-geometric tensor.
-
-The `Geometry` object carries the estimator side of this contract:
+`Geometry` is the estimator-to-optimizer contract:
 
 ```text
 params    parameters at which the estimate was evaluated
-coord     real model coordinate q(params, x)
-x         configurations used by the estimate
-weight    Born weights for those configurations
+coord     q(params, x)
+x         estimator configurations
+weight    Born weights
 b         sample-space energy residual
 ```
 
-The optimizer normalizes `weight` before constructing the centered geometry.
-The Hamiltonian, sampler, and local-energy calculation remain outside the
-optimizer.
+The optimizer normalizes `weight`. The estimator constructs every other field.
 
 ## Parameter-space SR
 
-For gradient $g$ and diagonal shift $\lambda$, parameter-space SR solves
+For gradient $g$ and shift $\lambda$,
 
 $$
 (S+\lambda I)d=g.
 $$
 
-The returned tree $d$ is an unscaled natural-gradient direction.
-
-`sr(mode="dense")` forms $S$ explicitly. It is appropriate for small models
-and reference calculations. `sr(mode="matvec")` applies $S$ through JVP/VJP
-products and solves iteratively, avoiding a dense parameter-space matrix.
-Both modes implement the same equation.
+`sr(mode="dense")` forms $S$ explicitly and is intended for small reference
+problems. `sr(mode="matvec")` applies $S$ through JVP/VJP products and solves
+iteratively. Both return the unscaled direction $d$.
 
 ## Sample-space SR
 
-When the gradient is represented by the sample-space residual,
-
-$$
-g=O^\dagger b,
-$$
-
-the identity
+When $g=O^\dagger b$,
 
 $$
 (O^\dagger O+\lambda I)^{-1}O^\dagger
-=O^\dagger(OO^\dagger+\lambda I)^{-1}
+=O^\dagger(OO^\dagger+\lambda I)^{-1}.
 $$
 
-gives the equivalent solve
+Therefore
 
 $$
 (K+\lambda I)a=b,
@@ -89,41 +63,30 @@ K=OO^\dagger,
 d=O^\dagger a.
 $$
 
-This form stores a matrix in sample-coordinate space rather than parameter
-space. `psr(mu=0)` implements this sample-space SR equation.
+`psr(mu=0)` implements this sample-space solve.
 
 ## Predictive SR
 
-For `mu > 0`, PSR predicts the next direction from the previous unscaled SR
-direction $d_{t-1}$:
+For `mu > 0`, PSR predicts from the previous unscaled direction:
 
 $$
-p_t=\mu d_{t-1}.
-$$
-
-It removes the tangent response already explained by that predictor,
-
-$$
+p_t=\mu d_{t-1},
+\qquad
 r_t=b_t-O_tp_t,
 $$
 
-then solves and corrects in the current geometry:
-
 $$
 (K_t+\lambda I)a_t=r_t,
-$$
-
-$$
+\qquad
 d_t=p_t+O_t^\dagger a_t.
 $$
 
-The optimizer state stores $d_t$ before downstream Optax transforms apply a
-learning rate. Thus `mu` controls prediction in geometry space and does not act
-as an additional learning-rate schedule.
+The optimizer state stores $d_t$ before the learning-rate transform. Thus
+`mu` controls prediction in geometry space, not step size.
 
 ## Optax composition
 
-SR/PSR must precede the learning-rate transform:
+SR or PSR precedes the Optax learning-rate transform:
 
 ```python
 optimizer = optax.chain(
@@ -132,18 +95,7 @@ optimizer = optax.chain(
 )
 ```
 
-A schedule is composed in the same way:
-
-```python
-rate = optax.linear_schedule(0.0, 5.0e-2, 100)
-optimizer = optax.chain(
-    sr(shift=1.0e-3),
-    optax.scale_by_learning_rate(rate),
-)
-```
-
-The VMC driver uses the standard update pattern with `geometry` passed as an
-extra argument:
+The driver passes `geometry` through the standard update boundary:
 
 ```python
 updates, opt_state = optimizer.update(
@@ -155,15 +107,18 @@ updates, opt_state = optimizer.update(
 params = optax.apply_updates(params, updates)
 ```
 
-## Public parameters
+Public method parameters are limited to the solve:
 
 ```text
-shift      diagonal regularization lambda
+shift      diagonal regularization
 mode       dense or matrix-free parameter-space SR
-maxiter    iteration limit for matrix-free SR
-mu         predictive strength; zero selects sample-space SR
+maxiter    matrix-free iteration limit
+mu         predictive strength; zero gives sample-space SR
 ```
 
-The estimator determines configurations, Born weights, and the residual.
-Optax determines the learning rate and its schedule. This separation keeps SR
-focused on the geometry solve.
+## Stable development rules
+
+- Geometry construction belongs to the estimator; geometry solves belong here.
+- Directions remain unscaled so Optax controls learning rates and schedules.
+- Dense and matrix-free SR must represent the same shifted equation.
+- New solvers should first agree with dense SR on a small exact problem.

@@ -8,12 +8,27 @@ import numpy as np
 import optax
 
 from detnqs import ExactState, Hamiltonian, MCState, SelectedState, VMC, psr
-from detnqs.model import RBM
-from detnqs.sampler import MCSampler
+from detnqs.model import RBM, slater_reference
+from detnqs.operator import number
+from detnqs.sampler import MCSampler, sample_slater
 from detnqs.utils import batch
 
 
 FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
+
+
+def test_chains() -> None:
+    sector = Hamiltonian.load(FCIDUMP).sector
+    orbitals = np.eye(sector.norb)
+    ref_mat = slater_reference(
+        orbitals[:, :sector.n_alpha],
+        orbitals[:, :sector.n_beta],
+    )
+    chains = sample_slater(sector, ref_mat, n=16, seed=0)
+
+    assert chains.shape == (16, 2, sector.nword)
+    np.testing.assert_array_equal(number(chains, spin=0), sector.n_alpha)
+    np.testing.assert_array_equal(number(chains, spin=1), sector.n_beta)
 
 
 def test_states() -> None:
@@ -55,6 +70,7 @@ def test_states() -> None:
         model=model,
         hamiltonian=hamiltonian,
         sampler=sampler,
+        chains=sector.random(sampler.n_chains, seed=2),
         key=jax.random.key(2),
         eps1=0.0,
         eps2=0.0,
@@ -82,6 +98,7 @@ def test_checkpoint() -> None:
         model=model,
         hamiltonian=hamiltonian,
         sampler=sampler,
+        chains=hamiltonian.sector.random(sampler.n_chains, seed=3),
         key=jax.random.key(3),
         eps1=0.0,
         eps2=0.0,

@@ -13,11 +13,6 @@ def host(tree: Any) -> Any:
     return jax.tree.map(np.asarray, jax.device_get(tree))
 
 
-def device(tree: Any) -> Any:
-    """Move a PyTree to the default JAX device."""
-    return jax.tree.map(jnp.asarray, tree)
-
-
 def vdot(a: Any, b: Any) -> jax.Array:
     """Real part of the Hermitian PyTree inner product."""
     out = None

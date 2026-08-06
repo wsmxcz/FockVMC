@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from .mcmc import ChainState, MCSampler
-from .init import init_chains
+from .init import sample_slater
 
 __all__ = (
     "ChainState",
     "MCSampler",
-    "init_chains",
+    "sample_slater",
 )

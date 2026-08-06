@@ -8,7 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..model import Model, to_logabs, to_ratio
+from ..model import Model
+from ..model.base import to_logabs, to_ratio
 from ..optimizer.base import Geometry
 from ..sampler import ChainState, MCSampler
 from ..utils import Timer, batch, math, precision, stats, tree
@@ -36,8 +37,8 @@ class MCState:
         hamiltonian: Any,
         *,
         sampler: MCSampler,
+        chains: Any,
         key: jax.Array,
-        chains: Any | None = None,
         eps1: float = 1.0e-3,
         eps2: float = 1.0e-6,
         eloc_sample: int = 256,
@@ -53,11 +54,7 @@ class MCState:
         _, init_key, sample_key = jax.random.split(key, 3)
         params = model.init(init_key, hamiltonian.sector.zeros(1))["params"]
 
-        chains_arr = (
-            hamiltonian.sector.reference(sampler.n_chains)
-            if chains is None
-            else hamiltonian.sector.asarray(chains)
-        )
+        chains_arr = hamiltonian.sector.asarray(chains)
         if chains_arr.shape[0] != sampler.n_chains:
             raise ValueError("chains size must equal sampler.n_chains")
         chains_arr = np.ascontiguousarray(chains_arr)

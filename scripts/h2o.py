@@ -16,7 +16,7 @@ from detnqs.utils import Logger, batch, precision
 
 def main() -> None:
     batch.configure(
-        forward_chunk=32768,
+        forward_chunk=262144,
         backward_chunk=4096,
         param_chunk=None,
         bucket_min=4096,

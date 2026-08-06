@@ -28,6 +28,54 @@ class HydrogenLattice:
             f"H {x:.12f} {y:.12f} {z:.12f}" for x, y, z in self.coords
         )
 
+    def afm_sites(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return a balanced AFM partition of the nearest-neighbor graph."""
+        nsite = int(self.coords.shape[0])
+        if nsite < 2 or nsite % 2:
+            raise ValueError("AFM partition requires an even number of sites")
+
+        delta = self.coords[:, None, :] - self.coords[None, :, :]
+        distance = np.linalg.norm(delta, axis=-1)
+        positive = distance[distance > 0.0]
+        if positive.size == 0:
+            raise ValueError("lattice sites must have distinct coordinates")
+
+        bond = float(positive.min())
+        neighbor = np.isclose(distance, bond, rtol=1.0e-7, atol=1.0e-10)
+        laplacian = np.diag(neighbor.sum(axis=1)) - neighbor
+        score = np.linalg.eigh(laplacian)[1][:, -1]
+
+        order = np.argsort(score, kind="stable")
+        spin = np.ones(nsite, dtype=np.int8)
+        spin[order[nsite // 2 :]] = -1
+
+        while True:
+            alpha = np.flatnonzero(spin > 0)
+            beta = np.flatnonzero(spin < 0)
+            field = neighbor @ spin
+            gain = (
+                spin[alpha, None] * field[alpha, None]
+                + spin[beta] * field[beta]
+                - 2
+                * spin[alpha, None]
+                * spin[beta]
+                * neighbor[np.ix_(alpha, beta)]
+            )
+            pick = np.unravel_index(np.argmax(gain), gain.shape)
+            if gain[pick] <= 0:
+                break
+
+            spin[alpha[pick[0]]] *= -1
+            spin[beta[pick[1]]] *= -1
+
+        alpha = np.flatnonzero(spin > 0)
+        beta = np.flatnonzero(spin < 0)
+
+        if 0 not in alpha:
+            alpha, beta = beta, alpha
+
+        return np.sort(alpha), np.sort(beta)
+
     @classmethod
     def chain(cls, n: int, R: float) -> HydrogenLattice:
         coords = np.asarray([(0.0, 0.0, i * R) for i in range(n)], dtype=float)
@@ -95,7 +143,7 @@ class HydrogenLattice:
 
 def main() -> None:
     batch.configure(
-        forward_chunk=32768,
+        forward_chunk=262144,
         backward_chunk=4096,
         param_chunk=None,
         bucket_min=4096,
@@ -104,44 +152,53 @@ def main() -> None:
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
-    name = "h16"
+    name = "H16chain"
+    seed = 0
+    lattice = HydrogenLattice.chain(16, 2.0)
     mol = gto.M(
-        atom=HydrogenLattice.chain(16, 2.0).atom,
+        atom=lattice.atom,
         basis="sto-6g",
         unit="Angstrom",
         spin=0,
         verbose=0,
     )
 
-    mf = scf.RHF(mol).run()
-    norb = int(mf.mo_coeff.shape[1])
+    norb = int(mol.nao_nr())
     n_alpha, n_beta = map(int, mol.nelec)
 
-    # Build OAO integrals.
     s = mol.intor_symmetric("int1e_ovlp")
     coeff = lo.orth.orth_ao(mol, method="lowdin", pre_orth_ao=None)
 
-    h1 = np.asarray(coeff.T @ mf.get_hcore() @ coeff, dtype=np.float64)
-    eri = np.asarray(ao2mo.restore(8, ao2mo.kernel(mol, coeff), norb), dtype=np.float64)
+    hcore = scf.hf.get_hcore(mol)
+    h1 = np.asarray(coeff.T @ hcore @ coeff, dtype=np.float64)
+    eri = np.asarray(
+        ao2mo.restore(8, ao2mo.kernel(mol, coeff), norb),
+        dtype=np.float64,
+    )
 
-    h1[np.abs(h1) < 1.0e-8] = 0.0
-    eri[np.abs(eri) < 1.0e-8] = 0.0
+    h1[np.abs(h1) < 1.0e-6] = 0.0
+    eri[np.abs(eri) < 1.0e-6] = 0.0
 
-    # Build and save the FCIDUMP Hamiltonian.
     sector = DetSector(norb, n_alpha + n_beta, n_alpha - n_beta)
     hamiltonian = Hamiltonian(sector, h1, eri, ecore=mol.energy_nuc())
     hamiltonian.save(f"{name}.FCIDUMP")
 
-    print(f"SCF energy : {mf.e_tot:.12f}")
     print(f"active     : ({n_alpha + n_beta}e, {norb}o)")
     print(f"orth err   : {np.linalg.norm(coeff.T @ s @ coeff - np.eye(norb)):.3e}")
 
-    # Express the occupied SCF orbitals in the OAO Hamiltonian basis.
-    orbitals = coeff.T @ s @ mf.mo_coeff
+    nsite = lattice.coords.shape[0]
+    if norb != nsite or (n_alpha, n_beta) != (nsite // 2, nsite // 2):
+        raise ValueError("AFM reference requires one electron and one OAO per H atom")
+
+    occ_a, occ_b = lattice.afm_sites()
+    orbitals = np.eye(norb)
     ref_mat = slater_reference(
-        orbitals[:, :n_alpha],
-        orbitals[:, :n_beta],
+        orbitals[:, occ_a],
+        orbitals[:, occ_b],
     )
+
+    print(f"AF alpha   : {occ_a.tolist()}")
+    print(f"AF beta    : {occ_b.tolist()}")
 
     model = GBackflow(
         norb=norb,
@@ -161,14 +218,14 @@ def main() -> None:
         alpha=None,
     )
 
-    chains = sample_slater(sector, ref_mat, n=sampler.n_chains, seed=0)
+    chains = sample_slater(sector, ref_mat, n=sampler.n_chains, seed=seed)
 
     state = MCState.init(
         model=model,
         hamiltonian=hamiltonian,
         sampler=sampler,
         chains=chains,
-        key=jax.random.key(0),
+        key=jax.random.key(seed),
         eps1=1.0e-3,
         eps2=1.0e-6,
         eloc_sample=1024,

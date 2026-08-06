@@ -19,7 +19,7 @@ def main() -> None:
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
     batch.configure(
-        forward_chunk=32768,
+        forward_chunk=262144,
         backward_chunk=4096,
         param_chunk=None,
         bucket_min=4096,

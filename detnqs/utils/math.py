@@ -24,46 +24,6 @@ def normalize(w: Any, mask: Any | None = None) -> jax.Array:
     return w / norm
 
 
-def signed_logsumexp(
-    sign: Any,
-    logabs: Any,
-    axis: int = -1,
-) -> tuple[jax.Array, jax.Array]:
-    """Stable log of a signed exponential sum."""
-    axis = int(axis)
-    sign = jnp.asarray(sign)
-    logabs = jnp.asarray(logabs)
-    if not jnp.issubdtype(logabs.dtype, jnp.inexact):
-        logabs = logabs.astype(jnp.float64)
-
-    dtype = logabs.dtype
-    sign = sign.astype(dtype)
-
-    zero = jnp.asarray(0.0, dtype=dtype)
-    ninf = jnp.asarray(-jnp.inf, dtype=dtype)
-
-    valid = (sign != 0) & jnp.isfinite(sign) & jnp.isfinite(logabs)
-    safe_sign = jnp.where(valid, sign, zero)
-    safe_log = jnp.where(valid, logabs, ninf)
-
-    scale = jnp.max(safe_log, axis=axis, keepdims=True)
-    scale = jnp.where(jnp.isfinite(scale), scale, zero)
-
-    amp = jnp.sum(
-        safe_sign * jnp.exp(safe_log - scale),
-        axis=axis,
-        keepdims=True,
-    )
-
-    out_sign = jnp.sign(amp).astype(dtype)
-    out_log = jnp.where(amp != 0, scale + jnp.log(jnp.abs(amp)), ninf)
-
-    return (
-        jnp.squeeze(out_sign, axis=axis),
-        jnp.squeeze(out_log, axis=axis),
-    )
-
-
 def segment_logsumexp(
     ptr: NDArray[Any],
     values: NDArray[Any],

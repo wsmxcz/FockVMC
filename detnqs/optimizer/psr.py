@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import jax
@@ -19,19 +18,17 @@ from .base import Geometry
 class PSRState(NamedTuple):
     """State for predictive sample-space SR.
 
-    The stored `delta` is the previous actual parameter displacement.
-    With signed scale `eta`, PSR solves
+    The stored direction is the previous unscaled SR direction. PSR solves
 
-        p = mu delta_prev,
-        r = eta b - O p,
+        p = mu direction_prev,
+        r = b - O p,
         (O O^dagger + shift I) a = r,
-        delta = p + O^dagger a.
+        direction = p + O^dagger a.
 
-    The returned update is the actual parameter displacement.
+    A downstream Optax transform supplies the learning rate.
     """
 
-    step: jax.Array
-    delta: Any
+    direction: Any
     stats: dict[str, jax.Array]
 
 
@@ -39,9 +36,8 @@ def psr(
     *,
     shift: float = 1.0e-3,
     mu: float = 0.95,
-    scale: float | Callable[[jax.Array], Any] = -1.0,
 ) -> optax.GradientTransformationExtraArgs:
-    """Predictive stochastic reconfiguration."""
+    """Precondition updates with predictive sample-space SR."""
     if shift < 0.0:
         raise ValueError("shift must be non-negative")
     if not 0.0 <= mu < 1.0:
@@ -51,10 +47,8 @@ def psr(
         zero = jnp.asarray(0.0, dtype=precision.real("sr"))
 
         return PSRState(
-            step=jnp.zeros((), dtype=jnp.int32),
-            delta=jax.tree.map(jnp.zeros_like, params),
+            direction=jax.tree.map(jnp.zeros_like, params),
             stats={
-                "step_scale": zero,
                 "sr_force": zero,
                 "sr_damp": zero,
             },
@@ -73,28 +67,23 @@ def psr(
         if geometry is None:
             raise ValueError("optimizer.psr requires geometry")
 
-        eta = jnp.asarray(
-            scale(state.step) if callable(scale) else scale,
-            dtype=precision.real("sr"),
-        )
         shift_t = jnp.asarray(shift, dtype=precision.real("sr"))
 
         pred = jax.tree.map(
             lambda d: jnp.asarray(mu, dtype=d.dtype) * d,
-            state.delta,
+            state.direction,
         )
 
         delta, info = batch.bucket(
             _step,
             geometry.coord,
-            geometry.theta,
+            geometry.params,
             pred,
             geometry.x,
-            precision.cast(math.normalize(geometry.w), "model", "real"),
+            precision.cast(math.normalize(geometry.weight), "model", "real"),
             precision.cast(geometry.b, "model", "real"),
             shift_t,
-            eta,
-            in_axes=(None, None, None, 0, 0, 0, None, None),
+            in_axes=(None, None, None, 0, 0, 0, None),
             out_axes=None,
             static_argnums=0,
         )
@@ -102,14 +91,12 @@ def psr(
         delta = jax.tree.map(
             lambda d, p: d.astype(p.dtype),
             delta,
-            geometry.theta,
+            geometry.params,
         )
 
         return delta, PSRState(
-            step=state.step + 1,
-            delta=delta,
+            direction=delta,
             stats={
-                "step_scale": eta,
                 "sr_force": info["force"],
                 "sr_damp": info["damp"],
             },
@@ -126,10 +113,9 @@ def _step(
     w: jax.Array,
     b: jax.Array,
     shift: jax.Array,
-    scale: jax.Array,
 ) -> tuple[Any, dict[str, jax.Array]]:
     """Solve dense sample-space PSR."""
-    b_flat, unravel_b = ravel_pytree(b)
+    b_flat, _ = ravel_pytree(b)
 
     nsample = w.shape[0]
     nrow = b_flat.size
@@ -141,10 +127,7 @@ def _step(
         *[leaf.dtype for leaf in jax.tree.leaves(pred)],
     )
 
-    K = jnp.zeros((nrow, nrow), dtype=dtype)
-
-    for block, put in tree.blocks(theta, batch.config["param_chunk"]):
-
+    def tangent_block(block: jax.Array, put: Any) -> jax.Array:
         def coord_block(block_leaf: jax.Array, ket: Any) -> Any:
             ket = jax.tree.map(lambda z: z[None, ...], ket)
             val = coord(put(block_leaf), ket)
@@ -155,12 +138,15 @@ def _step(
 
         mean = jnp.einsum("n,ncp->cp", w, J)
         O = (J - mean[None]) * sqrt_w[:, None, None]
-        O = O.reshape(nrow, block.size).astype(dtype)
+        return O.reshape(nrow, block.size).astype(dtype)
 
+    K = jnp.zeros((nrow, nrow), dtype=dtype)
+    for block, put in tree.blocks(theta, batch.config["param_chunk"]):
+        O = tangent_block(block, put)
         K = K + O @ O.conj().T
 
     K = precision.cast(K, "sr")
-    rhs = scale * precision.cast(b_flat, "sr").astype(K.dtype)
+    rhs = precision.cast(b_flat, "sr").astype(K.dtype)
 
     # Subtract the predicted tangent response.
     _, Jp = batch.jvp(coord, theta, pred, x)
@@ -180,19 +166,19 @@ def _step(
     damp = shift * jnp.real(jnp.vdot(a, a))
     damp = damp / jnp.maximum(force, precision.tiny("sr"))
 
-    a_tree = unravel_b(a.astype(dtype))
-
-    def cotangent(val: jax.Array) -> jax.Array:
-        shape = (nsample,) + (1,) * (val.ndim - 1)
-        weighted = sqrt_w.reshape(shape) * val
-        return weighted - w.reshape(shape) * jnp.sum(weighted, axis=0)
-
-    corr = batch.vjp(
-        coord,
-        theta,
-        x,
-        jax.tree.map(cotangent, a_tree),
-    )
+    # Apply O^dagger directly. A complex parameterization gives a complex
+    # sample-space solution even though coord and b are real; routing that
+    # solution through a real-output VJP would discard its imaginary part.
+    corr = jax.tree.map(jnp.zeros_like, theta)
+    for block, put in tree.blocks(theta, batch.config["param_chunk"]):
+        O = tangent_block(block, put)
+        block_corr = (O.conj().T @ a).astype(block.dtype)
+        contribution = jax.tree.map(
+            jnp.subtract,
+            put(block + block_corr),
+            theta,
+        )
+        corr = jax.tree.map(jnp.add, corr, contribution)
 
     delta = jax.tree.map(
         lambda p, q: jnp.asarray(p).astype(q.dtype) + q,

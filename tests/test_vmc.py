@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import jax
+import numpy as np
+import optax
+
+from detnqs import ExactState, Hamiltonian, MCState, SelectedState, VMC, psr
+from detnqs.model import RBM
+from detnqs.sampler import MCSampler
+from detnqs.utils import batch
+
+
+FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
+
+
+def test_states() -> None:
+    batch.configure(
+        forward_chunk=128,
+        backward_chunk=128,
+        param_chunk=None,
+        bucket_min=128,
+    )
+    hamiltonian = Hamiltonian.load(FCIDUMP)
+    sector = hamiltonian.sector
+    model = RBM(norb=sector.norb, alpha=1)
+
+    exact = ExactState.init(
+        model=model,
+        hamiltonian=hamiltonian,
+        key=jax.random.key(0),
+    )
+    exact, exact_stats = exact.expect()
+
+    selected = SelectedState.init(
+        model=model,
+        hamiltonian=hamiltonian,
+        basis=sector.enumerate(),
+        key=jax.random.key(1),
+    ).replace(params=exact.params)
+    _, selected_stats = selected.expect()
+    np.testing.assert_allclose(selected_stats["energy"], exact_stats["energy"])
+
+    sampler = MCSampler(
+        n_samples=128,
+        n_chains=32,
+        thermal_steps=4,
+        proposal="ham",
+        blur=0.5,
+        alpha=2.0,
+    )
+    mc = MCState.init(
+        model=model,
+        hamiltonian=hamiltonian,
+        sampler=sampler,
+        key=jax.random.key(2),
+        eps1=0.0,
+        eps2=0.0,
+        eloc_sample=0,
+    ).replace(params=exact.params)
+    mc, energy, grad, stats, geometry = mc.expect_and_grad(geometry=True)
+
+    assert abs(energy - exact_stats["energy"]) < 0.25
+    assert np.isfinite(stats["eloc_var"])
+    assert geometry is not None
+    assert all(np.isfinite(np.asarray(x)).all() for x in jax.tree.leaves(grad))
+
+
+def test_checkpoint() -> None:
+    batch.configure(
+        forward_chunk=64,
+        backward_chunk=64,
+        param_chunk=None,
+        bucket_min=64,
+    )
+    hamiltonian = Hamiltonian.load(FCIDUMP)
+    model = RBM(norb=hamiltonian.norb, alpha=1)
+    sampler = MCSampler(n_samples=64, n_chains=16, thermal_steps=2)
+    state = MCState.init(
+        model=model,
+        hamiltonian=hamiltonian,
+        sampler=sampler,
+        key=jax.random.key(3),
+        eps1=0.0,
+        eps2=0.0,
+        eloc_sample=0,
+    )
+    optimizer = optax.chain(
+        psr(mu=0.0, shift=1.0e-2),
+        optax.scale_by_learning_rate(1.0e-3),
+    )
+    vmc = VMC.init(state, optimizer)
+    record = vmc.step()
+    assert "sr_force" in record
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "vmc.npz"
+        vmc.save(path)
+        saved_params = jax.tree.map(np.asarray, vmc.state.params)
+        saved_x = vmc.state.sampler_state.x.copy()
+        saved_step = vmc.step_count
+
+        vmc.step()
+        vmc.load(path)
+
+    assert vmc.step_count == saved_step
+    np.testing.assert_array_equal(vmc.state.sampler_state.x, saved_x)
+    for actual, expected in zip(
+        jax.tree.leaves(vmc.state.params),
+        jax.tree.leaves(saved_params),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(actual, expected)

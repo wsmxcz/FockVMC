@@ -13,7 +13,7 @@ def weight(
     mass: NDArray[Any],
     mass2: NDArray[Any],
     logabs: NDArray[Any],
-    logprob: NDArray[Any],
+    log_observation: NDArray[Any],
 ) -> tuple[NDArray[Any], dict[str, float]]:
     """Normalize Born weights from an auxiliary law.
 
@@ -28,9 +28,14 @@ def weight(
     mass = precision.cast(np.asarray(mass).reshape(-1), "calc", "real", host=True)
     mass2 = precision.cast(np.asarray(mass2).reshape(-1), "calc", "real", host=True)
     logabs = precision.cast(np.asarray(logabs).reshape(-1), "calc", "real", host=True)
-    logprob = precision.cast(np.asarray(logprob).reshape(-1), "calc", "real", host=True)
+    log_observation = precision.cast(
+        np.asarray(log_observation).reshape(-1),
+        "calc",
+        "real",
+        host=True,
+    )
 
-    logw = dtype(2.0) * logabs - logprob
+    logw = dtype(2.0) * logabs - log_observation
     valid = (
         np.isfinite(logw)
         & np.isfinite(mass)
@@ -51,36 +56,41 @@ def weight(
     if norm <= 0.0 or not np.isfinite(norm):
         raise FloatingPointError("importance weights have zero total mass")
 
-    w = precision.cast(weighted / norm, "calc", "real", host=True)
+    weight = precision.cast(weighted / norm, "calc", "real", host=True)
 
     ess = float(norm * norm / max(float(np.sum(mass2 * unorm * unorm)), float(tiny)))
-    essu = float(1.0 / max(float(np.sum(w * w)), float(tiny)))
+    essu = float(1.0 / max(float(np.sum(weight * weight)), float(tiny)))
 
-    return w, {
+    return weight, {
         "ess": ess,
         "ess_frac": ess / max(1.0, float(np.sum(mass))),
         "essu": essu,
-        "essu_frac": essu / max(1.0, float(w.shape[0])),
-        "w_max": float(np.max(w)) if w.size else 0.0,
+        "essu_frac": essu / max(1.0, float(weight.shape[0])),
+        "w_max": float(np.max(weight)) if weight.size else 0.0,
     }
 
 
 def eloc(
-    w: NDArray[Any],
+    weight: NDArray[Any],
     eloc: NDArray[Any],
     *,
     blocks: NDArray[Any] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Reduce weighted local-energy statistics."""
-    w = precision.cast(np.asarray(w).reshape(-1), "calc", "real", host=True)
+    weight = precision.cast(
+        np.asarray(weight).reshape(-1),
+        "calc",
+        "real",
+        host=True,
+    )
     eloc = precision.cast(np.asarray(eloc).reshape(-1), "calc", host=True)
 
-    energy = float(np.real(np.dot(w, eloc)))
+    energy = float(np.real(np.dot(weight, eloc)))
     resid = eloc - energy
 
     out = {
         "energy": energy,
-        "eloc_var": float(np.real(np.dot(w, np.abs(resid) ** 2))),
+        "eloc_var": float(np.real(np.dot(weight, np.abs(resid) ** 2))),
     }
 
     if blocks is not None:
@@ -93,17 +103,26 @@ def eloc(
     return energy, out
 
 
-def observable(name: str, w: NDArray[Any], oloc: NDArray[Any]) -> dict[str, float]:
+def observable(
+    name: str,
+    weight: NDArray[Any],
+    oloc: NDArray[Any],
+) -> dict[str, float]:
     """Reduce one local observable."""
-    w = precision.cast(np.asarray(w).reshape(-1), "calc", "real", host=True)
+    weight = precision.cast(
+        np.asarray(weight).reshape(-1),
+        "calc",
+        "real",
+        host=True,
+    )
     oloc = precision.cast(np.asarray(oloc).reshape(-1), "calc", host=True)
 
-    mean = float(np.real(np.dot(w, oloc)))
+    mean = float(np.real(np.dot(weight, oloc)))
     resid = oloc - mean
 
     return {
         str(name): mean,
-        f"{name}_var": float(np.real(np.dot(w, np.abs(resid) ** 2))),
+        f"{name}_var": float(np.real(np.dot(weight, np.abs(resid) ** 2))),
     }
 
 

@@ -14,16 +14,16 @@ class Geometry:
         O = sqrt(w) * (J - <J>_w).
 
     Fields:
-        theta:
+        params:
             Parameters used to build the geometry.
 
         coord:
-            Real autodiff coordinate, coord(theta, x).
+            Real autodiff coordinate, coord(params, x).
 
         x:
             Sample axis used by the geometry.
 
-        w:
+        weight:
             Non-negative sample weights. They may be normalized or
             unnormalized; optimizers normalize them internally.
 
@@ -31,8 +31,8 @@ class Geometry:
             Sample-space right-hand side used by PSR.
     """
 
-    theta: Any
+    params: Any
     coord: Callable[[Any, Any], Any]
     x: Any
-    w: Any
+    weight: Any
     b: Any

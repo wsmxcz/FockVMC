@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import partial
 from typing import Any, Literal, NamedTuple
 
@@ -17,17 +16,8 @@ from .base import Geometry
 
 
 class SRState(NamedTuple):
-    """State for parameter-space stochastic reconfiguration.
+    """Warm start and scalar statistics for parameter-space SR."""
 
-    SR solves
-
-        (S + shift I) delta = eta grad,
-
-    where `eta = scale(step)` is the signed update scale and
-    `S = O^dagger O` is the centered tangent-space metric.
-    """
-
-    step: jax.Array
     x0: jax.Array
     stats: dict[str, jax.Array]
 
@@ -35,11 +25,10 @@ class SRState(NamedTuple):
 def sr(
     *,
     shift: float = 1.0e-3,
-    scale: float | Callable[[jax.Array], Any] = -1.0,
     mode: Literal["dense", "matvec"] = "matvec",
     maxiter: int = 64,
 ) -> optax.GradientTransformationExtraArgs:
-    """Parameter-space stochastic reconfiguration."""
+    """Precondition updates with the parameter-space SR geometry."""
     if shift < 0.0:
         raise ValueError("shift must be non-negative")
     if mode not in {"dense", "matvec"}:
@@ -50,10 +39,8 @@ def sr(
         zero = jnp.asarray(0.0, dtype=precision.real("sr"))
 
         return SRState(
-            step=jnp.zeros((), dtype=jnp.int32),
             x0=jnp.zeros_like(flat),
             stats={
-                "step_scale": zero,
                 "sr_force": zero,
                 "sr_damp": zero,
             },
@@ -72,15 +59,11 @@ def sr(
         if geometry is None:
             raise ValueError("optimizer.sr requires geometry")
 
-        eta = jnp.asarray(
-            scale(state.step) if callable(scale) else scale,
-            dtype=precision.real("sr"),
-        )
         shift_t = jnp.asarray(shift, dtype=precision.real("sr"))
 
-        theta = geometry.theta
+        theta = geometry.params
         x = geometry.x
-        w = precision.cast(math.normalize(geometry.w), "model", "real")
+        w = precision.cast(math.normalize(geometry.weight), "model", "real")
         grad = jax.tree.map(
             lambda g, p: jnp.asarray(g).astype(p.dtype),
             updates,
@@ -95,7 +78,6 @@ def sr(
                 w,
                 grad,
                 shift_t,
-                eta,
             )
             x0 = state.x0
         else:
@@ -106,7 +88,6 @@ def sr(
                 w,
                 grad,
                 shift_t,
-                eta,
                 state.x0,
                 int(maxiter),
             )
@@ -118,10 +99,8 @@ def sr(
         )
 
         return delta, SRState(
-            step=state.step + 1,
             x0=x0,
             stats={
-                "step_scale": eta,
                 "sr_force": info["force"],
                 "sr_damp": info["damp"],
             },
@@ -138,7 +117,6 @@ def _dense_step(
     w: jax.Array,
     grad: Any,
     shift: jax.Array,
-    scale: jax.Array,
 ) -> tuple[Any, dict[str, jax.Array]]:
     """Solve dense parameter-space SR."""
     grad_flat, unravel = ravel_pytree(grad)
@@ -155,7 +133,7 @@ def _dense_step(
     O = jnp.concatenate(blocks, axis=1)
     S = precision.cast(O.conj().T @ O, "sr")
 
-    rhs = scale * precision.cast(grad_flat, "sr").astype(S.dtype)
+    rhs = precision.cast(grad_flat, "sr").astype(S.dtype)
     delta = linalg.solve_dense(S, rhs, shift)
 
     force = jnp.real(jnp.vdot(rhs, delta)).astype(precision.real("sr"))
@@ -168,7 +146,7 @@ def _dense_step(
     }
 
 
-@partial(jax.jit, static_argnums=(0, 8))
+@partial(jax.jit, static_argnums=(0, 7))
 def _matvec_step(
     coord: Any,
     theta: Any,
@@ -176,7 +154,6 @@ def _matvec_step(
     w: jax.Array,
     grad: Any,
     shift: jax.Array,
-    scale: jax.Array,
     x0: jax.Array,
     maxiter: int,
 ) -> tuple[Any, jax.Array, dict[str, jax.Array]]:
@@ -208,7 +185,7 @@ def _matvec_step(
         flat, _ = ravel_pytree(out)
         return precision.cast(flat, "sr").astype(vec.dtype)
 
-    rhs = scale * precision.cast(grad_flat, "sr")
+    rhs = precision.cast(grad_flat, "sr")
     x0 = precision.cast(x0, "sr").astype(rhs.dtype)
 
     delta = linalg.solve_matvec(

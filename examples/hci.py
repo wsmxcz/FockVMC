@@ -4,152 +4,133 @@ from dataclasses import dataclass
 import time
 
 import numpy as np
-import primme
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import LinearOperator, eigsh
 from pyscf import ao2mo, gto, scf
 
-from detnqs import hilbert, operator, utils
+from detnqs import Hamiltonian
+from detnqs.hilbert import DetSector
+from detnqs.utils import Logger
 
 
 @dataclass(slots=True)
-class HCIState:
+class _HCIState:
     """Selected-CI wavefunction data used by variational and PT2 stages."""
 
-    dets: np.ndarray
-    coeffs: np.ndarray
+    basis: np.ndarray
+    coeff: np.ndarray
     energy: float
-    diags: np.ndarray
-    eps: float | None = None
 
 
-def davidson_primme(
-    H: operator.Hamiltonian,
-    dets: np.ndarray,
-    guess: np.ndarray | None = None,
+def _ground(
+    hamiltonian: Hamiltonian,
+    basis: np.ndarray,
+    initial: np.ndarray | None = None,
     *,
     tol: float = 1e-8,
     max_iter: int = 200,
     max_space: int = 64,
     mode: str = "sparse",
-) -> tuple[float, np.ndarray, np.ndarray, float, float, float]:
+) -> tuple[float, np.ndarray, float, float, float]:
     """Solve the variational problem in a fixed determinant basis."""
-    t0 = time.perf_counter()
+    start = time.perf_counter()
 
-    hdiag = H.diag(dets).reshape(-1)
-    n = hdiag.size
+    diag = hamiltonian.diag(basis).reshape(-1)
+    n = diag.size
 
     if n == 1:
         return (
-            float(hdiag[0]),
+            float(diag[0]),
             np.array([1.0], dtype=np.float64),
-            hdiag,
             0.0,
             0.0,
-            time.perf_counter() - t0,
+            time.perf_counter() - start,
         )
 
-    if guess is None:
-        v0 = np.zeros(n, dtype=np.float64)
-        v0[0] = 1.0
+    if initial is None:
+        vector = np.zeros(n, dtype=np.float64)
+        vector[0] = 1.0
     else:
-        v0 = np.asarray(guess, dtype=np.float64).reshape(-1).copy()
-        v0 /= np.linalg.norm(v0)
+        vector = np.asarray(initial, dtype=np.float64).reshape(-1).copy()
+        vector /= np.linalg.norm(vector)
 
-    t_conns = time.perf_counter()
+    conn_time = time.perf_counter()
 
     if mode == "sparse":
-        A = H.matrix(dets)
+        matrix = hamiltonian.matrix(basis)
 
     elif mode == "matvec":
 
         def matvec(x: np.ndarray) -> np.ndarray:
-            return H.matvec(
-                dets,
+            return hamiltonian.matvec(
+                basis,
                 np.asarray(x, dtype=np.float64).reshape(-1),
-                kets=dets,
+                kets=basis,
             )
 
-        def matmat(X: np.ndarray) -> np.ndarray:
-            return H.matvec(dets, np.asarray(X, dtype=np.float64), kets=dets)
+        def matmat(x: np.ndarray) -> np.ndarray:
+            return hamiltonian.matvec(
+                basis,
+                np.asarray(x, dtype=np.float64),
+                kets=basis,
+            )
 
-        A = LinearOperator((n, n), matvec=matvec, matmat=matmat, dtype=np.float64)
+        matrix = LinearOperator(
+            (n, n),
+            matvec=matvec,
+            matmat=matmat,
+            dtype=np.float64,
+        )
 
     else:
         raise ValueError("mode must be 'sparse' or 'matvec'")
 
-    t_conns = time.perf_counter() - t_conns
+    conn_time = time.perf_counter() - conn_time
 
-    def precond(x: np.ndarray) -> np.ndarray:
-        x_arr = np.asarray(x, dtype=np.float64)
-        is_vec = x_arr.ndim == 1
-
-        if is_vec:
-            x_arr = x_arr[:, None]
-
-        shifts = np.asarray(primme.get_eigsh_param("ShiftsForPreconditioner"))
-        if shifts.size == 0:
-            shifts = np.zeros(x_arr.shape[1], dtype=np.float64)
-        elif shifts.size == 1 and x_arr.shape[1] > 1:
-            shifts = np.full(x_arr.shape[1], shifts[0], dtype=np.float64)
-
-        out = np.empty_like(x_arr)
-        for j in range(x_arr.shape[1]):
-            denom = hdiag - shifts[j]
-            denom = np.where(np.abs(denom) < 1e-8, np.copysign(1e-8, denom), denom)
-            out[:, j] = x_arr[:, j] / denom
-
-        return out[:, 0] if is_vec else out
-
-    op_inv = LinearOperator((n, n), matvec=precond, matmat=precond, dtype=np.float64)
-
-    t_solve = time.perf_counter()
-    w, v = primme.eigsh(
-        A,
-        k=1,
-        which="SA",
-        v0=v0[:, None],
-        OPinv=op_inv,
-        tol=tol,
-        maxiter=max_iter,
-        ncv=min(n, max(8, min(max_space, 24))),
-        maxBlockSize=1,
-        raise_for_unconverged=False,
-    )
-    t_solve = time.perf_counter() - t_solve
-
-    w = np.asarray(w, dtype=np.float64).reshape(-1)
-    v = np.asarray(v, dtype=np.float64)
-
-    if w.size == 0:
-        coeffs = v0.copy()
-        energy = float(np.dot(coeffs, A @ coeffs))
+    solve_time = time.perf_counter()
+    if n == 2:
+        values, vectors = np.linalg.eigh(hamiltonian.matrix(basis).toarray())
+        values = values[:1]
+        vectors = vectors[:, :1]
     else:
-        coeffs = v[:, 0].copy()
-        if coeffs[np.argmax(np.abs(coeffs))] < 0.0:
-            coeffs = -coeffs
-        coeffs /= np.linalg.norm(coeffs)
-        energy = float(w[0])
+        values, vectors = eigsh(
+            matrix,
+            k=1,
+            which="SA",
+            v0=vector,
+            tol=tol,
+            maxiter=max_iter,
+            ncv=min(n, max(3, min(max_space, 24))),
+        )
+    solve_time = time.perf_counter() - solve_time
 
-    t_other = time.perf_counter() - t0 - t_conns - t_solve
-    return energy, coeffs, hdiag, t_conns, t_solve, t_other
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    vectors = np.asarray(vectors, dtype=np.float64)
+
+    coeff = vectors[:, 0].copy()
+    if coeff[np.argmax(np.abs(coeff))] < 0.0:
+        coeff = -coeff
+    coeff /= np.linalg.norm(coeff)
+    energy = float(values[0])
+
+    other_time = time.perf_counter() - start - conn_time - solve_time
+    return energy, coeff, conn_time, solve_time, other_time
 
 
-def hci_solve(
-    H: operator.Hamiltonian,
+def _select(
+    hamiltonian: Hamiltonian,
     *,
     eps: float = 1e-4,
     max_cycle: int = 10,
-    davidson_mode: str = "sparse",
-) -> HCIState:
+    mode: str = "sparse",
+) -> _HCIState:
     """Grow a heat-bath selected determinant basis and diagonalize in it."""
-    t_total = time.perf_counter()
+    start = time.perf_counter()
 
-    dets = H.sector.reference(1)
-    coeffs = np.array([1.0], dtype=np.float64)
-    diags = H.diag(dets).reshape(-1)
-    energy = float(diags[0])
+    basis = hamiltonian.sector.reference(1)
+    coeff = np.array([1.0], dtype=np.float64)
+    energy = float(hamiltonian.diag(basis).reshape(-1)[0])
 
-    log = utils.Logger(
+    log = Logger(
         every=1,
         keys=[
             "step",
@@ -165,57 +146,55 @@ def hci_solve(
 
     for it in range(max_cycle):
         # Select new external configurations above the cutoff.
-        t_screen = time.perf_counter()
-        cand = H.expand(dets, eps, scale=coeffs, exclude=dets)
-        t_screen = time.perf_counter() - t_screen
+        screen_time = time.perf_counter()
+        candidates = hamiltonian.expand(basis, eps, scale=coeff, exclude=basis)
+        screen_time = time.perf_counter() - screen_time
 
-        if cand.shape[0] == 0:
-            print(f"Converged at cycle {it}: no new determinants.")
+        if candidates.shape[0] == 0:
+            print(f"Converged at cycle {it}: no new configurations.")
             break
 
-        n_old = len(dets)
-        dets = np.ascontiguousarray(
-            np.concatenate([dets, cand], axis=0),
+        old_size = len(basis)
+        basis = np.ascontiguousarray(
+            np.concatenate([basis, candidates], axis=0),
             dtype=np.uint64,
         )
 
-        guess = np.zeros(len(dets), dtype=np.float64)
-        guess[:n_old] = coeffs
+        initial = np.zeros(len(basis), dtype=np.float64)
+        initial[:old_size] = coeff
 
-        energy, coeffs, diags, t_conns, t_solve, t_other = davidson_primme(
-            H,
-            dets,
-            guess,
-            mode=davidson_mode,
+        energy, coeff, conn_time, solve_time, other_time = _ground(
+            hamiltonian,
+            basis,
+            initial,
+            mode=mode,
         )
 
         log.add(
             {
                 "step": it + 1,
-                "n_det": len(dets),
-                "n_new": cand.shape[0],
+                "n_det": len(basis),
+                "n_new": candidates.shape[0],
                 "energy": energy,
-                "time_screen": t_screen,
-                "time_conns": t_conns,
-                "time_solve": t_solve,
-                "time_other": t_other,
+                "time_screen": screen_time,
+                "time_conns": conn_time,
+                "time_solve": solve_time,
+                "time_other": other_time,
             },
         )
 
-    print(f"Total time: {time.perf_counter() - t_total:.2f}s")
+    print(f"Total time: {time.perf_counter() - start:.2f}s")
 
-    return HCIState(
-        dets=dets,
-        coeffs=coeffs,
+    return _HCIState(
+        basis=basis,
+        coeff=coeff,
         energy=energy,
-        diags=diags,
-        eps=float(eps),
     )
 
 
-def semi_pt2(
-    H: operator.Hamiltonian,
-    state: HCIState,
+def _pt2(
+    hamiltonian: Hamiltonian,
+    state: _HCIState,
     *,
     eps1: float = 1e-4,
     eps2: float = 1e-6,
@@ -223,37 +202,36 @@ def semi_pt2(
     n_rep: int = 4,
     seed: int = 0,
 ) -> tuple[float, float, float, float]:
-    dets = state.dets
-    coeffs = state.coeffs
+    basis = state.basis
+    coeff = state.coeff
     energy = state.energy
 
     # Deterministic contribution above the upper cutoff.
-    prj = H.project(
+    projection = hamiltonian.project(
         None,
-        dets,
-        coeffs,
+        basis,
+        coeff,
         eps=eps1,
-        exclude=dets,
+        exclude=basis,
     )
 
-    hpsi = np.asarray(prj.hpsi)
-    diags = np.asarray(prj.diag)
-    e2_det = float(np.sum((hpsi * hpsi) / (energy - diags)))
-    del prj, hpsi, diags
+    hpsi = np.asarray(projection.hpsi)
+    diag = np.asarray(projection.diag)
+    det_pt2 = float(np.sum((hpsi * hpsi) / (energy - diag)))
 
     # Stochastic contribution inside the remaining cutoff window.
     rng = np.random.default_rng(seed)
     corr = np.zeros(n_rep, dtype=np.float64)
-    counts_arr = np.full((2, len(dets)), counts, dtype=np.int64)
+    sample_count = np.full((2, len(basis)), counts, dtype=np.int64)
 
     for r in range(n_rep):
-        weak = H.sample_project(
-            dets,
-            coeffs,
-            counts_arr,
+        weak = hamiltonian.sample_project(
+            basis,
+            coeff,
+            sample_count,
             eps1=eps1,
             eps2=eps2,
-            exclude=dets,
+            exclude=basis,
             seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
         )
 
@@ -262,19 +240,19 @@ def semi_pt2(
         if sample_bra.shape[0] == 0:
             continue
 
-        strong = H.project(sample_bra, dets, coeffs, eps=eps1)
-        strong_pair = np.asarray(strong.hpsi)
+        strong = hamiltonian.project(sample_bra, basis, coeff, eps=eps1)
+        strong_hpsi = np.asarray(strong.hpsi)
         denom = energy - np.asarray(strong.diag)
         weak_a, weak_b = weak_hpsi
 
         corr[r] = np.sum(
-            (strong_pair * (weak_a + weak_b) + weak_a * weak_b) / denom
+            (strong_hpsi * (weak_a + weak_b) + weak_a * weak_b) / denom
         )
 
-    e2_stoch = float(np.mean(corr))
+    sample_pt2 = float(np.mean(corr))
     err = 0.0 if n_rep == 1 else float(np.std(corr, ddof=1) / np.sqrt(n_rep))
 
-    return e2_det + e2_stoch, e2_det, e2_stoch, err
+    return det_pt2 + sample_pt2, det_pt2, sample_pt2, err
 
 
 def main() -> None:
@@ -302,20 +280,20 @@ def main() -> None:
     )
 
     # Build Hamiltonian.
-    sector = hilbert.DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
-    H = operator.Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
+    sector = DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
+    hamiltonian = Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
     # Run variational stage.
-    state = hci_solve(
-        H,
+    state = _select(
+        hamiltonian,
         eps=1e-4,
         max_cycle=10,
-        davidson_mode="sparse",
+        mode="sparse",
     )
 
     # Run correction stage.
-    e2_total, e2_det, e2_stoch, err = semi_pt2(
-        H,
+    pt2, det_pt2, sample_pt2, error = _pt2(
+        hamiltonian,
         state,
         eps1=1e-6,
         eps2=1e-6,
@@ -326,11 +304,11 @@ def main() -> None:
 
     print()
     print(f"SCF          : {mf.e_tot:16.12f}")
-    print(f"HCI var      : {state.energy:16.12f}  Ndet: {len(state.dets)}")
-    print(f"PT2 det      : {e2_det:16.12f}")
-    print(f"PT2 stoch    : {e2_stoch:16.12f} +/- {err:.12f}")
-    print(f"PT2 total    : {e2_total:16.12f} +/- {err:.12f}")
-    print(f"HCI + PT2    : {state.energy + e2_total:16.12f} +/- {err:.12f}")
+    print(f"HCI var      : {state.energy:16.12f}  Ndet: {len(state.basis)}")
+    print(f"PT2 det      : {det_pt2:16.12f}")
+    print(f"PT2 stoch    : {sample_pt2:16.12f} +/- {error:.12f}")
+    print(f"PT2 total    : {pt2:16.12f} +/- {error:.12f}")
+    print(f"HCI + PT2    : {state.energy + pt2:16.12f} +/- {error:.12f}")
 
 
 if __name__ == "__main__":

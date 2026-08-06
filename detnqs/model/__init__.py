@@ -7,6 +7,7 @@ from .base import (
     to_psi,
     to_ratio,
 )
+from .init import slater_reference
 from .rbm import RBM
 
 __all__ = (
@@ -19,4 +20,5 @@ __all__ = (
     "to_logabs",
     "to_psi",
     "to_ratio",
+    "slater_reference",
 )

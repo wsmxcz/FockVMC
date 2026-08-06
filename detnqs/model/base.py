@@ -94,9 +94,13 @@ class Model(nn.Module):
     def __call__(self, x: Any) -> Any:
         raise NotImplementedError
 
+    def apply(self, params: Any, x: Any) -> Any:
+        """Evaluate ``logpsi`` for configurations ``x``."""
+        return nn.Module.apply(self, {"params": params}, x)
+
     def logpsi(self, theta: Any, x: Any) -> Any:
         """Evaluate the raw wavefunction representation."""
-        out = self.apply({"params": theta}, x)
+        out = self.apply(theta, x)
 
         if isinstance(out, tuple):
             sign, logabs = out

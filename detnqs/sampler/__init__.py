@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from .mcmc import Chains, MCSampler
+from .mcmc import ChainState, MCSampler
+from .init import init_chains
 
 __all__ = (
-    "Chains",
+    "ChainState",
     "MCSampler",
+    "init_chains",
 )

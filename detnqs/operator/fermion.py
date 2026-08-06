@@ -14,7 +14,7 @@ def _count(words: NDArray[Any]) -> NDArray[np.int64]:
     return np.bitwise_count(words).sum(axis=-1, dtype=np.int64)
 
 
-def occupation(ket: Any, spin: int, p: int) -> NDArray[np.float64]:
+def _occupation(ket: Any, spin: int, p: int) -> NDArray[np.float64]:
     """Return n_{spin,p}(ket)."""
     ket = np.asarray(ket, dtype=np.uint64)
     spin = int(spin)
@@ -89,77 +89,14 @@ def number(
     ket = np.asarray(ket, dtype=np.uint64)
     if p is not None:
         if spin is None:
-            return occupation(ket, 0, int(p)) + occupation(ket, 1, int(p))
-        return occupation(ket, int(spin), int(p))
+            return _occupation(ket, 0, int(p)) + _occupation(ket, 1, int(p))
+        return _occupation(ket, int(spin), int(p))
     if spin is not None:
         return _count(ket[:, int(spin), :]).astype(np.float64)
     return (
         _count(ket[:, 0, :]).astype(np.float64)
         + _count(ket[:, 1, :]).astype(np.float64)
     )
-
-
-def sz(ket: Any) -> NDArray[np.float64]:
-    """Return S_z(ket) = (N_alpha - N_beta) / 2."""
-    ket = np.asarray(ket, dtype=np.uint64)
-    return 0.5 * (
-        _count(ket[:, 0, :]).astype(np.float64)
-        - _count(ket[:, 1, :]).astype(np.float64)
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class Number:
-    """Particle-number operator."""
-
-    sector: Any
-
-    def diag(self, ket: Any) -> NDArray[np.float64]:
-        return number(ket)
-
-    def local_conn(
-        self,
-        ket: Any,
-    ) -> tuple[
-        NDArray[np.float64],
-        NDArray[np.int64],
-        NDArray[np.uint64],
-        NDArray[np.float64],
-    ]:
-        ket = np.ascontiguousarray(ket, dtype=np.uint64)
-        return (
-            self.diag(ket),
-            np.zeros(ket.shape[0] + 1, dtype=np.int64),
-            ket[:0].copy(),
-            np.empty(0, dtype=np.float64),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class Sz:
-    """Spin-z operator."""
-
-    sector: Any
-
-    def diag(self, ket: Any) -> NDArray[np.float64]:
-        return sz(ket)
-
-    def local_conn(
-        self,
-        ket: Any,
-    ) -> tuple[
-        NDArray[np.float64],
-        NDArray[np.int64],
-        NDArray[np.uint64],
-        NDArray[np.float64],
-    ]:
-        ket = np.ascontiguousarray(ket, dtype=np.uint64)
-        return (
-            self.diag(ket),
-            np.zeros(ket.shape[0] + 1, dtype=np.int64),
-            ket[:0].copy(),
-            np.empty(0, dtype=np.float64),
-        )
 
 
 @dataclass(frozen=True, slots=True)

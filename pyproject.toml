@@ -28,24 +28,9 @@ dependencies = [
   "scipy>=1.10",
 ]
 
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Intended Audience :: Science/Research",
-  "Operating System :: OS Independent",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "Programming Language :: C++",
-  "Topic :: Scientific/Engineering :: Chemistry",
-]
-
 [project.optional-dependencies]
 dev = [
   "pytest",
-  "pytest-benchmark",
-  "ipykernel",
-  "build",
-  "twine",
 ]
 
 [tool.scikit-build]
@@ -54,30 +39,6 @@ cmake.build-type = "Release"
 
 wheel.packages = [
   "detnqs",
-]
-
-sdist.include = [
-  "CMakeLists.txt",
-  "LICENSE",
-  "README.md",
-
-  "detnqs/**",
-  "examples/**",
-  "tests/**",
-]
-
-sdist.exclude = [
-  ".git/**",
-  ".mypy_cache/**",
-  ".pytest_cache/**",
-  ".ruff_cache/**",
-  "**/__pycache__/**",
-  "**/*.py[cod]",
-  "*.egg-info/**",
-  "_skbuild/**",
-  "build/**",
-  "cmake-build-*/**",
-  "dist/**",
 ]
 
 [tool.pytest.ini_options]

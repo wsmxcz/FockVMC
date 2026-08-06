@@ -23,17 +23,20 @@ class Hamiltonian:
         *,
         ecore: float = 0.0,
     ) -> None:
+        if not isinstance(sector, DetSector):
+            raise TypeError(f"unsupported sector: {type(sector).__name__}")
+
         self.sector = sector
         self._ecore = float(ecore)
 
         h1 = np.ascontiguousarray(h1, dtype=np.float64)
         eri = np.ascontiguousarray(eri, dtype=np.float64).reshape(-1)
 
+        if h1.shape != (sector.norb, sector.norb):
+            raise ValueError("h1 shape must match sector.norb")
+
         self._h1 = h1
         self._eri = eri
-
-        if not isinstance(sector, DetSector):
-            raise TypeError(f"unsupported sector: {type(sector).__name__}")
 
         self._raw = libdet.Hamiltonian.det(h1, eri, self._ecore)
 

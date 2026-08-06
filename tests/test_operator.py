@@ -2,73 +2,81 @@ from __future__ import annotations
 
 import numpy as np
 
-from detnqs import hilbert, operator
+from detnqs import Hamiltonian
+from detnqs.hilbert import DetSector
+from detnqs.operator import S2, annihilate, create, number
 
 
-def dense(H: operator.Hamiltonian, basis: np.ndarray) -> np.ndarray:
-    return np.array(
-        [[H.hij(bra[None], ket[None]) for ket in basis] for bra in basis],
-        dtype=np.float64,
-    )
+def _packed_eri(norb: int) -> np.ndarray:
+    npair = norb * (norb + 1) // 2
+    return np.zeros(npair * (npair + 1) // 2, dtype=np.float64)
 
 
-def eri(norb: int) -> np.ndarray:
-    n2 = norb * (norb + 1) // 2
-    return np.zeros(n2 * (n2 + 1) // 2, dtype=np.float64)
-
-
-def test_det_core() -> None:
-    sec = hilbert.DetSector(norb=3, nelec=2, spin=0)
-    h1 = np.array(
+def _dense(hamiltonian: Hamiltonian, basis: np.ndarray) -> np.ndarray:
+    return np.asarray(
         [
-            [0.2, 0.4, -0.1],
-            [0.4, 0.7, 0.3],
-            [-0.1, 0.3, 1.1],
-        ],
-        dtype=np.float64,
+            [
+                hamiltonian.hij(bra[None], ket[None])
+                for ket in basis
+            ]
+            for bra in basis
+        ]
     )
 
-    H = operator.Hamiltonian(sec, h1, eri(sec.norb), ecore=0.5)
-    basis = sec.enumerate()
-    mat = dense(H, basis)
-    vec = np.linspace(-0.7, 0.9, len(basis))
 
-    np.testing.assert_allclose(H.matrix(basis).toarray(), mat)
-    np.testing.assert_allclose(H.diag(basis), np.diag(mat))
-    np.testing.assert_allclose(H.matvec(basis, vec), mat @ vec)
+def _system() -> tuple[Hamiltonian, np.ndarray]:
+    sector = DetSector(norb=3, nelec=2, spin=0)
+    h1 = np.array(
+        [[0.2, 0.4, -0.1], [0.4, 0.7, 0.3], [-0.1, 0.3, 1.1]],
+        dtype=np.float64,
+    )
+    hamiltonian = Hamiltonian(sector, h1, _packed_eri(sector.norb), ecore=0.5)
+    basis = sector.enumerate()
+    return hamiltonian, basis
 
-    con = H.conn(basis[:4], eps=0.15)
-    pool = np.asarray(con.bra)
-    ptr = np.asarray(con.ptr)
-    val = np.asarray(con.h)
-    n_ket = 4
+
+def test_action() -> None:
+    hamiltonian, basis = _system()
+    matrix = _dense(hamiltonian, basis)
+    vector = np.linspace(-0.7, 0.9, len(basis))
+
+    np.testing.assert_allclose(hamiltonian.matrix(basis).toarray(), matrix)
+    np.testing.assert_allclose(hamiltonian.diag(basis), np.diag(matrix))
+    np.testing.assert_allclose(hamiltonian.matvec(basis, vector), matrix @ vector)
+
+
+def test_connections() -> None:
+    hamiltonian, basis = _system()
+    matrix = _dense(hamiltonian, basis)
+    connections = hamiltonian.conn(basis[:4], eps=0.15)
+    bra = np.asarray(connections.bra)
+    ptr = np.asarray(connections.ptr)
+    value = np.asarray(connections.h)
 
     for j, ket in enumerate(basis[:4]):
-        got = {
-            np.ascontiguousarray(pool[n_ket + p]).tobytes(): val[p]
+        actual = {
+            np.ascontiguousarray(bra[4 + p]).tobytes(): value[p]
             for p in range(ptr[j], ptr[j + 1])
         }
-        exp = {
-            np.ascontiguousarray(bra).tobytes(): mat[i, j]
-            for i, bra in enumerate(basis)
-            if not np.array_equal(bra, ket) and abs(mat[i, j]) >= 0.15
+        expected = {
+            np.ascontiguousarray(x).tobytes(): matrix[i, j]
+            for i, x in enumerate(basis)
+            if not np.array_equal(x, ket) and abs(matrix[i, j]) >= 0.15
         }
-        assert got == exp
+        assert actual == expected
 
 
 def test_fermion() -> None:
-    sec = hilbert.DetSector(norb=4, nelec=3, spin=1)
-    x = sec.reference(1)
+    sector = DetSector(norb=4, nelec=3, spin=1)
+    x = sector.reference(1)
 
-    bra, sgn, active = operator.annihilate(x, 0, 1)
-    assert active.tolist() == [True]
-    np.testing.assert_allclose(sgn, [-1.0])
-    np.testing.assert_allclose(operator.number(bra), [2.0])
+    bra, sign, active = annihilate(x, 0, 1)
+    np.testing.assert_array_equal(active, [True])
+    np.testing.assert_allclose(sign, [-1.0])
+    np.testing.assert_allclose(number(bra), [2.0])
 
-    ket, sgn, active = operator.create(bra, 0, 1)
-    assert active.tolist() == [True]
-    np.testing.assert_allclose(sgn, [-1.0])
+    ket, sign, active = create(bra, 0, 1)
+    np.testing.assert_array_equal(active, [True])
+    np.testing.assert_allclose(sign, [-1.0])
     np.testing.assert_array_equal(ket, x)
-
-    np.testing.assert_allclose(operator.Sz(sec).diag(x), [0.5])
-    np.testing.assert_allclose(operator.S2(sec).diag(x), [0.75])
+    np.testing.assert_allclose(S2(sector).diag(x), [0.75])

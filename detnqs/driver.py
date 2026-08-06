@@ -7,10 +7,9 @@ from typing import Any, Self
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 
-from .utils import Timer, checkpoint, precision, stats as stats_util
+from .utils import Timer, checkpoint, stats as stats_util
 from .utils.logger import Logger
 
 
@@ -49,7 +48,7 @@ class VMC:
         """Apply one update and return the pre-update scalar record."""
         timer = Timer(enabled=profile)
         with timer("total"):
-            state, energy, grad, out, geometry = self.state.expect_and_grad(
+            state, energy, grad, stats, geometry = self.state.expect_and_grad(
                 geometry=self.geometry,
                 obs=obs,
                 profile=profile,
@@ -63,23 +62,31 @@ class VMC:
                     state.params,
                     geometry=geometry,
                     value=energy,
-                    stats=out,
+                    stats=stats,
                 )
                 params = optax.apply_updates(state.params, updates)
                 jax.block_until_ready(params)
 
             self.state = state.replace(params=params)
 
-        rec = dict(out)
+        rec = dict(stats)
         rec["step"] = float(self.step_count + 1)
         rec.update(stats_util.update(grad, updates))
 
-        opt_stats = getattr(self.opt_state, "stats", None)
-        if isinstance(opt_stats, Mapping):
-            for key, value in opt_stats.items():
-                arr = jnp.asarray(jax.device_get(value))
-                if arr.ndim == 0 and not jnp.issubdtype(arr.dtype, jnp.complexfloating):
-                    rec[str(key)] = float(arr)
+        opt_states = jax.tree.leaves(
+            self.opt_state,
+            is_leaf=lambda x: isinstance(getattr(x, "stats", None), Mapping),
+        )
+        for opt_state in opt_states:
+            opt_stats = getattr(opt_state, "stats", None)
+            if isinstance(opt_stats, Mapping):
+                for key, value in opt_stats.items():
+                    arr = jnp.asarray(jax.device_get(value))
+                    if arr.ndim == 0 and not jnp.issubdtype(
+                        arr.dtype,
+                        jnp.complexfloating,
+                    ):
+                        rec[str(key)] = float(arr)
 
         if profile:
             rec.update(timer.stats())
@@ -114,50 +121,18 @@ class VMC:
         return rec
 
     def save(self, file: str | Path) -> Path:
-        state = {"params": self.state.params}
-        if hasattr(self.state, "sampler_state"):
-            state["sampler_state"] = {
-                "key": self.state.sampler_state.key,
-                "x": self.state.sampler_state.x,
-                "logabs": self.state.sampler_state.logabs,
-                "alpha": np.asarray(self.state.sampler_state.alpha),
-            }
-        if hasattr(self.state, "chains"):
-            state["chains"] = self.state.chains
-        if hasattr(self.state, "basis"):
-            state["basis"] = self.state.basis
-
         return checkpoint.save(
             file,
             {
                 "step": self.step_count,
-                "state": state,
+                "state": self.state._checkpoint(),
                 "opt_state": self.opt_state,
             },
         )
 
     def load(self, file: str | Path) -> Self:
         data = checkpoint.load(file)
-        saved = data["state"]
-        updates = {"params": saved["params"]}
-
-        if "sampler_state" in saved and hasattr(self.state, "sampler_state"):
-            old = saved["sampler_state"]
-            updates["sampler_state"] = type(self.state.sampler_state)(
-                key=jax.device_put(old["key"]),
-                x=np.ascontiguousarray(old["x"], dtype=np.uint64),
-                logabs=precision.cast(old["logabs"], "calc", "real", host=True),
-                alpha=float(np.asarray(old["alpha"])),
-            )
-        if "chains" in saved and hasattr(self.state, "chains"):
-            updates["chains"] = np.ascontiguousarray(saved["chains"], dtype=np.uint64)
-        if "basis" in saved and hasattr(self.state, "basis"):
-            basis = saved["basis"]
-            updates["basis"] = basis
-            if hasattr(self.state, "hmat"):
-                updates["hmat"] = self.state.H.matrix(basis)
-
-        self.state = self.state.replace(**updates)
+        self.state = self.state._restore(data["state"])
         self.opt_state = data["opt_state"]
         self.step_count = int(data["step"])
         return self

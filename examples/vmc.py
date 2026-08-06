@@ -1,52 +1,41 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import jax
-import jax.numpy as jnp
 import optax
 
-from detnqs import hilbert, operator, utils
-from detnqs.driver import VMC
-from detnqs.model import SBackflow, GBackflow, PBackflow
+from detnqs import Hamiltonian, MCState, VMC
+from detnqs.model import PBackflow, slater_reference
+from detnqs.operator import S2
 from detnqs.optimizer import psr
-from detnqs.sampler import MCSampler
-from detnqs.vstate import MCState
+from detnqs.sampler import MCSampler, init_chains
+from detnqs.utils import Logger, batch, precision
 
 
-NAME = "N2"
-FCIDUMP = f"FCIDUMP/{NAME}.FCIDUMP"
-LOG = f"{NAME}.jsonl"
-CKPT = f"{NAME}_{{step:05d}}.npz"
-
-STEPS = 1000
-CHECKPOINT_EVERY = 100
-
-
-def configure() -> None:
-    # Configure runtime.
-    utils.batch.configure(
+def main() -> None:
+    batch.configure(
         forward_chunk=8192,
         backward_chunk=1024,
         param_chunk=None,
         bucket_min=1024,
     )
-    utils.precision.configure("double")
+    precision.configure("single")
     jax.config.update("jax_debug_nans", True)
     jax.config.update("jax_log_compiles", False)
 
+    name = "N2"
+    seed = 0
+    path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / f"{name}.FCIDUMP"
+    hamiltonian = Hamiltonian.load(path)
+    sector = hamiltonian.sector
 
-def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
-    # Load the FCIDUMP Hamiltonian.
-    H = operator.Hamiltonian.load(FCIDUMP)
-    sector = H.sector
-
-    # Build a mean-field reference and sampled chains.
-    ref_mat = utils.ref_init(sector, H.integrals, seed=seed)
-
+    ref_mat = slater_reference(sector, hamiltonian.integrals, seed=seed)
     model = PBackflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
-        hidden=(4,),
+        hidden=(64,),
         ref_mat=ref_mat,
         init_scale=1e-3,
     )
@@ -60,17 +49,16 @@ def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
         alpha=None,
     )
 
-    chains = utils.chain_init(
+    chains = init_chains(
         sector,
         ref_mat,
         n_chains=sampler.n_chains,
         seed=seed,
     )
-    # chains = sector.random(sampler.n_chains, seed=seed)
 
     state = MCState.init(
         model=model,
-        H=H,
+        hamiltonian=hamiltonian,
         sampler=sampler,
         chains=chains,
         key=jax.random.key(seed),
@@ -79,26 +67,21 @@ def build(*, seed: int = 0) -> tuple[VMC, dict[str, object]]:
         eloc_sample=1024,
     )
 
-    optimizer = psr(shift=1.0e-3, mu=0.95, scale=-5.0e-2)
-
+    optimizer = optax.chain(
+        psr(shift=1.0e-3, mu=0.95),
+        optax.scale_by_learning_rate(5.0e-2),
+    )
     vmc = VMC.init(state, optimizer)
-    obs = {"s2": operator.S2(sector)}
-    return vmc, obs
-
-
-def main() -> None:
-    configure()
-
-    vmc, obs = build(seed=0)
-    log = utils.Logger(file=LOG, every=10)
+    obs = {"s2": S2(sector)}
+    log = Logger(file=f"{name}.jsonl", every=10)
 
     vmc.run(
-        STEPS,
+        1000,
         obs=obs,
         logger=log,
         profile=True,
-        checkpoint=CKPT,
-        checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint=f"{name}_{{step:05d}}.npz",
+        checkpoint_every=100,
     )
 
 

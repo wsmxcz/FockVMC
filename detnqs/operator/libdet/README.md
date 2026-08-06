@@ -1,306 +1,149 @@
-# libdet design notes
+# libdet
 
-`libdet` is the Fock-space Hamiltonian backend used by `detnqs.operator`.
-It provides compact C++ primitives for determinant calculations, with nanobind
-bindings for Python.
+`libdet` is the compiled Hamiltonian oracle behind
+`detnqs.operator.Hamiltonian`. Its purpose is narrow: given packed electronic
+configurations and molecular integrals, it returns matrix elements,
+connections, projections, or finite-space actions.
 
-The implementation follows one data path:
+Python owns sectors, wavefunctions, sampling, and estimators. The C++ layer owns
+only the performance-critical Hamiltonian action and returns flat arrays that
+Python can consume directly.
 
-```text
-bit/hash -> integral -> element -> screen table -> cache -> action -> binding
-```
+## Configuration layout
 
-The backend stores Slater determinants in alpha/beta occupation form:
-
-```text
-rhf/   determinant Hamiltonian kernels and actions
-```
-
----
-
-## 1. State, integral, and element conventions
-
-Every basis state is stored as two packed `uint64` blocks:
+A configuration contains separate packed alpha and beta occupations:
 
 ```text
-state.shape = (2, nword)
-batch.shape = (N, 2, nword)
+configuration.dtype = uint64
+configuration.shape = (2, nword)
+batch.shape         = (N, 2, nword)
+
+block 0 = alpha occupations
+block 1 = beta occupations
+nword  = ceil(norb / 64)
 ```
 
-The two blocks are:
+Arrays crossing the nanobind boundary are C-contiguous. Input configuration
+memory is treated as immutable; returned arrays are owned by their result
+objects.
+
+## Hamiltonian convention
+
+Matrix elements use Dirac order:
+
+$$
+H_{bk}=\langle b|H|k\rangle.
+$$
+
+`ket` is the input configuration. `bra` is the configuration produced by an
+excitation. Connection records are grouped by ket.
+
+One-electron integrals are $h_{pq}$. Two-electron integrals use the PySCF
+chemist convention
+
+$$
+g_{pqrs}=(pq|rs)
+$$
+
+and are accepted in PySCF eight-fold packed form. Matrix elements follow the
+Slater--Condon rules in the fixed particle and spin sector supplied by Python.
+
+## Core actions
+
+The Python `Hamiltonian` wrapper exposes four groups of operations.
+
+### Elements and connections
 
 ```text
-block 0 = alpha occupation bits
-block 1 = beta occupation bits
+hij(bra, ket)                 matrix element H[bra, ket]
+diag(x)                       diagonal for a configuration batch
+conn(kets, eps)               deterministic off-diagonal connections
+sample_conn(kets, counts, ...) sampled connections in a screened window
+local_conn(kets, ...)         strong and weak local-energy connections
 ```
 
-All Hamiltonian matrix elements use Dirac order:
-
-$$
-H_{bk}=\langle b|H|k\rangle .
-$$
-
-All excitations are oriented from `ket` to `bra`.
-
-The integral convention follows PySCF:
-
-$$
-h_1(p,q)=h_{pq},
-\qquad
-\texttt{chem}(p,q,r,s)=(pq|rs).
-$$
-
-The ERI input is the PySCF 8-fold chemist-packed tensor.
-`Integral` is immutable and Hamiltonian-owned.
-It stores the original packed tensor plus small projected tables:
-
-```text
-hdiag(p)          = h1(p,p)
-coulomb(p,q)      = (pp|qq)
-exchange(p,q)     = (pq|qp)
-coulomb(p,q,k)    = (pq|kk)
-exchange(p,q,k)   = (pk|kq)
-```
-
-These projected tables use `O(n^2)` and `O(n^3)` memory.
-No dense `O(n^4)` integral table is kept.
-
-RHF element kernels implement Slater--Condon rules.
-A ket-local scratch object stores the diagonal value and single-excitation
-Fock-like tables, so repeated single elements are `O(1)` lookups after loading
-the ket.
-
----
-
-## 2. Screen tables and caches
-
-`ScreenTable` is an integral-level candidate table.
-It is not a ket graph and does not store exact connections.
-It stores cutoff-independent candidates above a base cutoff:
-
-$$
-T_{\epsilon_0}={m:B(m)\ge \epsilon_0}.
-$$
-
-Any requested cutoff satisfying `eps >= base_eps` is served by a prefix or slice
-of the same table. Requests with `eps <= 0` do not build a `ScreenTable`;
-those paths use direct enumeration.
-
-`ScreenTable` stores exact double-excitation candidates:
-
-```text
-ScreenPair { a, b, h }
-same_spin(i, j, eps)
-mixed_spin(ia, ib, eps)
-```
-
-`ConnCache` stores exact sorted connections for one ket and one positive cutoff.
-It is a fixed-capacity 4-way set-associative cache with set-local recency and a
-small hit counter.
-
-The cache invariant is cutoff-superset reuse:
-
-$$
-\epsilon_0\le\epsilon
-\quad\Rightarrow\quad
-{|H|\ge\epsilon_0}\supseteq{|H|\ge\epsilon}.
-$$
-
-`ConnCache` serves only reusable positive-cutoff exact graphs:
-
-```text
-conn(eps > 0)
-sample_conn(eps2 > 0)
-local_conn strong part for counts == 0
-```
-
-It never stores full `eps == 0` graphs, stochastic samples, one-shot projector
-data, or scale-dependent/exclude-dependent action data.
-
-`SpaceCache` is a one-entry finite-space cache used by repeated `matvec` and
-`matmat` calls. One-shot `matrix` and explicit-bra `project` build local spaces.
-
----
-
-## 3. Public Hamiltonian primitives
-
-The public primitives are deliberately separate. They represent different
-Hamiltonian actions and should not be merged.
-
-`conn(kets, eps)` returns deterministic screened connections:
+Deterministic connections satisfy
 
 $$
 |H_{bk}|\ge\epsilon.
 $$
 
-It returns a flat bra evaluation batch, diagonal elements, CSR pointers, matrix
-elements, and Hamiltonian degrees. Terms for each ket remain ordered by
-decreasing `|h|`.
-
-`sample_conn(kets, counts, eps1, eps2, seed)` samples the window
+Sampled connections use the window
 
 $$
-\epsilon_2\le |H_{bk}|<\epsilon_1.
+\epsilon_2\le|H_{bk}|<\epsilon_1.
 $$
 
-`counts` may describe one or more sampling streams. The output is stream-major
-then ket-major. It has no sorting guarantee, and duplicates are allowed.
-If `eps2 > 0`, the sampler uses cached sorted connections. If `eps2 == 0`, it
-uses direct enumeration and does not write `ConnCache`.
+`local_conn` returns both regions in one result:
 
-`local_conn(kets, eps1, eps2, counts, seed)` returns deterministic strong
-connections and sampled weak connections.
+```text
+strong    |H_bk| >= eps1
+weak      eps2 <= |H_bk| < eps1
+```
 
-Strong part:
+Weak records include sampling degree and multiplicity so the caller can form
+an unbiased retained-window sum.
+
+### Connection result layout
+
+For `Conns` with `n_kets = N`:
+
+```text
+bra[:N]          input kets
+bra[N + p]       bra for off-diagonal record p
+ptr[i]:ptr[i+1]  records belonging to ket i
+h[p]             H[bra[N + p], ket[i]]
+diag[i]          H[ket[i], ket[i]]
+degree[i]        sum of retained |H_bk|
+```
+
+For multi-stream sampled connections, pointer rows are stream-major and then
+ket-major. Repeated sampled bras are valid records.
+
+`LocalConn.bra` is laid out as
+
+```text
+[kets, strong bras, weak bras]
+```
+
+with separate `strong_ptr/strong_h` and `weak_ptr/weak_h` arrays. The pointer
+arrays always refer to records in their corresponding Hamiltonian-value array.
+
+### Finite-space action
+
+```text
+matrix(bras, kets=None)       sparse H[bras, kets]
+matvec(bras, x, kets=None)    H[bras, kets] x
+```
+
+If `kets` is omitted, the bra space is used on both sides. A two-dimensional
+`x` applies the same action to multiple vectors. These operations are exact in
+the supplied finite spaces.
+
+### Expansion and projection
+
+```text
+expand(kets, eps, scale=None, exclude=None)
+project(bras, kets, scale, eps=0, exclude=None)
+sample_project(kets, scale, counts, eps1, eps2, exclude, seed)
+```
+
+`expand` returns unique connected external configurations. `project` evaluates
 
 $$
-|H_{bk}|\ge\epsilon_1.
+(Hc)_b=\sum_k H_{bk}c_k
 $$
 
-Weak window:
+for supplied bras, or generates external bras when `bras=None`. `exclude`
+removes a known space during external generation. `sample_project` provides the
+corresponding screened stochastic projection.
 
-$$
-\epsilon_2\le |H_{bk}|<\epsilon_1.
-$$
+## Screening contract
 
-Weak samples are compressed by multiplicity. For weak-window degree (W_k),
-draw count (N_k), and multiplicity (m_b), the unbiased correction has the
-form
+Screening is always defined by matrix-element magnitude. A zero cutoff requests
+complete direct enumeration; positive cutoffs restrict connection or projection
+work to the stated region.
 
-$$
-\sum_b
-\frac{m_b W_k}{N_k |H_{bk}|}
-H_{bk}\frac{\psi(b)}{\psi(k)}.
-$$
-
-For kets with zero weak draws, `local_conn` reads the strong part from cached
-deterministic connections. For kets with positive weak draws, it directly
-enumerates once and splits the result into strong and weak contributions.
-Both cases share the same assembly interface.
-
-Other action primitives use the same backend components:
-
-```text
-matrix        dense block H[bras, kets]
-matvec        repeated finite-space matrix-vector action
-matmat        repeated finite-space matrix-matrix action
-project       explicit-bra projection
-sample_project stochastic one-shot projection
-```
-
-`sample_project` remains separate because it is scale-dependent and one-shot.
-
----
-
-## 4. Action flow and performance model
-
-The backend separates three concepts:
-
-```text
-candidate generation   ScreenTable or direct enumeration
-exact evaluation       element kernels
-result assembly        evaluation batches, CSR arrays, sampled records
-```
-
-This separation keeps the hot paths short:
-
-```text
-deterministic screened graph
-    ScreenTable -> element -> ConnCache -> CSR output
-
-stochastic connection sampling
-    ConnCache or direct enumeration -> window degree -> sampled records
-
-finite-space action
-    internal search space -> element -> dense/vector output
-
-local strong/weak action
-    cached strong graph or direct enumeration -> local assembly -> CSR output
-```
-
-`ScreenTable` is global and integral-driven.
-`ConnCache` is ket-dependent and exact.
-`SpaceCache` is batch-dependent and finite-space specific.
-Scratch objects are local or thread-local.
-
-Connection batches use fixed flat layouts. `Conns.bra` is
-`[kets, connection bras]`; record `r` maps to `bra[n_kets + r]`.
-`LocalConn.bra` is `[kets, strong bras, weak bras]`. CSR pointers and matrix
-elements are record-aligned, so no indirect bra indices are stored.
-
-### Parallel model
-
-Fock-space connection counts can be highly uneven. The backend therefore keeps
-parallel ownership tied to the output form.
-
-Known-space actions own output bras:
-
-```text
-bra -> connected kets -> output value
-```
-
-This gives direct writes for `matvec`, `matmat`, and explicit-bra `project`,
-and CSR assembly for `matrix` without a global term sort or dense thread-local
-reductions.
-
-Connection assembly separates:
-
-```text
-ket work -> pointer prefix -> contiguous flat output
-```
-
-External projection uses sharded exact accumulation with the same flat
-connection-batch semantics as the other action paths.
-
-The design prioritizes:
-
-```text
-tight candidate tables
-positive-cutoff connection caching
-contiguous connection assembly
-minimal boundary-side batch manipulation
-```
-
----
-
-## 5. Naming, ownership, and parallelism
-
-Hamiltonian connection language uses:
-
-```text
-ket
-bra
-connection
-degree
-```
-
-Avoid graph-oriented names such as `node`, `edge`, `source`, and `target` in Hamiltonian logic.
-Use standard matrix terminology only where a matrix or CSR object is being described.
-
-Ownership rules:
-
-```text
-Integral      immutable Hamiltonian data
-ScreenTable   immutable candidate table
-ConnCache     positive-cutoff exact connections
-SpaceCache    last finite-space search object
-Scratch       local or thread-local workspace
-Results       owned output arrays
-```
-
-OpenMP is required. Parallel regions are local and use thread-local scratch.
-Cache locks cover only lookup and insertion. Connection construction occurs
-outside locks.
-
-Common low-level utilities live in the shared layer:
-
-```text
-bit.hpp       packed-bit operations
-hash.hpp      hash primitives
-sample.hpp    random windows and weighted draws
-integral.hpp  integral storage and projected tables
-hamiltonian.hpp public facade
-```
-
-Determinant-specific logic stays in `rhf/`.
-Shared abstractions are kept minimal; physical kernels remain specialized.
+The returned matrix elements, record order, degrees, and multiplicities fully
+describe the selected or sampled action. Internal lookup tables and parallel
+workspaces are performance details and do not change this data contract.

@@ -116,7 +116,6 @@ class Logger:
                     "unique_frac",
                     "dE_lin",
                     "update_norm",
-                    "step_scale",
                     "sr_force",
                     "sr_damp",
                     "n_forward",

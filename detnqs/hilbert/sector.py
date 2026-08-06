@@ -18,6 +18,21 @@ class Sector(ABC):
     nelec: int
     spin: int
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "norb", int(self.norb))
+        object.__setattr__(self, "nelec", int(self.nelec))
+        object.__setattr__(self, "spin", int(self.spin))
+
+        if self.norb <= 0:
+            raise ValueError("norb must be positive")
+        if (self.nelec + self.spin) % 2:
+            raise ValueError("nelec and spin must have the same parity")
+        if not (
+            0 <= self.n_alpha <= self.norb
+            and 0 <= self.n_beta <= self.norb
+        ):
+            raise ValueError("particle numbers must fit in the orbital space")
+
     @property
     def n_alpha(self) -> int:
         return (self.nelec + self.spin) // 2
@@ -38,7 +53,12 @@ class Sector(ABC):
         return np.zeros((n, 2, self.nword), dtype=np.uint64)
 
     def asarray(self, x: Any) -> np.ndarray:
-        return np.asarray(x, dtype=np.uint64, order="C")
+        x = np.asarray(x, dtype=np.uint64, order="C")
+        if x.ndim != 3 or x.shape[1:] != self.shape:
+            raise ValueError(
+                f"configurations must have shape (batch, 2, {self.nword})"
+            )
+        return x
 
     def unique(self, x: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         x = self.asarray(x)

@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from .fermion import Number, S2, Sz, annihilate, create, number, occupation, sz
+from .fermion import S2, annihilate, create, number
 from .hamiltonian import Hamiltonian
 
 __all__ = (
     "Hamiltonian",
-    "Number",
     "S2",
-    "Sz",
     "annihilate",
     "create",
     "number",
-    "occupation",
-    "sz",
 )

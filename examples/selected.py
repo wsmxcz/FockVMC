@@ -1,41 +1,33 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import optax
 
-from detnqs import operator, utils
-from detnqs.driver import VMC
-from detnqs.model import Backflow
-from detnqs.vstate import SelectedState, topk_selector
+from detnqs import Hamiltonian, SelectedState, VMC
+from detnqs.model import Backflow, slater_reference
+from detnqs.utils import Logger, batch, precision
+from detnqs.vstate import topk_selector
 
 
-FCIDUMP = "H2O.FCIDUMP"
-OUTER_STEPS = 5
-INNER_STEPS = 100
-
-
-def configure() -> None:
-    # Configure runtime.
-    utils.batch.configure(
+def main() -> None:
+    batch.configure(
         forward_chunk=32768,
         backward_chunk=32768,
         param_chunk=32768,
         bucket_min=1024,
     )
-    utils.precision.configure("single")
+    precision.configure("single")
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
+    path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
+    hamiltonian = Hamiltonian.load(path)
+    sector = hamiltonian.sector
 
-def main() -> None:
-    configure()
-
-    # Load a small FCIDUMP Hamiltonian.
-    H = operator.Hamiltonian.load(FCIDUMP)
-    sector = H.sector
-
-    ref_mat = utils.ref_init(sector, H.integrals)
+    ref_mat = slater_reference(sector, hamiltonian.integrals)
     model = Backflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
@@ -46,18 +38,18 @@ def main() -> None:
 
     state = SelectedState.init(
         model=model,
-        H=H,
+        hamiltonian=hamiltonian,
         basis=sector.reference(1),
         key=jax.random.key(0),
     )
 
     vmc = VMC.init(state, optax.adamw(1.0e-3), geometry=False)
-    log = utils.Logger(every=1, keys=("step", "outer", "energy", "eloc_var", "n_basis"))
+    log = Logger(every=1, keys=("step", "outer", "energy", "eloc_var", "n_basis"))
 
     # Alternate basis growth and projected optimization.
-    for outer in range(OUTER_STEPS):
+    for outer in range(2):
         vmc.state = vmc.state.evolve(topk_selector(k=128), eps=1.0e-6)
-        rec = vmc.run(INNER_STEPS)
+        rec = vmc.run(50)
         rec["outer"] = float(outer + 1)
         rec["n_basis"] = float(vmc.state.n_basis)
         log.add(rec)

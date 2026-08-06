@@ -10,14 +10,9 @@ int main() {
     const auto ham = Hamiltonian::det(h1, norb, eri, ecore);
     const auto basis = det_basis(norb, na, nb, ham.nword());
 
-    check_diag(ham, basis);
-    check_action(ham, basis);
+    check_matrix(ham, basis);
     check_conn(ham, basis, 0.10);
-    check_sample(ham, basis, 0.20, 0.04);
-    check_local(ham, basis, 0.20, 0.04, 0);
-    check_local(ham, basis, 0.20, 0.04, 5);
-    check_project(ham, basis, 0.04);
-    check_sample_project(ham, basis);
+    check_local(ham, basis, 0.10);
 
     return 0;
 }

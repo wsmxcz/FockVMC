@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Self
 
 import jax
@@ -9,8 +8,8 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 from ..model import Model, to_psi
-from ..optimizer import Geometry
-from ..utils import Timer, batch, checkpoint, precision, tree
+from ..optimizer.base import Geometry
+from ..utils import Timer, batch, precision, tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,15 +22,21 @@ class ExactState:
 
     model: Model
     params: Any
-    H: Any
+    hamiltonian: Any
     x: np.ndarray
     hmat: csr_matrix
 
     @classmethod
-    def init(cls, model: Model, H: Any, *, key: jax.Array) -> Self:
-        x = H.sector.enumerate()
-        params = model.init(key, H.sector.zeros(1))["params"]
-        return cls(model=model, params=params, H=H, x=x, hmat=H.matrix(x))
+    def init(cls, model: Model, hamiltonian: Any, *, key: jax.Array) -> Self:
+        x = hamiltonian.sector.enumerate()
+        params = model.init(key, hamiltonian.sector.zeros(1))["params"]
+        return cls(
+            model=model,
+            params=params,
+            hamiltonian=hamiltonian,
+            x=x,
+            hmat=hamiltonian.matrix(x),
+        )
 
     @property
     def n_x(self) -> int:
@@ -44,6 +49,7 @@ class ExactState:
         profile: bool = False,
         data: bool = False,
     ):
+        """Evaluate exact energy statistics on the complete sector."""
         result = self._run(grad=False, geometry=False, profile=profile, data=data)
         if data:
             new_state, _, _, out, _, sample = result
@@ -59,17 +65,11 @@ class ExactState:
         obs: Any | None = None,
         profile: bool = False,
     ):
+        """Evaluate exact energy, gradient, and optional SR geometry."""
         return self._run(grad=True, geometry=geometry, profile=profile, data=False)
 
     def replace(self, **updates: Any) -> Self:
         return replace(self, **updates)
-
-    def save(self, file: str | Path) -> Path:
-        return checkpoint.save(file, {"params": self.params})
-
-    def load(self, file: str | Path) -> Self:
-        data = checkpoint.load(file)
-        return replace(self, params=data["params"])
 
     def _run(
         self,
@@ -102,7 +102,12 @@ class ExactState:
             norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
             energy = float((np.vdot(psi, hpsi) / norm).real)
             residual = hpsi - rdtype(energy) * psi
-            w = precision.cast(np.abs(psi) ** 2 / norm, "calc", "real", host=True)
+            weight = precision.cast(
+                np.abs(psi) ** 2 / norm,
+                "calc",
+                "real",
+                host=True,
+            )
 
             out = {
                 "energy": energy,
@@ -117,7 +122,7 @@ class ExactState:
                 np.divide(hpsi, psi, out=eloc, where=np.abs(psi) > tiny)
                 sample = {
                     "x": self.x,
-                    "w": w,
+                    "weight": weight,
                     "eloc": eloc,
                 }
 
@@ -138,15 +143,15 @@ class ExactState:
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    sqrt_w = np.sqrt(w)
+                    sqrt_w = np.sqrt(weight)
                     b_log = np.zeros_like(dlogpsi)
                     np.divide(dlogpsi, sqrt_w, out=b_log, where=sqrt_w > 0.0)
 
                     geom = Geometry(
-                        theta=self.params,
+                        params=self.params,
                         coord=self.model.coord,
                         x=self.x,
-                        w=precision.device(w, "sr", "real"),
+                        weight=precision.device(weight, "sr", "real"),
                         b=precision.device(
                             self.model.cotangent(logpsi, b_log),
                             "sr",

@@ -12,7 +12,7 @@ from ..utils import Timer, batch, precision
 
 
 @dataclass(frozen=True, slots=True)
-class Chains:
+class ChainState:
     """State of Markov chains in Fock space."""
 
     key: jax.Array
@@ -83,8 +83,8 @@ class MCSampler:
 
     def init(
         self,
-        theta: Any,
-        H: Any,
+        params: Any,
+        hamiltonian: Any,
         model: Any,
         *,
         key: jax.Array,
@@ -92,22 +92,22 @@ class MCSampler:
         chains: Any,
         alpha: float | None = None,
         timer: Timer | None = None,
-    ) -> Chains:
+    ) -> ChainState:
         """Initialize chains and run burn-in."""
         timer = Timer(enabled=False) if timer is None else timer
         n_chains = self.n_chains
 
         key, _ = jax.random.split(key)
-        x = H.sector.asarray(chains)
+        x = hamiltonian.sector.asarray(chains)
         if x.shape[0] != n_chains:
             raise ValueError("chains size must equal sampler.n_chains")
         x = np.ascontiguousarray(x)
 
         with timer("reduce"):
-            unique, _, inv = H.sector.unique(x)
+            unique, _, inv = hamiltonian.sector.unique(x)
 
         with timer("forward"):
-            value = batch.apply(model.logabs, theta, unique)
+            value = batch.apply(model.logabs, params, unique)
             jax.block_until_ready(value)
             unique_logabs = precision.host(value, "calc", "real").reshape(-1)
 
@@ -119,7 +119,7 @@ class MCSampler:
         else:
             alpha0 = self.alpha
 
-        state = Chains(
+        state = ChainState(
             key=key,
             x=x,
             logabs=logabs,
@@ -128,8 +128,8 @@ class MCSampler:
 
         for _ in range(self.thermal_steps):
             state, _, _, _ = self._step(
-                theta,
-                H,
+                params,
+                hamiltonian,
                 model,
                 state,
                 eps1=eps1,
@@ -140,15 +140,15 @@ class MCSampler:
 
     def draw(
         self,
-        theta: Any,
-        H: Any,
+        params: Any,
+        hamiltonian: Any,
         model: Any,
-        state: Chains,
+        state: ChainState,
         *,
         eps1: float,
         profile: bool = False,
         timer: Timer | None = None,
-    ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, float]]:
+    ) -> tuple[ChainState, np.ndarray, np.ndarray, dict[str, float]]:
         """Advance chains and return observed configurations.
 
         The caller owns logabs synchronization. The sampler only advances
@@ -170,8 +170,8 @@ class MCSampler:
 
         for _ in range(self.discard_steps):
             state, _, _, info = self._step(
-                theta,
-                H,
+                params,
+                hamiltonian,
                 model,
                 state,
                 eps1=eps1,
@@ -181,7 +181,7 @@ class MCSampler:
             proposed += info["proposed"]
             n_conn += info["n_conn"]
 
-        samples = np.empty((n_samples, *state.x.shape[1:]), dtype=np.uint64)
+        observations = np.empty((n_samples, *state.x.shape[1:]), dtype=np.uint64)
         mass = np.empty(n_samples, dtype=rdtype)
 
         sweep_steps = self.sweep_steps
@@ -190,8 +190,8 @@ class MCSampler:
         while offset < n_samples:
             take = min(n_chains, n_samples - offset)
             state, x_obs, obs_mass, info = self._step(
-                theta,
-                H,
+                params,
+                hamiltonian,
                 model,
                 state,
                 eps1=eps1,
@@ -199,7 +199,7 @@ class MCSampler:
                 timer=timer,
             )
 
-            samples[offset : offset + take] = x_obs
+            observations[offset : offset + take] = x_obs
             mass[offset : offset + take] = obs_mass
             offset += take
 
@@ -209,8 +209,8 @@ class MCSampler:
 
             for _ in range(sweep_steps - 1):
                 state, _, _, info = self._step(
-                    theta,
-                    H,
+                    params,
+                    hamiltonian,
                     model,
                     state,
                     eps1=eps1,
@@ -224,19 +224,19 @@ class MCSampler:
         if profile:
             stats["n_conn"] = float(n_conn)
 
-        return state, samples, mass, stats
+        return state, observations, mass, stats
 
     def _step(
         self,
-        theta: Any,
-        H: Any,
+        params: Any,
+        hamiltonian: Any,
         model: Any,
-        state: Chains,
+        state: ChainState,
         *,
         eps1: float,
         n_observe: int = 0,
         timer: Timer | None = None,
-    ) -> tuple[Chains, np.ndarray, np.ndarray, dict[str, int]]:
+    ) -> tuple[ChainState, np.ndarray, np.ndarray, dict[str, int]]:
         """Observe selected chains and make one Metropolis transition."""
         timer = Timer(enabled=False) if timer is None else timer
         rdtype = precision.real("calc", host=True)
@@ -258,7 +258,7 @@ class MCSampler:
             obs_mass = np.ones(n_observe, dtype=rdtype)
 
         with timer("reduce"):
-            ket, first, ket_index = H.sector.unique(state.x)
+            ket, first, ket_index = hamiltonian.sector.unique(state.x)
             n_ket = int(ket.shape[0])
             ket_logabs = precision.cast(
                 state.logabs[np.asarray(first, dtype=np.int64)],
@@ -303,7 +303,7 @@ class MCSampler:
                 )
 
             with timer("conns"):
-                conn = H.sample_conn(
+                conn = hamiltonian.sample_conn(
                     ket,
                     counts,
                     eps1=np.inf,
@@ -332,7 +332,7 @@ class MCSampler:
 
         else:
             with timer("sample"):
-                sector = H.sector
+                sector = hamiltonian.sector
                 if not isinstance(sector, DetSector):
                     raise NotImplementedError(
                         "proposal='single' is defined only for DetSector"
@@ -384,7 +384,7 @@ class MCSampler:
         if n_observe > 0 and beta > 0.0:
             if self.proposal != "ham":
                 with timer("conns"):
-                    conn = H.sample_conn(
+                    conn = hamiltonian.sample_conn(
                         ket,
                         blur_counts,
                         eps1=np.inf,
@@ -441,7 +441,7 @@ class MCSampler:
                 with timer("forward"):
                     value = batch.apply(
                         model.logabs,
-                        theta,
+                        params,
                         np.ascontiguousarray(conn_bra[new]),
                     )
                     jax.block_until_ready(value)
@@ -452,8 +452,8 @@ class MCSampler:
 
             else:
                 with timer("reduce"):
-                    unique_candidate, _, inverse = H.sector.unique(candidate[active])
-                    _, first_all, lookup = H.sector.unique(
+                    unique_candidate, _, inverse = hamiltonian.sector.unique(candidate[active])
+                    _, first_all, lookup = hamiltonian.sector.unique(
                         np.concatenate((ket, unique_candidate), axis=0)
                     )
 
@@ -470,7 +470,7 @@ class MCSampler:
                     with timer("forward"):
                         value = batch.apply(
                             model.logabs,
-                            theta,
+                            params,
                             np.ascontiguousarray(unique_candidate[unknown]),
                         )
                         jax.block_until_ready(value)

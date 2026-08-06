@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Self
 
 import jax
@@ -10,8 +9,8 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 from ..model import Model, to_psi
-from ..optimizer import Geometry
-from ..utils import Timer, batch, checkpoint, precision, tree
+from ..optimizer.base import Geometry
+from ..utils import Timer, batch, precision, tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +24,7 @@ class SelectedState:
 
     model: Model
     params: Any
-    H: Any
+    hamiltonian: Any
     basis: np.ndarray
     hmat: csr_matrix
 
@@ -33,22 +32,26 @@ class SelectedState:
     def init(
         cls,
         model: Model,
-        H: Any,
+        hamiltonian: Any,
         *,
         key: jax.Array,
         basis: Any | None = None,
     ) -> Self:
-        basis = H.sector.reference(1) if basis is None else H.sector.asarray(basis)
+        basis = (
+            hamiltonian.sector.reference(1)
+            if basis is None
+            else hamiltonian.sector.asarray(basis)
+        )
         if basis.shape[0] == 0:
             raise ValueError("selected basis must be non-empty")
 
-        params = model.init(key, H.sector.zeros(1))["params"]
+        params = model.init(key, hamiltonian.sector.zeros(1))["params"]
         return cls(
             model=model,
             params=params,
-            H=H,
+            hamiltonian=hamiltonian,
             basis=basis,
-            hmat=H.matrix(basis),
+            hmat=hamiltonian.matrix(basis),
         )
 
     @property
@@ -61,6 +64,7 @@ class SelectedState:
         *,
         eps: float | None = None,
     ) -> Self:
+        """Expand and select the finite variational basis."""
         basis = self.basis
 
         if eps is not None:
@@ -74,7 +78,7 @@ class SelectedState:
             if norm > 0.0:
                 scale = scale / norm
 
-            bra = self.H.expand(
+            bra = self.hamiltonian.expand(
                 basis,
                 float(eps),
                 scale=scale,
@@ -90,12 +94,12 @@ class SelectedState:
         jax.block_until_ready(logabs_jax)
 
         logabs = precision.host(logabs_jax, "calc", "real").reshape(-1)
-        basis = self.H.sector.asarray(selector(logabs, basis))
+        basis = self.hamiltonian.sector.asarray(selector(logabs, basis))
 
         if basis.shape[0] == 0:
             raise ValueError("selector returned an empty basis")
 
-        return replace(self, basis=basis, hmat=self.H.matrix(basis))
+        return replace(self, basis=basis, hmat=self.hamiltonian.matrix(basis))
 
     def expect(
         self,
@@ -104,6 +108,7 @@ class SelectedState:
         profile: bool = False,
         data: bool = False,
     ):
+        """Evaluate energy statistics in the selected basis."""
         result = self._run(grad=False, geometry=False, profile=profile, data=data)
         if data:
             new_state, _, _, out, _, sample = result
@@ -119,23 +124,11 @@ class SelectedState:
         obs: Any | None = None,
         profile: bool = False,
     ):
+        """Evaluate selected-space energy, gradient, and SR geometry."""
         return self._run(grad=True, geometry=geometry, profile=profile, data=False)
 
     def replace(self, **updates: Any) -> Self:
         return replace(self, **updates)
-
-    def save(self, file: str | Path) -> Path:
-        return checkpoint.save(file, {"params": self.params, "basis": self.basis})
-
-    def load(self, file: str | Path) -> Self:
-        data = checkpoint.load(file)
-        basis = np.ascontiguousarray(data["basis"], dtype=np.uint64)
-        return replace(
-            self,
-            params=data["params"],
-            basis=basis,
-            hmat=self.H.matrix(basis),
-        )
 
     def _run(
         self,
@@ -169,7 +162,12 @@ class SelectedState:
             norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
             energy = float((np.vdot(psi, hpsi) / norm).real)
             residual = hpsi - rdtype(energy) * psi
-            w = precision.cast(np.abs(psi) ** 2 / norm, "calc", "real", host=True)
+            weight = precision.cast(
+                np.abs(psi) ** 2 / norm,
+                "calc",
+                "real",
+                host=True,
+            )
 
             out = {
                 "energy": energy,
@@ -184,7 +182,7 @@ class SelectedState:
                 np.divide(hpsi, psi, out=eloc, where=np.abs(psi) > tiny)
                 sample = {
                     "x": self.basis,
-                    "w": w,
+                    "weight": weight,
                     "eloc": eloc,
                 }
 
@@ -205,15 +203,15 @@ class SelectedState:
                 jax.block_until_ready(gradient)
 
                 if geometry:
-                    sqrt_w = np.sqrt(w)
+                    sqrt_w = np.sqrt(weight)
                     b_log = np.zeros_like(dlogpsi)
                     np.divide(dlogpsi, sqrt_w, out=b_log, where=sqrt_w > 0.0)
 
                     geom = Geometry(
-                        theta=self.params,
+                        params=self.params,
                         coord=self.model.coord,
                         x=self.basis,
-                        w=precision.device(w, "sr", "real"),
+                        weight=precision.device(weight, "sr", "real"),
                         b=precision.device(
                             self.model.cotangent(logpsi, b_log),
                             "sr",

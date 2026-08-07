@@ -45,7 +45,7 @@ def main() -> None:
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
-        hidden=(256,),
+        hidden=(256, 256),
         ref_mat=ref_mat,
         init_scale=1.0e-3,
     )

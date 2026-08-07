@@ -50,7 +50,7 @@ def main() -> None:
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
-        hidden=(256,),
+        hidden=(256, 256),
         ref_mat=ref_mat,
         init_scale=1.0e-3,
     )
@@ -88,15 +88,15 @@ def main() -> None:
     vmc = VMC.init(state, optimizer)
 
     print(f"active      : ({sector.nelec}e, {sector.norb}o)")
-    print("reference   : Fe1/Fe4 up, Fe2/Fe3 down)")
+    print("reference   : Fe1/Fe4 up, Fe2/Fe3 down")
     print("Fe(II)      : Fe2 and Fe4")
 
     vmc.run(
         10000,
         obs={"s2": S2(sector)},
-        logger=Logger(file=f"{name}_3.jsonl", every=10),
+        logger=Logger(file=f"{name}.jsonl", every=10),
         profile=True,
-        checkpoint=f"{name}_3_{{step:05d}}.npz",
+        checkpoint=f"{name}_{{step:05d}}.npz",
         checkpoint_every=1000,
     )
 

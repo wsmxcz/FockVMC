@@ -204,7 +204,7 @@ def main() -> None:
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
-        hidden=(256,),
+        hidden=(256, 256),
         ref_mat=ref_mat,
     )
 

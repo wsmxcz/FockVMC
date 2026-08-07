@@ -74,7 +74,7 @@ def main() -> None:
         key=jax.random.key(seed),
         eps1=1.0e-3,
         eps2=1.0e-12,
-        eloc_sample=1024,
+        eloc_sample=32768,
     )
     optimizer = optax.chain(
         psr(shift=1.0e-3, mu=0.95),
@@ -86,7 +86,7 @@ def main() -> None:
     print("reference   : Fe1 up, Fe2 down")
 
     vmc.run(
-        5000,
+        10000,
         obs={"s2": S2(sector)},
         logger=Logger(file=f"{name}.jsonl", every=10),
         profile=True,

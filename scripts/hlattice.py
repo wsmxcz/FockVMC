@@ -228,7 +228,7 @@ def main() -> None:
         key=jax.random.key(seed),
         eps1=1.0e-3,
         eps2=1.0e-12,
-        eloc_sample=1024,
+        eloc_sample=32768,
     )
 
     optimizer = optax.chain(
@@ -241,7 +241,7 @@ def main() -> None:
     obs = {"s2": S2(sector)}
 
     vmc.run(
-        5000,
+        10000,
         obs=obs,
         logger=log,
         profile=True,

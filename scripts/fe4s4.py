@@ -38,10 +38,10 @@ def main() -> None:
     iron = np.concatenate((fe1, fe2, fe3, fe4))
     closed = np.setdiff1d(np.arange(sector.norb), iron)
 
-    extra_b = fe2[0]
-    extra_a = fe4[0]
-    occ_a = np.sort(np.concatenate((closed, fe1, fe2, [extra_a])))
-    occ_b = np.sort(np.concatenate((closed, fe3, fe4, [extra_b])))
+    extra_b = fe4[0]
+    extra_a = fe2[0]
+    occ_a = np.sort(np.concatenate((closed, fe1, fe4, [extra_a])))
+    occ_b = np.sort(np.concatenate((closed, fe2, fe3, [extra_b])))
     assert len(occ_a) == sector.n_alpha and len(occ_b) == sector.n_beta
     orbitals = np.eye(sector.norb)
     ref_mat = slater_reference(orbitals[:, occ_a], orbitals[:, occ_b])
@@ -79,7 +79,7 @@ def main() -> None:
         key=jax.random.key(seed),
         eps1=1.0e-3,
         eps2=1.0e-12,
-        eloc_sample=1024,
+        eloc_sample=32768,
     )
     optimizer = optax.chain(
         psr(shift=1.0e-3, mu=0.95),
@@ -88,11 +88,11 @@ def main() -> None:
     vmc = VMC.init(state, optimizer)
 
     print(f"active      : ({sector.nelec}e, {sector.norb}o)")
-    print("reference   : Fe1/Fe2 up, Fe3/Fe4 down")
+    print("reference   : Fe1/Fe4 up, Fe2/Fe3 down)")
     print("Fe(II)      : Fe2 and Fe4")
 
     vmc.run(
-        5000,
+        10000,
         obs={"s2": S2(sector)},
         logger=Logger(file=f"{name}_3.jsonl", every=10),
         profile=True,

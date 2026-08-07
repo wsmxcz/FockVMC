@@ -37,9 +37,7 @@ struct LocalConn {
     std::vector<double> strong_h;
     std::vector<double> strong_degree;
     std::vector<i32> weak_ptr;
-    std::vector<double> weak_h;
-    std::vector<i64> weak_count;
-    std::vector<double> weak_degree;
+    std::vector<double> weak_coeff;
 };
 
 struct Projection {

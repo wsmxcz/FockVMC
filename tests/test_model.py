@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
@@ -57,15 +55,14 @@ def test_models() -> None:
             grad = jax.grad(lambda p: jnp.mean(model.logabs(p, inputs)))(params)
             seed += 1
 
-            leaves = jax.tree.leaves(grad)
-            assert np.asarray(logabs).shape == (len(inputs),)
-            assert all(np.isfinite(np.asarray(leaf)).all() for leaf in leaves)
+            assert logabs.shape == (len(inputs),)
+            assert all(np.isfinite(leaf).all() for leaf in jax.tree.leaves(grad))
 
             if isinstance(logpsi, tuple):
-                assert np.asarray(logpsi[0]).shape == (len(inputs),)
-                assert np.asarray(logpsi[1]).shape == (len(inputs),)
+                assert logpsi[0].shape == (len(inputs),)
+                assert logpsi[1].shape == (len(inputs),)
             else:
-                assert np.asarray(logpsi).shape == (len(inputs),)
+                assert logpsi.shape == (len(inputs),)
 
 
 def test_projection() -> None:
@@ -74,8 +71,8 @@ def test_projection() -> None:
     b = jax.random.normal(keys[1], (3, 3, 2))
     c = jax.random.normal(keys[2], (3, 2, 3))
     d = jax.random.normal(keys[3], (3, 2, 2))
-    z = jnp.asarray((0.2, 1.0, 3.0))
-    log_weight = jnp.log(jnp.asarray((0.2, 0.3, 0.5)))
+    z = jnp.array((0.2, 1.0, 3.0))
+    log_weight = jnp.log(jnp.array((0.2, 0.3, 0.5)))
 
     lu, piv = jsp.linalg.lu_factor(a)
     k = c @ jsp.linalg.lu_solve((lu, piv), b)

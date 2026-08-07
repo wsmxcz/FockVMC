@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import jax
 import numpy as np
@@ -40,6 +37,7 @@ def test_states() -> None:
     )
     hamiltonian = Hamiltonian.load(FCIDUMP)
     sector = hamiltonian.sector
+    basis = sector.enumerate()
     model = RBM(norb=sector.norb, alpha=1)
 
     exact = ExactState.init(
@@ -52,7 +50,7 @@ def test_states() -> None:
     selected = SelectedState.init(
         model=model,
         hamiltonian=hamiltonian,
-        basis=sector.enumerate(),
+        basis=basis,
         key=jax.random.key(1),
     ).replace(params=exact.params)
     _, selected_stats = selected.expect()
@@ -76,15 +74,16 @@ def test_states() -> None:
         eps2=0.0,
         eloc_sample=0,
     ).replace(params=exact.params)
-    mc, energy, grad, stats, geometry = mc.expect_and_grad(geometry=True)
+    _, energy, grad, stats, geometry = mc.expect_and_grad(geometry=True)
 
     assert abs(energy - exact_stats["energy"]) < 0.25
     assert np.isfinite(stats["eloc_var"])
+    assert stats["n_forward"] <= len(basis)
     assert geometry is not None
-    assert all(np.isfinite(np.asarray(x)).all() for x in jax.tree.leaves(grad))
+    assert all(np.isfinite(x).all() for x in jax.tree.leaves(grad))
 
 
-def test_checkpoint() -> None:
+def test_checkpoint(tmp_path: Path) -> None:
     batch.configure(
         forward_chunk=64,
         backward_chunk=64,
@@ -112,15 +111,14 @@ def test_checkpoint() -> None:
     record = vmc.step()
     assert "sr_force" in record
 
-    with TemporaryDirectory() as tmp:
-        path = Path(tmp) / "vmc.npz"
-        vmc.save(path)
-        saved_params = jax.tree.map(np.asarray, vmc.state.params)
-        saved_x = vmc.state.sampler_state.x.copy()
-        saved_step = vmc.step_count
+    path = tmp_path / "vmc.npz"
+    vmc.save(path)
+    saved_params = jax.tree.map(np.asarray, vmc.state.params)
+    saved_x = vmc.state.sampler_state.x.copy()
+    saved_step = vmc.step_count
 
-        vmc.step()
-        vmc.load(path)
+    vmc.step()
+    vmc.load(path)
 
     assert vmc.step_count == saved_step
     np.testing.assert_array_equal(vmc.state.sampler_state.x, saved_x)

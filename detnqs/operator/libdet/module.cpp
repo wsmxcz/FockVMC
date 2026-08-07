@@ -198,9 +198,7 @@ NB_MODULE(libdet, m) {
         .def_prop_ro("strong_h", [](const libdet::LocalConn& x) { return view(x.strong_h); }, nb::rv_policy::reference_internal)
         .def_prop_ro("strong_degree", [](const libdet::LocalConn& x) { return view(x.strong_degree); }, nb::rv_policy::reference_internal)
         .def_prop_ro("weak_ptr", [](const libdet::LocalConn& x) { return view(x.weak_ptr); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_h", [](const libdet::LocalConn& x) { return view(x.weak_h); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_count", [](const libdet::LocalConn& x) { return view(x.weak_count); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_degree", [](const libdet::LocalConn& x) { return view(x.weak_degree); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("weak_coeff", [](const libdet::LocalConn& x) { return view(x.weak_coeff); }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projection>(m, "Projection")
         .def_prop_ro("bra", [](const libdet::Projection& x) {
@@ -316,24 +314,20 @@ NB_MODULE(libdet, m) {
             });
         }, "kets"_a.noconvert(), "counts"_a.noconvert(), "eps1"_a, "eps2"_a = 0.0, "seed"_a = std::uint64_t{0})
 
-
         .def("local_conn", [](
             const libdet::rhf::Hamiltonian& ham,
             const StateArray& kets,
             double eps1,
             double eps2,
-            const I64Array& counts_arr,
+            libdet::i64 n_draw,
             std::uint64_t seed
         ) {
             const auto kv = states(kets);
-            const auto cv = counts(counts_arr, kv.n_dets);
-            if (cv.n_stream != 1u) {
-                throw std::invalid_argument("local_conn: counts must have shape (N,)");
-            }
+            const std::vector<libdet::i64> counts(kv.n_dets, n_draw);
             return no_gil([&] {
-                return ham.local_conn(kv, eps1, eps2, cv.data, seed);
+                return ham.local_conn(kv, eps1, eps2, counts, seed);
             });
-        }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "counts"_a.noconvert(), "seed"_a = std::uint64_t{0})
+        }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "n_draw"_a, "seed"_a = std::uint64_t{0})
 
         .def("sample_project", [](
             const libdet::rhf::Hamiltonian& ham,

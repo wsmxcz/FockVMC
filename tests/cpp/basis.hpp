@@ -1,15 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <bit>
-#include <cmath>
 #include <cstddef>
-#include <cstdint>
-#include <iostream>
-#include <limits>
-#include <span>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 #include <libdet/rhf/hamiltonian.hpp>
@@ -116,16 +108,4 @@ inline int find_state(DetBatchView x, DetRef y) {
         if (same_state(x[i], y)) return static_cast<int>(i);
     }
     return -1;
-}
-
-inline Basis take_basis(const Basis& basis, std::size_t n) {
-    const std::size_t stride = libdet::word_pair_size(basis.nword);
-    if (n > basis.size()) n = basis.size();
-    Basis out{basis.nword, {}};
-    out.words.insert(
-        out.words.end(),
-        basis.words.begin(),
-        basis.words.begin() + static_cast<std::ptrdiff_t>(n * stride)
-    );
-    return out;
 }

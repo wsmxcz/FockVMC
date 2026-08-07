@@ -9,7 +9,7 @@ from pyscf import ao2mo, gto, lo, scf
 
 from detnqs import Hamiltonian, MCState, VMC
 from detnqs.hilbert import DetSector
-from detnqs.model import GBackflow, slater_reference
+from detnqs.model import PBackflow, slater_reference
 from detnqs.operator import S2
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler, sample_slater
@@ -143,7 +143,7 @@ class HydrogenLattice:
 
 def main() -> None:
     batch.configure(
-        forward_chunk=262144,
+        forward_chunk=32768,
         backward_chunk=4096,
         param_chunk=None,
         bucket_min=4096,
@@ -152,9 +152,9 @@ def main() -> None:
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
 
-    name = "H16chain"
+    name = "H36chain"
     seed = 0
-    lattice = HydrogenLattice.chain(16, 2.0)
+    lattice = HydrogenLattice.chain(36, 2.0)
     mol = gto.M(
         atom=lattice.atom,
         basis="sto-6g",
@@ -176,8 +176,8 @@ def main() -> None:
         dtype=np.float64,
     )
 
-    h1[np.abs(h1) < 1.0e-6] = 0.0
-    eri[np.abs(eri) < 1.0e-6] = 0.0
+    h1[np.abs(h1) < 1.0e-8] = 0.0
+    eri[np.abs(eri) < 1.0e-8] = 0.0
 
     sector = DetSector(norb, n_alpha + n_beta, n_alpha - n_beta)
     hamiltonian = Hamiltonian(sector, h1, eri, ecore=mol.energy_nuc())
@@ -200,7 +200,7 @@ def main() -> None:
     print(f"AF alpha   : {occ_a.tolist()}")
     print(f"AF beta    : {occ_b.tolist()}")
 
-    model = GBackflow(
+    model = PBackflow(
         norb=norb,
         n_alpha=n_alpha,
         n_beta=n_beta,
@@ -212,7 +212,7 @@ def main() -> None:
         n_samples=4096,
         n_chains=4096,
         thermal_steps=256,
-        discard_steps=8,
+        discard_steps=16,
         proposal="ham",
         blur=0.5,
         alpha=None,
@@ -227,7 +227,7 @@ def main() -> None:
         chains=chains,
         key=jax.random.key(seed),
         eps1=1.0e-3,
-        eps2=1.0e-6,
+        eps2=1.0e-12,
         eloc_sample=1024,
     )
 
@@ -246,7 +246,7 @@ def main() -> None:
         logger=log,
         profile=True,
         checkpoint=f"{name}_{{step:05d}}.npz",
-        checkpoint_every=500,
+        checkpoint_every=1000,
     )
 
 

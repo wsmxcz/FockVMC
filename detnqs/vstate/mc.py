@@ -50,6 +50,8 @@ class MCState:
             raise ValueError("screening requires 0 <= eps2 <= eps1")
         if eloc_sample < 0:
             raise ValueError("eloc_sample must be nonnegative")
+        if eps2 < eps1 and (eps2 == 0.0 or eloc_sample == 0):
+            raise ValueError("weak sampling requires eps2 > 0 and eloc_sample > 0")
 
         _, init_key, sample_key = jax.random.split(key, 3)
         params = model.init(init_key, hamiltonian.sector.zeros(1))["params"]
@@ -196,7 +198,6 @@ class MCState:
         sampler_state = self.sampler_state
         obs = {} if obs is None else dict(obs)
 
-        # Synchronize chain amplitudes before sampling from rho.
         if self.sampler.reset_chains:
             sampler_state = self.sampler.init(
                 self.params,
@@ -223,7 +224,6 @@ class MCState:
                     logabs=precision.cast(logabs[inv], "calc", "real", host=True),
                 )
 
-        # Draw source configurations and apply the observation kernel nu.
         sampler_state, observations, observation_mass, sample_stats = (
             self.sampler.draw(
                 self.params,
@@ -236,7 +236,6 @@ class MCState:
             )
         )
 
-        # Merge repeated observations and accumulate their empirical mass.
         with timer("reduce"):
             ket, _, observation_to_ket = self.hamiltonian.sector.unique(observations)
             n_ket = int(ket.shape[0])
@@ -252,12 +251,11 @@ class MCState:
             mass2 = precision.cast(mass2, "calc", "real", host=True)
 
             seed = 0
-            if self.eloc_sample > 0:
+            if self.eps2 < self.eps1:
                 key, subkey = jax.random.split(sampler_state.key)
                 seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
                 sampler_state = replace(sampler_state, key=key)
 
-        # Build all Hamiltonian and observable connections from the unique kets.
         with timer("conns"):
             conn = self.hamiltonian.local_conn(
                 ket,
@@ -267,30 +265,18 @@ class MCState:
                 seed=seed,
             )
 
-            h_bra = np.asarray(conn.bra, dtype=np.uint64)
-            strong_ptr = np.asarray(conn.strong_ptr, dtype=np.int64)
-            strong_h = precision.cast(np.asarray(conn.strong_h), "calc", host=True)
+            h_bra = conn.bra
+            strong_ptr = conn.strong_ptr
+            strong_h = precision.cast(conn.strong_h, "calc", host=True)
             strong_degree = precision.cast(
-                np.asarray(conn.strong_degree),
+                conn.strong_degree,
                 "calc",
                 "real",
                 host=True,
             )
-            diag = precision.cast(np.asarray(conn.diag), "calc", host=True)
-            weak_ptr = np.asarray(conn.weak_ptr, dtype=np.int64)
-            weak_h = precision.cast(np.asarray(conn.weak_h), "calc", host=True)
-            weak_count = precision.cast(
-                np.asarray(conn.weak_count),
-                "calc",
-                "real",
-                host=True,
-            )
-            weak_degree = precision.cast(
-                np.asarray(conn.weak_degree),
-                "calc",
-                "real",
-                host=True,
-            )
+            diag = precision.cast(conn.diag, "calc", host=True)
+            weak_ptr = conn.weak_ptr
+            weak_coeff = precision.cast(conn.weak_coeff, "calc", host=True)
 
             obs_conn = []
             raw_parts = [h_bra]
@@ -307,10 +293,14 @@ class MCState:
                 raw_parts.append(o_bra)
 
         with timer("reduce"):
-            # Share one forward pool across H and optional observables.
-            bra = h_bra if len(raw_parts) == 1 else np.concatenate(raw_parts, axis=0)
+            raw_bra = (
+                h_bra
+                if len(raw_parts) == 1
+                else np.concatenate(raw_parts, axis=0)
+            )
+            unique_bra, _, bra_inverse = self.hamiltonian.sector.unique(raw_bra)
             n_strong = int(strong_h.size)
-            n_weak = int(weak_h.size)
+            n_weak = int(weak_coeff.size)
             strong_slice = slice(n_ket, n_ket + n_strong)
             weak_slice = slice(n_ket + n_strong, n_ket + n_strong + n_weak)
 
@@ -321,13 +311,13 @@ class MCState:
                 obs_mapped.append((name, o_diag, o_ptr, slice(start, end), o_val))
                 start = end
 
-        # Evaluate one shared logpsi pool for kets and every required bra.
         with timer("forward"):
-            bra_logpsi_jax = batch.apply(self.model.logpsi, self.params, bra)
-            jax.block_until_ready(bra_logpsi_jax)
-            bra_logpsi = tree.host(bra_logpsi_jax)
+            unique_logpsi = batch.apply(self.model.logpsi, self.params, unique_bra)
+            jax.block_until_ready(unique_logpsi)
+            unique_logpsi = tree.host(unique_logpsi)
 
         with timer("reduce"):
+            bra_logpsi = jax.tree.map(lambda a: a[bra_inverse], unique_logpsi)
             ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
             strong_logpsi = jax.tree.map(lambda a: a[strong_slice], bra_logpsi)
             weak_logpsi = jax.tree.map(lambda a: a[weak_slice], bra_logpsi)
@@ -354,7 +344,6 @@ class MCState:
                 host=True,
             )
 
-            # Construct the deterministic strong part of the local energy.
             eloc = diag.copy()
             if strong_h.size:
                 ratio = precision.cast(
@@ -433,7 +422,7 @@ class MCState:
                         np.add.at(score, ket_idx, conn_weight * ell)
                         np.add.at(score2, ket_idx, conn_weight * ell * ell)
 
-            if weak_h.size and int(self.eloc_sample) > 0:
+            if weak_coeff.size:
                 weak_ket = np.repeat(
                     np.arange(n_ket, dtype=np.int64),
                     np.diff(weak_ptr),
@@ -448,11 +437,7 @@ class MCState:
                     "calc",
                     host=True,
                 )
-                scale = weak_degree[weak_ket] / np.maximum(
-                    rdtype(int(self.eloc_sample)) * np.abs(weak_h),
-                    tiny,
-                )
-                contrib = weak_count * scale * weak_h * ratio
+                contrib = weak_coeff * ratio
                 eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
                 np.add.at(eloc, weak_ket, contrib)
 
@@ -502,7 +487,6 @@ class MCState:
                 if data:
                     obs_data[name] = oloc
 
-        # Differentiate the Born-weighted residual and build SR geometry.
         gradient = None
         geom = None
         if grad:
@@ -540,7 +524,7 @@ class MCState:
 
         new_state = replace(self, sampler_state=sampler_state)
         n_sample = int(observations.shape[0])
-        n_forward = int(bra.shape[0])
+        n_forward = int(unique_bra.shape[0])
 
         out = {
             **energy_stats,

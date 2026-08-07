@@ -123,10 +123,12 @@ strong    |H_yx| >= eps1                 deterministic
 weak      eps2 <= |H_yx| < eps1          sampled
 ```
 
-Weak records include the degree and multiplicity required for an unbiased sum
-over the retained window. With `eps1=eps2=0`, the full action is deterministic.
+Weak connections are sampled from equal-probability strata and carry their
+final unbiased coefficients. With `eps1=eps2=0`, the full action is deterministic.
 
-Kets and all connected bras share one `logpsi` evaluation pool. The final
+Weak sampling requires `eps2 > 0` and `eloc_sample > 0` when `eps2 < eps1`.
+
+Kets and all connected bras are globally deduplicated before `logpsi`. The final
 energy, residual, gradient cotangent, and SR residual are
 
 $$

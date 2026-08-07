@@ -18,6 +18,23 @@ struct ScreenPair {
     double h = 0.0;
 };
 
+struct ScreenWindow {
+    std::span<const ScreenPair> pairs;
+    std::span<const double> prefix_abs;
+    double base = 0.0;
+
+    [[nodiscard]] double weight() const noexcept {
+        return prefix_abs.empty() ? 0.0 : prefix_abs.back() - base;
+    }
+
+    [[nodiscard]] const ScreenPair& draw(double target) const noexcept {
+        const double value = base + target;
+        auto it = std::upper_bound(prefix_abs.begin(), prefix_abs.end(), value);
+        if (it == prefix_abs.end()) --it;
+        return pairs[static_cast<std::size_t>(it - prefix_abs.begin())];
+    }
+};
+
 class ScreenTable {
 public:
     ScreenTable(const Integral& ints, double base_eps)
@@ -60,13 +77,51 @@ public:
         return prefix({mixed_data_.data() + begin, end - begin}, eps);
     }
 
+    [[nodiscard]] ScreenWindow same_window(
+        int i,
+        int j,
+        double eps1,
+        double eps2
+    ) const noexcept {
+        const std::size_t k = Integral::pair_index(i, j);
+        return window(
+            same_data_,
+            same_prefix_,
+            same_off_[k],
+            same_off_[k + 1u],
+            eps1,
+            eps2
+        );
+    }
+
+    [[nodiscard]] ScreenWindow mixed_window(
+        int ia,
+        int ib,
+        double eps1,
+        double eps2
+    ) const noexcept {
+        const std::size_t k =
+            static_cast<std::size_t>(ia) * static_cast<std::size_t>(norb_)
+            + static_cast<std::size_t>(ib);
+        return window(
+            mixed_data_,
+            mixed_prefix_,
+            mixed_off_[k],
+            mixed_off_[k + 1u],
+            eps1,
+            eps2
+        );
+    }
+
 private:
     int norb_ = 0;
     double base_eps_ = 0.0;
     std::vector<std::size_t> same_off_;
     std::vector<ScreenPair> same_data_;
+    std::vector<double> same_prefix_;
     std::vector<std::size_t> mixed_off_;
     std::vector<ScreenPair> mixed_data_;
+    std::vector<double> mixed_prefix_;
 
     [[nodiscard]] std::span<const ScreenPair> same_pairs(
         int i,
@@ -122,6 +177,28 @@ private:
         return {pairs.data(), end};
     }
 
+    [[nodiscard]] static ScreenWindow window(
+        const std::vector<ScreenPair>& data,
+        const std::vector<double>& prefix_abs,
+        std::size_t first,
+        std::size_t last,
+        double eps1,
+        double eps2
+    ) noexcept {
+        const std::span<const ScreenPair> block{
+            data.data() + first,
+            last - first,
+        };
+        const std::size_t begin = first + first_lt(block, eps1);
+        const std::size_t end = first + first_lt(block, eps2);
+        if (begin >= end) return {};
+        return {
+            {data.data() + begin, end - begin},
+            {prefix_abs.data() + begin, end - begin},
+            begin == first ? 0.0 : prefix_abs[begin - 1u],
+        };
+    }
+
     void build_same(const Integral& ints) {
         const std::size_t np = same_off_.size() - 1u;
         std::vector<std::vector<ScreenPair>> blocks(np);
@@ -140,10 +217,20 @@ private:
             }
         }
 
+        std::size_t size = 0;
+        for (const auto& block : blocks) size += block.size();
         same_data_.clear();
+        same_data_.reserve(size);
+        same_prefix_.clear();
+        same_prefix_.reserve(size);
         for (std::size_t k = 0; k < np; ++k) {
             same_off_[k] = same_data_.size();
-            same_data_.insert(same_data_.end(), blocks[k].begin(), blocks[k].end());
+            double total = 0.0;
+            for (const ScreenPair& pair : blocks[k]) {
+                same_data_.push_back(pair);
+                total += std::abs(pair.h);
+                same_prefix_.push_back(total);
+            }
         }
         same_off_.back() = same_data_.size();
     }
@@ -165,10 +252,20 @@ private:
             std::sort(pairs.begin(), pairs.end(), before);
         }
 
+        std::size_t size = 0;
+        for (const auto& block : blocks) size += block.size();
         mixed_data_.clear();
+        mixed_data_.reserve(size);
+        mixed_prefix_.clear();
+        mixed_prefix_.reserve(size);
         for (std::size_t k = 0; k < blocks.size(); ++k) {
             mixed_off_[k] = mixed_data_.size();
-            mixed_data_.insert(mixed_data_.end(), blocks[k].begin(), blocks[k].end());
+            double total = 0.0;
+            for (const ScreenPair& pair : blocks[k]) {
+                mixed_data_.push_back(pair);
+                total += std::abs(pair.h);
+                mixed_prefix_.push_back(total);
+            }
         }
         mixed_off_.back() = mixed_data_.size();
     }

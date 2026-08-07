@@ -1,5 +1,7 @@
 #include "check.hpp"
 
+#include <limits>
+
 int main() {
     const int norb = 5;
     const int na = 2;
@@ -13,6 +15,8 @@ int main() {
     check_matrix(ham, basis);
     check_conn(ham, basis, 0.10);
     check_local(ham, basis, 0.10);
+    check_weak(ham, basis, 0.10, 0.025);
+    check_weak(ham, basis, std::numeric_limits<double>::infinity(), 0.025);
 
     return 0;
 }

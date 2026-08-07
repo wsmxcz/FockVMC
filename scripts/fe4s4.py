@@ -19,7 +19,7 @@ def main() -> None:
     jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_log_compiles", False)
     batch.configure(
-        forward_chunk=262144,
+        forward_chunk=32768,
         backward_chunk=4096,
         param_chunk=None,
         bucket_min=4096,
@@ -59,7 +59,7 @@ def main() -> None:
         n_samples=4096,
         n_chains=4096,
         thermal_steps=256,
-        discard_steps=8,
+        discard_steps=16,
         proposal="ham",
         blur=0.5,
         alpha=None,
@@ -78,7 +78,7 @@ def main() -> None:
         chains=chains,
         key=jax.random.key(seed),
         eps1=1.0e-3,
-        eps2=1.0e-6,
+        eps2=1.0e-12,
         eloc_sample=1024,
     )
     optimizer = optax.chain(
@@ -94,10 +94,10 @@ def main() -> None:
     vmc.run(
         5000,
         obs={"s2": S2(sector)},
-        logger=Logger(file=f"{name}.jsonl", every=10),
+        logger=Logger(file=f"{name}_3.jsonl", every=10),
         profile=True,
-        checkpoint=f"{name}_{{step:05d}}.npz",
-        checkpoint_every=500,
+        checkpoint=f"{name}_3_{{step:05d}}.npz",
+        checkpoint_every=1000,
     )
 
 

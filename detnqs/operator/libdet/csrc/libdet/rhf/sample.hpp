@@ -1,10 +1,10 @@
 #pragma once
 
 #include <algorithm>
-#include <cstddef>
 #include <cmath>
-#include <span>
+#include <cstddef>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -15,7 +15,6 @@
 #include <omp.h>
 
 namespace libdet::rhf {
-
 
 [[nodiscard]] inline u64 sample_seed(
     u64 seed,
@@ -35,7 +34,6 @@ namespace libdet::rhf {
     );
     return value;
 }
-
 
 namespace detail {
 
@@ -275,47 +273,54 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     if (counts.size() != kets.n_dets) {
         throw std::invalid_argument("local_conn: counts size must match kets");
     }
-    if (std::any_of(counts.begin(), counts.end(), [](i64 n) { return n < 0; })) {
-        throw std::invalid_argument("local_conn: counts must be nonnegative");
+    for (i64 count : counts) {
+        if (count < 0) {
+            throw std::invalid_argument("local_conn: counts must be nonnegative");
+        }
     }
-
-    struct Term {
-        Excitation excitation;
-        double h = 0.0;
-    };
+    const bool sample_weak = eps2 < eps1;
+    if (sample_weak) {
+        if (eps2 == 0.0) {
+            throw std::invalid_argument("local_conn: weak sampling requires eps2 > 0");
+        }
+        if (std::any_of(
+            counts.begin(),
+            counts.end(),
+            [](i64 n) { return n == 0; }
+        )) {
+            throw std::invalid_argument(
+                "local_conn: weak sampling requires positive counts"
+            );
+        }
+    }
 
     struct WeakTerm {
         Excitation excitation;
-        double h = 0.0;
-        i64 count = 0;
+        double coeff;
+    };
+
+    struct DoubleBlock {
+        ExcitationKind kind;
+        int i;
+        int j;
+        ScreenWindow window;
     };
 
     struct Item {
         double diag = 0.0;
         double strong_degree = 0.0;
-        double weak_degree = 0.0;
-        std::vector<Term> strong;
+        std::vector<detail::Term> strong;
         std::vector<WeakTerm> weak;
     };
 
     std::vector<Item> items(kets.n_dets);
-    std::vector<u64> cached_words;
-    std::vector<std::size_t> cached_map;
-    cached_map.reserve(kets.n_dets);
 
-    for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
-        if (counts[iket] == 0) {
-            append_det(cached_words, kets[iket]);
-            cached_map.push_back(iket);
-        }
-    }
-
-    if (!cached_map.empty()) {
-        const DetBatchView cached{cached_words.data(), cached_map.size(), nword_};
-        const auto all = cached_conns(cached, eps1);
-        for (std::size_t pos = 0; pos < cached_map.size(); ++pos) {
-            const std::size_t iket = cached_map[pos];
-            const Conns& conns = *all[pos];
+    if (std::isfinite(eps1)) {
+        const auto all = cached_conns(kets, eps1);
+#pragma omp parallel for schedule(guided)
+        for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+            const std::size_t iket = static_cast<std::size_t>(ii);
+            const Conns& conns = *all[iket];
             Item& item = items[iket];
             item.diag = conns.diag;
             const ConnSpan span = conns.span(
@@ -326,71 +331,195 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
             item.strong.reserve(span.end - span.begin);
             for (std::size_t k = span.begin; k < span.end; ++k) {
                 const Conn& term = conns.terms[k];
-                item.strong.push_back(Term{term.excitation, term.h});
+                item.strong.push_back({term.excitation, term.h});
             }
+        }
+    } else {
+        const auto ket_diag = diag(kets);
+        for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+            items[iket].diag = ket_diag[iket];
         }
     }
 
-    {
+    if (sample_weak) {
         const auto screen_table_ptr = screen_table(eps2);
 #pragma omp parallel
         {
             ElementScratch element(ints_.norb());
-            std::vector<Term> weak;
-            std::vector<double> targets;
-            std::vector<::libdet::sample::Hit> hits;
+            std::vector<detail::Term> singles;
+            std::vector<double> single_prefix;
+            std::vector<DoubleBlock> doubles;
+            std::vector<double> double_prefix;
+            std::vector<WeakTerm> draws;
 
 #pragma omp for schedule(guided)
             for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
                 const std::size_t iket = static_cast<std::size_t>(ii);
                 const i64 n_draw = counts[iket];
-                if (n_draw <= 0) continue;
 
                 Item& item = items[iket];
-                item.strong.clear();
-                item.weak.clear();
-                item.strong_degree = 0.0;
-                item.weak_degree = 0.0;
-                weak.clear();
-                hits.clear();
+                singles.clear();
+                single_prefix.assign(1u, 0.0);
+                doubles.clear();
+                double_prefix.assign(1u, 0.0);
+                draws.clear();
 
-                visit_external(
-                    ints_,
-                    screen_table_ptr.get(),
-                    kets[iket],
-                    element,
-                    eps2,
-                    [&](Excitation excitation, double h) {
-                        const double abs_h = std::abs(h);
-                        if (!(abs_h > 0.0)) return;
-                        if (abs_h >= eps1) {
-                            item.strong.push_back(Term{excitation, h});
-                            item.strong_degree += abs_h;
-                        } else {
-                            weak.push_back(Term{excitation, h});
-                            item.weak_degree += abs_h;
+                const DetRef ket = kets[iket];
+                element.load(ints_, ket);
+                const DetOcc& occ = element.occ;
+
+                for (int spin = 0; spin < 2; ++spin) {
+                    const auto& occupied = spin == 0 ? occ.occ_a : occ.occ_b;
+                    const auto& virtuals = spin == 0 ? occ.vir_a : occ.vir_b;
+                    const auto& sign_prefix = spin == 0 ? occ.pref_a : occ.pref_b;
+
+                    for (int i : occupied) {
+                        for (int a : virtuals) {
+                            const double value = spin == 0
+                                ? element.single_alpha(i, a)
+                                : element.single_beta(i, a);
+                            const double h = sign_single(sign_prefix, i, a) * value;
+                            const double abs_h = std::abs(h);
+                            if (abs_h >= eps2 && abs_h < eps1) {
+                                const Excitation excitation = spin == 0
+                                    ? alpha1(i, a)
+                                    : beta1(i, a);
+                                singles.push_back({excitation, h});
+                                single_prefix.push_back(single_prefix.back() + abs_h);
+                            }
                         }
                     }
-                );
-                item.diag = element.diag();
 
-                if (!(item.weak_degree > 0.0)) continue;
+                    const ExcitationKind kind = spin == 0
+                        ? ExcitationKind::alpha2
+                        : ExcitationKind::beta2;
+                    for (std::size_t x = 0; x < occupied.size(); ++x) {
+                        const int i = occupied[x];
+                        for (std::size_t y = x + 1u; y < occupied.size(); ++y) {
+                            const int j = occupied[y];
+                            const ScreenWindow window =
+                                screen_table_ptr->same_window(i, j, eps1, eps2);
+                            const double weight = window.weight();
+                            if (!(weight > 0.0)) continue;
+                            doubles.push_back({kind, i, j, window});
+                            double_prefix.push_back(double_prefix.back() + weight);
+                        }
+                    }
+                }
+
+                for (int i : occ.occ_a) {
+                    for (int j : occ.occ_b) {
+                        const ScreenWindow window =
+                            screen_table_ptr->mixed_window(i, j, eps1, eps2);
+                        const double weight = window.weight();
+                        if (!(weight > 0.0)) continue;
+                        doubles.push_back({ExcitationKind::mixed2, i, j, window});
+                        double_prefix.push_back(double_prefix.back() + weight);
+                    }
+                }
+
+                const double single_norm = single_prefix.back();
+                const double proposal_norm = single_norm + double_prefix.back();
+                if (!(proposal_norm > 0.0) || !std::isfinite(proposal_norm)) {
+                    continue;
+                }
+
                 ::libdet::sample::Rng rng(sample_seed(seed, kets[iket], 0, 0));
-                ::libdet::sample::draw_scan(
-                    rng,
-                    0u,
-                    weak.size(),
-                    n_draw,
-                    item.weak_degree,
-                    targets,
-                    hits,
-                    [&](std::size_t k) noexcept { return weak[k].h; }
-                );
+                draws.reserve(static_cast<std::size_t>(n_draw));
+                const double scale = proposal_norm / static_cast<double>(n_draw);
 
-                item.weak.reserve(hits.size());
-                for (const auto& hit : hits) {
-                    const Term& term = weak[hit.conn];
-                    item.weak.push_back(WeakTerm{term.excitation, term.h, hit.count});
+                for (i64 draw = 0; draw < n_draw; ++draw) {
+                    double target = (
+                        static_cast<double>(draw) + rng.uniform01()
+                    ) * scale;
+                    if (doubles.empty() || target < single_norm) {
+                        auto it = std::upper_bound(
+                            single_prefix.begin() + 1,
+                            single_prefix.end(),
+                            target
+                        );
+                        if (it == single_prefix.end()) --it;
+                        const std::size_t k = static_cast<std::size_t>(
+                            it - single_prefix.begin() - 1
+                        );
+                        const detail::Term& term = singles[k];
+                        draws.push_back({
+                            term.excitation,
+                            std::copysign(scale, term.h),
+                        });
+                        continue;
+                    }
+
+                    target -= single_norm;
+                    auto it = std::upper_bound(
+                        double_prefix.begin() + 1,
+                        double_prefix.end(),
+                        target
+                    );
+                    if (it == double_prefix.end()) --it;
+                    const std::size_t k = static_cast<std::size_t>(
+                        it - double_prefix.begin() - 1
+                    );
+                    const DoubleBlock& block = doubles[k];
+                    const ScreenPair& pair = block.window.draw(
+                        target - double_prefix[k]
+                    );
+
+                    Excitation excitation;
+                    double h = 0.0;
+                    if (block.kind == ExcitationKind::mixed2) {
+                        if (
+                            bits::test(ket.alpha(), pair.a)
+                            || bits::test(ket.beta(), pair.b)
+                        ) {
+                            continue;
+                        }
+                        excitation = mixed2(block.i, block.j, pair.a, pair.b);
+                        h =
+                            sign_single(occ.pref_a, block.i, pair.a)
+                            * sign_single(occ.pref_b, block.j, pair.b)
+                            * pair.h;
+                    } else {
+                        const bool alpha = block.kind == ExcitationKind::alpha2;
+                        const auto spin_bits = alpha ? ket.alpha() : ket.beta();
+                        if (
+                            bits::test(spin_bits, pair.a)
+                            || bits::test(spin_bits, pair.b)
+                        ) {
+                            continue;
+                        }
+                        const auto& sign_prefix = alpha ? occ.pref_a : occ.pref_b;
+                        excitation = alpha
+                            ? alpha2(block.i, block.j, pair.a, pair.b)
+                            : beta2(block.i, block.j, pair.a, pair.b);
+                        h = sign_double(
+                            sign_prefix,
+                            block.i,
+                            block.j,
+                            pair.a,
+                            pair.b
+                        ) * pair.h;
+                    }
+                    draws.push_back({excitation, std::copysign(scale, h)});
+                }
+
+                std::sort(
+                    draws.begin(),
+                    draws.end(),
+                    [](const WeakTerm& lhs, const WeakTerm& rhs) {
+                        return excitation_less(lhs.excitation, rhs.excitation);
+                    }
+                );
+                item.weak.reserve(draws.size());
+                for (const WeakTerm& term : draws) {
+                    if (
+                        item.weak.empty()
+                        || excitation_less(item.weak.back().excitation, term.excitation)
+                    ) {
+                        item.weak.push_back(term);
+                    } else {
+                        item.weak.back().coeff += term.coeff;
+                    }
                 }
             }
         }
@@ -401,7 +530,6 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     out.n_kets = kets.n_dets;
     out.diag.resize(kets.n_dets);
     out.strong_degree.resize(kets.n_dets);
-    out.weak_degree.resize(kets.n_dets);
     out.strong_ptr.resize(kets.n_dets + 1u, 0);
     out.weak_ptr.resize(kets.n_dets + 1u, 0);
 
@@ -411,7 +539,6 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         const Item& item = items[iket];
         out.diag[iket] = item.diag;
         out.strong_degree[iket] = item.strong_degree;
-        out.weak_degree[iket] = item.weak_degree;
         out.strong_ptr[iket] = to_i32(n_strong);
         out.weak_ptr[iket] = to_i32(n_weak);
         n_strong += item.strong.size();
@@ -421,8 +548,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
     out.weak_ptr[kets.n_dets] = to_i32(n_weak);
 
     out.strong_h.resize(n_strong);
-    out.weak_h.resize(n_weak);
-    out.weak_count.resize(n_weak);
+    out.weak_coeff.resize(n_weak);
 
     const std::size_t stride = det_size(nword_);
     copy_batch(out.bra, kets);
@@ -440,7 +566,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
 
             for (std::size_t k = 0; k < item.strong.size(); ++k) {
                 const std::size_t slot = static_cast<std::size_t>(out.strong_ptr[iket]) + k;
-                const Term& term = item.strong[k];
+                const detail::Term& term = item.strong[k];
                 detail::copy_det_to(
                     out.bra,
                     kets.n_dets + slot,
@@ -457,8 +583,7 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
                     kets.n_dets + n_strong + slot,
                     apply(ket, term.excitation, scratch)
                 );
-                out.weak_h[slot] = term.h;
-                out.weak_count[slot] = term.count;
+                out.weak_coeff[slot] = term.coeff;
             }
         }
     }

@@ -125,10 +125,10 @@ inline void check_local(
     const std::size_t n = basis.size();
     const auto matrix = dense(hamiltonian, basis);
     const std::vector<i64> counts(n, 0);
-    const auto local = hamiltonian.local_conn(basis.view(), eps, 0.0, counts, 7);
+    const auto local = hamiltonian.local_conn(basis.view(), eps, eps, counts, 7);
     const auto configurations = batch_view(local.nword, local.bra);
 
-    if (!local.weak_h.empty() || local.strong_ptr.size() != n + 1u) {
+    if (!local.weak_coeff.empty() || local.strong_ptr.size() != n + 1u) {
         throw std::runtime_error("local connection shape");
     }
 
@@ -146,5 +146,101 @@ inline void check_local(
                 "local element"
             );
         }
+    }
+
+    bool rejected = false;
+    const std::vector<i64> draws(n, 1);
+    try {
+        static_cast<void>(hamiltonian.local_conn(
+            basis.view(),
+            eps,
+            0.0,
+            draws,
+            7
+        ));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) throw std::runtime_error("weak cutoff");
+
+    rejected = false;
+    try {
+        static_cast<void>(hamiltonian.local_conn(
+            basis.view(),
+            eps,
+            0.5 * eps,
+            counts,
+            7
+        ));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) throw std::runtime_error("weak draws");
+}
+
+inline void check_weak(
+    const Hamiltonian& hamiltonian,
+    const Basis& basis,
+    double eps1,
+    double eps2
+) {
+    const std::size_t n = basis.size();
+    const i64 n_draw = 32768;
+    const auto matrix = dense(hamiltonian, basis);
+    const std::vector<i64> counts(n, n_draw);
+    const auto local = hamiltonian.local_conn(
+        basis.view(),
+        eps1,
+        eps2,
+        counts,
+        11
+    );
+    const auto configurations = batch_view(local.nword, local.bra);
+    const std::size_t n_strong = static_cast<std::size_t>(local.strong_ptr.back());
+
+    if (
+        local.weak_ptr.size() != n + 1u
+        || local.weak_coeff.size()
+            != static_cast<std::size_t>(local.weak_ptr.back())
+    ) {
+        throw std::runtime_error("weak connection shape");
+    }
+
+    double estimate = 0.0;
+    double expected = 0.0;
+    for (std::size_t ket = 0; ket < n; ++ket) {
+        near(local.diag[ket], matrix[ket * n + ket], "weak diagonal");
+        near(local.strong_degree[ket], degree(matrix, n, ket, eps1), "strong degree");
+
+        for (std::size_t bra = 0; bra < n; ++bra) {
+            if (bra == ket) continue;
+            const double h = matrix[bra * n + ket];
+            const double abs_h = std::abs(h);
+            if (abs_h >= eps2 && abs_h < eps1) {
+                expected += h;
+            }
+        }
+
+        for (int p = local.weak_ptr[ket]; p < local.weak_ptr[ket + 1u]; ++p) {
+            const std::size_t record = static_cast<std::size_t>(p);
+            const int bra = find_state(
+                basis.view(),
+                configurations[n + n_strong + record]
+            );
+            if (bra < 0) throw std::runtime_error("unknown weak bra");
+
+            const double h = matrix[static_cast<std::size_t>(bra) * n + ket];
+            if (!(std::abs(h) >= eps2 && std::abs(h) < eps1)) {
+                throw std::runtime_error("weak window");
+            }
+            const double coeff = local.weak_coeff[record];
+            if (!(coeff * h > 0.0)) throw std::runtime_error("weak coefficient");
+            estimate += coeff;
+        }
+    }
+
+    const double tolerance = 2.0e-2 * (1.0 + std::abs(expected));
+    if (std::abs(estimate - expected) > tolerance) {
+        throw std::runtime_error("weak estimator");
     }
 }

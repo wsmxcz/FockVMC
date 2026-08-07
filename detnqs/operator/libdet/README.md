@@ -82,7 +82,7 @@ sampled bras are valid records.
 [kets, strong bras, weak bras]
 ```
 
-`strong_ptr/strong_h` and `weak_ptr/weak_h` index their own value arrays.
+`strong_ptr/strong_h` and `weak_ptr/weak_coeff` index their own value arrays.
 
 ## Screening
 
@@ -94,8 +94,10 @@ strong           |H_bk| >= eps1
 weak             eps2 <= |H_bk| < eps1
 ```
 
-A zero cutoff requests complete direct enumeration. Sampled records carry the
-degree and multiplicity needed to reconstruct an unbiased retained-window sum.
+A zero cutoff requests complete direct enumeration. Weak coefficients directly
+form an unbiased retained-window sum.
+
+`local_conn` requires `eps2 > 0` and positive counts when `eps2 < eps1`.
 
 ## Stable development rules
 

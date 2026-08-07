@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import jax
 import numpy as np
 import optax
+from jax.flatten_util import ravel_pytree
 
 from detnqs import ExactState, Hamiltonian, psr, sr
 from detnqs.model import RBM
@@ -12,10 +11,6 @@ from detnqs.utils import batch
 
 
 FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
-
-
-def _flat(tree) -> np.ndarray:
-    return np.concatenate([np.asarray(x).reshape(-1) for x in jax.tree.leaves(tree)])
 
 
 def test_optimizers() -> None:
@@ -49,11 +44,13 @@ def test_optimizers() -> None:
         geometry=geometry,
     )
 
-    assert np.isfinite(_flat(update_sr)).all()
-    assert np.isfinite(_flat(update_psr)).all()
+    flat_sr, _ = ravel_pytree(update_sr)
+    flat_psr, _ = ravel_pytree(update_psr)
+    assert np.isfinite(flat_sr).all()
+    assert np.isfinite(flat_psr).all()
     np.testing.assert_allclose(
-        _flat(update_psr),
-        _flat(update_sr),
+        flat_psr,
+        flat_sr,
         rtol=2e-3,
         atol=2e-4,
     )
@@ -65,7 +62,8 @@ def test_optimizers() -> None:
         state.params,
         geometry=geometry,
     )
-    np.testing.assert_allclose(_flat(scaled), -1.0e-2 * _flat(update_psr))
+    flat_scaled, _ = ravel_pytree(scaled)
+    np.testing.assert_allclose(flat_scaled, -1.0e-2 * flat_psr)
 
     params = optax.apply_updates(state.params, scaled)
     assert jax.tree.structure(params) == jax.tree.structure(state.params)
@@ -84,4 +82,5 @@ def test_optimizers() -> None:
         state.params,
         geometry=geometry,
     )
-    assert np.isfinite(_flat(second_update)).all()
+    flat_second, _ = ravel_pytree(second_update)
+    assert np.isfinite(flat_second).all()

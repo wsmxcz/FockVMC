@@ -186,22 +186,16 @@ class Hamiltonian:
         kets: ArrayLike,
         eps1: float,
         eps2: float,
-        counts: ArrayLike | int,
+        n_draw: int,
         *,
         seed: int = 0,
     ) -> libdet.LocalConn:
-        """Return strong connections and weak-window samples for local energy."""
-        kets_arr = np.ascontiguousarray(kets, dtype=np.uint64)
-        counts_arr = (
-            np.full(kets_arr.shape[0], int(counts), dtype=np.int64)
-            if np.isscalar(counts)
-            else np.ascontiguousarray(counts, dtype=np.int64).reshape(-1)
-        )
+        """Return exact strong terms and sampled weak coefficients."""
         return self._raw.local_conn(
-            kets_arr,
+            np.ascontiguousarray(kets, dtype=np.uint64),
             float(eps1),
             float(eps2),
-            counts_arr,
+            int(n_draw),
             seed=int(seed),
         )
 

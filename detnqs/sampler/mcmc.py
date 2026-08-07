@@ -103,7 +103,7 @@ class MCSampler:
             raise ValueError("chains size must equal sampler.n_chains")
         x = np.ascontiguousarray(x)
 
-        with timer("reduce"):
+        with timer("unique"):
             unique, _, inv = hamiltonian.sector.unique(x)
 
         with timer("forward"):
@@ -257,9 +257,11 @@ class MCSampler:
             observed = np.ascontiguousarray(state.x[pick])
             obs_mass = np.ones(n_observe, dtype=rdtype)
 
-        with timer("reduce"):
+        with timer("unique"):
             ket, first, ket_index = hamiltonian.sector.unique(state.x)
             n_ket = int(ket.shape[0])
+
+        with timer("reduce"):
             ket_logabs = precision.cast(
                 state.logabs[np.asarray(first, dtype=np.int64)],
                 "calc",
@@ -451,12 +453,15 @@ class MCSampler:
                     logabs_candidate[active] = new_logabs
 
             else:
-                with timer("reduce"):
-                    unique_candidate, _, inverse = hamiltonian.sector.unique(candidate[active])
+                with timer("unique"):
+                    unique_candidate, _, inverse = hamiltonian.sector.unique(
+                        candidate[active]
+                    )
                     _, first_all, lookup = hamiltonian.sector.unique(
                         np.concatenate((ket, unique_candidate), axis=0)
                     )
 
+                with timer("reduce"):
                     first_candidate = first_all[lookup[n_ket:]]
                     known = first_candidate < n_ket
 

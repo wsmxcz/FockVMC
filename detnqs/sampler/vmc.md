@@ -128,7 +128,7 @@ final unbiased coefficients. With `eps1=eps2=0`, the full action is deterministi
 
 Weak sampling requires `eps2 > 0` and `eloc_sample > 0` when `eps2 < eps1`.
 
-Kets and all connected bras are globally deduplicated before `logpsi`. The final
+Kets and all connected bras share one `logpsi` evaluation pool. The final
 energy, residual, gradient cotangent, and SR residual are
 
 $$

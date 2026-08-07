@@ -102,6 +102,8 @@ struct Excitation {
     int j = 0;
     int a = 0;
     int b = 0;
+
+    bool operator==(const Excitation&) const noexcept = default;
 };
 
 [[nodiscard]] inline bool excitation_less(

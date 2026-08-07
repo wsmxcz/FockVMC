@@ -66,9 +66,12 @@ class Sector(ABC):
             index = np.empty(0, dtype=np.int64)
             return x, index, index
 
+        flat = x.reshape(x.shape[0], -1)
+        row = flat.view(
+            np.dtype((np.void, flat.dtype.itemsize * flat.shape[1]))
+        ).reshape(-1)
         _, first, inverse = np.unique(
-            x.reshape(x.shape[0], -1),
-            axis=0,
+            row,
             return_index=True,
             return_inverse=True,
         )

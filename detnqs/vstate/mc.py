@@ -210,7 +210,7 @@ class MCState:
                 timer=timer,
             )
         else:
-            with timer("reduce"):
+            with timer("unique"):
                 unique, _, inv = self.hamiltonian.sector.unique(sampler_state.x)
 
             with timer("forward"):
@@ -236,10 +236,11 @@ class MCState:
             )
         )
 
-        with timer("reduce"):
+        with timer("unique"):
             ket, _, observation_to_ket = self.hamiltonian.sector.unique(observations)
             n_ket = int(ket.shape[0])
 
+        with timer("reduce"):
             raw_mass = precision.cast(observation_mass, "calc", "real", host=True)
             mass = np.bincount(observation_to_ket, weights=raw_mass, minlength=n_ket)
             mass2 = np.bincount(
@@ -298,7 +299,6 @@ class MCState:
                 if len(raw_parts) == 1
                 else np.concatenate(raw_parts, axis=0)
             )
-            unique_bra, _, bra_inverse = self.hamiltonian.sector.unique(raw_bra)
             n_strong = int(strong_h.size)
             n_weak = int(weak_coeff.size)
             strong_slice = slice(n_ket, n_ket + n_strong)
@@ -312,12 +312,11 @@ class MCState:
                 start = end
 
         with timer("forward"):
-            unique_logpsi = batch.apply(self.model.logpsi, self.params, unique_bra)
-            jax.block_until_ready(unique_logpsi)
-            unique_logpsi = tree.host(unique_logpsi)
+            bra_logpsi = batch.apply(self.model.logpsi, self.params, raw_bra)
+            jax.block_until_ready(bra_logpsi)
+            bra_logpsi = tree.host(bra_logpsi)
 
         with timer("reduce"):
-            bra_logpsi = jax.tree.map(lambda a: a[bra_inverse], unique_logpsi)
             ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
             strong_logpsi = jax.tree.map(lambda a: a[strong_slice], bra_logpsi)
             weak_logpsi = jax.tree.map(lambda a: a[weak_slice], bra_logpsi)
@@ -336,7 +335,10 @@ class MCState:
             alpha = rdtype(alpha_used)
             beta = rdtype(self.sampler.blur)
 
-            ket_idx = np.repeat(np.arange(n_ket, dtype=np.int64), np.diff(strong_ptr))
+            strong_count = np.diff(strong_ptr)
+            strong_active = strong_count > 0
+            strong_start = strong_ptr[:-1][strong_active]
+            ket_idx = np.repeat(np.arange(n_ket, dtype=np.int64), strong_count)
             source_logamp = precision.cast(
                 alpha * ket_logabs,
                 "calc",
@@ -358,7 +360,7 @@ class MCState:
                 )
                 contrib = strong_h * ratio
                 eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
-                np.add.at(eloc, ket_idx, contrib)
+                eloc[strong_active] += np.add.reduceat(contrib, strong_start)
 
             tilted = self.sampler.proposal == "ham" or beta > 0.0
             if not tilted:
@@ -419,14 +421,20 @@ class MCState:
                         conn_weight[ok] = np.exp(term_log[ok])
 
                         ell = bra_logabs[strong_slice]
-                        np.add.at(score, ket_idx, conn_weight * ell)
-                        np.add.at(score2, ket_idx, conn_weight * ell * ell)
+                        score[strong_active] += np.add.reduceat(
+                            conn_weight * ell,
+                            strong_start,
+                        )
+                        score2[strong_active] += np.add.reduceat(
+                            conn_weight * ell * ell,
+                            strong_start,
+                        )
 
             if weak_coeff.size:
-                weak_ket = np.repeat(
-                    np.arange(n_ket, dtype=np.int64),
-                    np.diff(weak_ptr),
-                )
+                weak_count = np.diff(weak_ptr)
+                weak_active = weak_count > 0
+                weak_start = weak_ptr[:-1][weak_active]
+                weak_ket = np.repeat(np.arange(n_ket, dtype=np.int64), weak_count)
                 ratio = precision.cast(
                     np.asarray(
                         to_ratio(
@@ -439,7 +447,7 @@ class MCState:
                 )
                 contrib = weak_coeff * ratio
                 eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
-                np.add.at(eloc, weak_ket, contrib)
+                eloc[weak_active] += np.add.reduceat(contrib, weak_start)
 
             eloc = precision.cast(eloc, "calc", host=True)
             # Reweight the observed auxiliary law back to the Born target pi.
@@ -466,10 +474,10 @@ class MCState:
             for name, o_diag, o_ptr, o_slice, o_val in obs_mapped:
                 oloc = precision.cast(np.asarray(o_diag).copy(), "calc", host=True)
                 if o_val.size:
-                    o_ket = np.repeat(
-                        np.arange(n_ket, dtype=np.int64),
-                        np.diff(o_ptr),
-                    )
+                    o_count = np.diff(o_ptr)
+                    o_active = o_count > 0
+                    o_start = o_ptr[:-1][o_active]
+                    o_ket = np.repeat(np.arange(n_ket, dtype=np.int64), o_count)
                     ratio = precision.cast(
                         np.asarray(
                             to_ratio(
@@ -482,7 +490,7 @@ class MCState:
                     )
                     contrib = precision.cast(o_val, "calc", host=True) * ratio
                     oloc = oloc.astype(np.result_type(oloc, contrib), copy=False)
-                    np.add.at(oloc, o_ket, contrib)
+                    oloc[o_active] += np.add.reduceat(contrib, o_start)
                 obs_stats.update(stats.observable(name, weight, oloc))
                 if data:
                     obs_data[name] = oloc
@@ -524,7 +532,7 @@ class MCState:
 
         new_state = replace(self, sampler_state=sampler_state)
         n_sample = int(observations.shape[0])
-        n_forward = int(unique_bra.shape[0])
+        n_forward = int(raw_bra.shape[0])
 
         out = {
             **energy_stats,

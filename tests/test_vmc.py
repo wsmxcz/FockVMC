@@ -6,7 +6,7 @@ import optax
 
 from detnqs import ExactState, Hamiltonian, MCState, SelectedState, VMC, psr
 from detnqs.model import RBM, slater_reference
-from detnqs.operator import number
+from detnqs.operator import S2, number
 from detnqs.sampler import MCSampler, sample_slater
 from detnqs.utils import batch
 
@@ -74,11 +74,16 @@ def test_states() -> None:
         eps2=0.0,
         eloc_sample=0,
     ).replace(params=exact.params)
-    _, energy, grad, stats, geometry = mc.expect_and_grad(geometry=True)
+    _, energy, grad, stats, geometry = mc.expect_and_grad(
+        geometry=True,
+        obs={"s2": S2(sector)},
+        profile=True,
+    )
 
     assert abs(energy - exact_stats["energy"]) < 0.25
     assert np.isfinite(stats["eloc_var"])
-    assert stats["n_forward"] <= len(basis)
+    assert np.isfinite(stats["s2"])
+    assert stats["time_unique"] >= 0.0
     assert geometry is not None
     assert all(np.isfinite(x).all() for x in jax.tree.leaves(grad))
 

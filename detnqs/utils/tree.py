@@ -13,15 +13,6 @@ def host(tree: Any) -> Any:
     return jax.tree.map(np.asarray, jax.device_get(tree))
 
 
-def vdot(a: Any, b: Any) -> jax.Array:
-    """Real part of the Hermitian PyTree inner product."""
-    out = None
-    for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True):
-        term = jnp.real(jnp.vdot(x, y))
-        out = term if out is None else out + term
-    return jnp.asarray(0.0) if out is None else out
-
-
 def blocks(tree: Any, size: int | None = None, *aligned: Any):
     """Yield flattened leaf blocks and a local tree updater.
 

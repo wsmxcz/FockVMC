@@ -16,8 +16,6 @@ from detnqs.utils import Logger, batch, precision
 
 def main() -> None:
     precision.configure("double")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
     batch.configure(
         forward_chunk=32768,
         backward_chunk=4096,
@@ -38,10 +36,10 @@ def main() -> None:
     iron = np.concatenate((fe1, fe2, fe3, fe4))
     closed = np.setdiff1d(np.arange(sector.norb), iron)
 
-    extra_b = fe4[0]
-    extra_a = fe2[0]
-    occ_a = np.sort(np.concatenate((closed, fe1, fe4, [extra_a])))
-    occ_b = np.sort(np.concatenate((closed, fe2, fe3, [extra_b])))
+    extra_b = fe2[0]
+    extra_a = fe4[0]
+    occ_a = np.sort(np.concatenate((closed, fe1, fe2, [extra_a])))
+    occ_b = np.sort(np.concatenate((closed, fe3, fe4, [extra_b])))
     assert len(occ_a) == sector.n_alpha and len(occ_b) == sector.n_beta
     orbitals = np.eye(sector.norb)
     ref_mat = slater_reference(orbitals[:, occ_a], orbitals[:, occ_b])
@@ -58,7 +56,7 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=4096,
         n_chains=4096,
-        thermal_steps=256,
+        thermal_steps=4096,
         discard_steps=16,
         proposal="ham",
         blur=0.5,
@@ -88,11 +86,11 @@ def main() -> None:
     vmc = VMC.init(state, optimizer)
 
     print(f"active      : ({sector.nelec}e, {sector.norb}o)")
-    print("reference   : Fe1/Fe4 up, Fe2/Fe3 down")
+    print("reference   : Fe1/Fe2 up, Fe3/Fe4 down")
     print("Fe(II)      : Fe2 and Fe4")
 
     vmc.run(
-        10000,
+        5000,
         obs={"s2": S2(sector)},
         logger=Logger(file=f"{name}.jsonl", every=10),
         profile=True,

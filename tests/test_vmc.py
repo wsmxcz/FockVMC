@@ -8,7 +8,7 @@ from detnqs import ExactState, Hamiltonian, MCState, SelectedState, VMC, psr
 from detnqs.model import RBM, slater_reference
 from detnqs.operator import S2, number
 from detnqs.sampler import MCSampler, sample_slater
-from detnqs.utils import batch
+from detnqs.utils import batch, checkpoint
 
 
 FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
@@ -114,10 +114,25 @@ def test_checkpoint(tmp_path: Path) -> None:
     )
     vmc = VMC.init(state, optimizer)
     record = vmc.step()
-    assert "sr_force" in record
+    assert np.isfinite(record["energy"])
+    assert set(record) == {
+        "accept",
+        "alpha",
+        "eloc_var",
+        "energy",
+        "ess_frac",
+        "essu_frac",
+        "n_forward",
+        "step",
+        "unique_frac",
+        "w_max",
+    }
 
     path = tmp_path / "vmc.npz"
     vmc.save(path)
+    saved_state = checkpoint.load(path, key="state")
+    assert set(saved_state) == {"chains", "params", "sampler_state"}
+
     saved_params = jax.tree.map(np.asarray, vmc.state.params)
     saved_x = vmc.state.sampler_state.x.copy()
     saved_step = vmc.step_count

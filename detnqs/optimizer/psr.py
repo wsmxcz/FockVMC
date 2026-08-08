@@ -29,7 +29,6 @@ class PSRState(NamedTuple):
     """
 
     direction: Any
-    stats: dict[str, jax.Array]
 
 
 def psr(
@@ -44,15 +43,7 @@ def psr(
         raise ValueError("mu must satisfy 0 <= mu < 1")
 
     def init_fn(params: Any) -> PSRState:
-        zero = jnp.asarray(0.0, dtype=precision.real("sr"))
-
-        return PSRState(
-            direction=jax.tree.map(jnp.zeros_like, params),
-            stats={
-                "sr_force": zero,
-                "sr_damp": zero,
-            },
-        )
+        return PSRState(direction=jax.tree.map(jnp.zeros_like, params))
 
     def update_fn(
         updates: Any,
@@ -74,7 +65,7 @@ def psr(
             state.direction,
         )
 
-        delta, info = batch.bucket(
+        delta = batch.bucket(
             _step,
             geometry.coord,
             geometry.params,
@@ -94,13 +85,7 @@ def psr(
             geometry.params,
         )
 
-        return delta, PSRState(
-            direction=delta,
-            stats={
-                "sr_force": info["force"],
-                "sr_damp": info["damp"],
-            },
-        )
+        return delta, PSRState(direction=delta)
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
@@ -113,7 +98,7 @@ def _step(
     w: jax.Array,
     b: jax.Array,
     shift: jax.Array,
-) -> tuple[Any, dict[str, jax.Array]]:
+) -> Any:
     """Solve dense sample-space PSR."""
     b_flat, _ = ravel_pytree(b)
 
@@ -162,10 +147,6 @@ def _step(
 
     a = linalg.solve_dense(K, rhs, shift)
 
-    force = jnp.real(jnp.vdot(rhs, a)).astype(precision.real("sr"))
-    damp = shift * jnp.real(jnp.vdot(a, a))
-    damp = damp / jnp.maximum(force, precision.tiny("sr"))
-
     # Apply O^dagger directly. A complex parameterization gives a complex
     # sample-space solution even though coord and b are real; routing that
     # solution through a real-output VJP would discard its imaginary part.
@@ -185,8 +166,4 @@ def _step(
         pred,
         corr,
     )
-
-    return delta, {
-        "force": force,
-        "damp": damp.astype(precision.real("sr")),
-    }
+    return delta

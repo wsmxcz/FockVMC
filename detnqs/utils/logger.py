@@ -34,7 +34,7 @@ class Logger:
             if not append:
                 self.file.write_text("", encoding="utf-8")
 
-    def add(self, record: Mapping[str, Any]) -> dict[str, Any]:
+    def add(self, record: Mapping[str, Any]) -> None:
         """Append one step record."""
         rec = {str(k): self._json(v) for k, v in record.items()}
         step = int(rec["step"])
@@ -54,8 +54,6 @@ class Logger:
         if self.verbose and step % self.every == 0:
             self._print(rec)
 
-        return rec
-
     def _print(self, rec: Mapping[str, Any]) -> None:
         cols = self._select(rec)
         if not cols:
@@ -72,7 +70,7 @@ class Logger:
             width = 8 if key == "step" or key.startswith("n_") else 13
             width = 9 if key.startswith("time_") else width
             width = 8 if key == "accept" or key.endswith("_frac") else width
-            width = 15 if key in {"energy", "energy_se"} else width
+            width = 15 if key == "energy" else width
             widths.append(max(len(key), width, len(cell)))
         widths = tuple(widths)
 
@@ -107,17 +105,12 @@ class Logger:
                 for k in (
                     "step",
                     "energy",
-                    "energy_se",
                     "eloc_var",
                     "ess_frac",
                     "essu_frac",
                     "w_max",
                     "accept",
                     "unique_frac",
-                    "dE_lin",
-                    "update_norm",
-                    "sr_force",
-                    "sr_damp",
                     "n_forward",
                 )
                 if k in rec
@@ -146,7 +139,7 @@ class Logger:
             return f"{x:.3f}s"
         if key == "accept" or key.endswith("_frac"):
             return f"{100.0 * x:.2f}%"
-        if key in {"energy", "energy_se"}:
+        if key == "energy":
             return f"{x:.8f}"
 
         return f"{x:.6f}"

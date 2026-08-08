@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import jax
 import numpy as np
 from numpy.typing import NDArray
 
@@ -62,9 +61,7 @@ def weight(
     essu = float(1.0 / max(float(np.sum(weight * weight)), float(tiny)))
 
     return weight, {
-        "ess": ess,
         "ess_frac": ess / max(1.0, float(np.sum(mass))),
-        "essu": essu,
         "essu_frac": essu / max(1.0, float(weight.shape[0])),
         "w_max": float(np.max(weight)) if weight.size else 0.0,
     }
@@ -73,8 +70,6 @@ def weight(
 def eloc(
     weight: NDArray[Any],
     eloc: NDArray[Any],
-    *,
-    blocks: NDArray[Any] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Reduce weighted local-energy statistics."""
     weight = precision.cast(
@@ -88,19 +83,10 @@ def eloc(
     energy = float(np.real(np.dot(weight, eloc)))
     resid = eloc - energy
 
-    out = {
+    return energy, {
         "energy": energy,
         "eloc_var": float(np.real(np.dot(weight, np.abs(resid) ** 2))),
     }
-
-    if blocks is not None:
-        block = precision.cast(np.asarray(blocks).reshape(-1), "calc", host=True)
-        if block.size > 1:
-            mean = np.mean(block)
-            var = np.sum(np.abs(block - mean) ** 2).real
-            out["energy_se"] = float(np.sqrt(var / (block.size * (block.size - 1))))
-
-    return energy, out
 
 
 def observable(
@@ -123,29 +109,4 @@ def observable(
     return {
         str(name): mean,
         f"{name}_var": float(np.real(np.dot(weight, np.abs(resid) ** 2))),
-    }
-
-
-def update(grad: Any, updates: Any) -> dict[str, float]:
-    """Return diagnostics for the final applied parameter update.
-
-    `dE_lin = Re <grad, update>` is the first-order energy change.
-    """
-    dE_lin = 0.0
-    norm2 = 0.0
-
-    for grad_leaf, update_leaf in zip(
-        jax.tree.leaves(grad),
-        jax.tree.leaves(updates),
-        strict=True,
-    ):
-        g = np.asarray(jax.device_get(grad_leaf)).reshape(-1)
-        u = np.asarray(jax.device_get(update_leaf)).reshape(-1)
-
-        dE_lin += float(np.real(np.vdot(g, u)))
-        norm2 += float(np.real(np.vdot(u, u)))
-
-    return {
-        "dE_lin": dE_lin,
-        "update_norm": float(np.sqrt(max(norm2, 0.0))),
     }

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def smooth(y: np.ndarray, window: int = 21) -> np.ndarray:
+def smooth(y: np.ndarray, window: int = 11) -> np.ndarray:
     mask = np.isfinite(y)
     kernel = np.ones(window)
     value = np.convolve(np.where(mask, y, 0.0), kernel, mode="same")
@@ -19,11 +19,10 @@ def smooth(y: np.ndarray, window: int = 21) -> np.ndarray:
 
 def main() -> None:
     runs = {
-        "exp1": Path("fe4s4.jsonl"),   #256, 1e-3, 1e-12, 8192
-        "exp2": Path("fe4s4_2.jsonl"), #256256, 1e-3, 1e-12, 4096
-        "exp3": Path("fe4s4_3.jsonl"), #256256, 1e-3, 1e-6, 4096
+        "exp1": Path("fe4s4.jsonl"),
     }
-    benchmark = -327.2396369  # Fe4S4
+    # benchmark = -116.6056091  # Fe2S2
+    benchmark = -327.248858  # Fe4S4
     figure, axes = plt.subplots(
         2,
         3,

@@ -22,8 +22,6 @@ def main() -> None:
         bucket_min=4096,
     )
     precision.configure("double")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
 
     root = Path(__file__).with_name("FCIDUMP") / "H2O_ccpvdz"
     points = ("1.0re", "1.5re", "2.0re", "2.5re", "3.0re")
@@ -50,7 +48,7 @@ def main() -> None:
         sampler = MCSampler(
             n_samples=4096,
             n_chains=4096,
-            thermal_steps=256,
+            thermal_steps=4096,
             discard_steps=16,
             proposal="ham",
             blur=0.5,
@@ -82,7 +80,7 @@ def main() -> None:
         print(f"active      : ({sector.nelec}e, {sector.norb}o)")
 
         vmc.run(
-            10000,
+            5000,
             obs={"s2": S2(sector)},
             logger=Logger(file=f"{name}.jsonl", every=10),
             profile=True,

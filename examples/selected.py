@@ -20,8 +20,6 @@ def main() -> None:
         bucket_min=128,
     )
     precision.configure("single")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
 
     path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
     hamiltonian = Hamiltonian.load(path)
@@ -50,7 +48,6 @@ def main() -> None:
     vmc = VMC.init(state, optax.adamw(1.0e-3), geometry=False)
     log = Logger(every=1, keys=("step", "outer", "energy", "eloc_var", "n_basis"))
 
-    # Alternate basis growth and projected optimization.
     for outer in range(2):
         vmc.state = vmc.state.evolve(topk_selector(k=128), eps=1.0e-6)
         rec = vmc.run(50)

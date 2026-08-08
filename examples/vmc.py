@@ -22,8 +22,6 @@ def main() -> None:
         bucket_min=4096,
     )
     precision.configure("double")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
 
     name = "N2"
     seed = 0

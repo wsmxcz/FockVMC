@@ -20,8 +20,6 @@ def main() -> None:
         bucket_min=128,
     )
     precision.configure("single")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
 
     path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
     hamiltonian = Hamiltonian.load(path)

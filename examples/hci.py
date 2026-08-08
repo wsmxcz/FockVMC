@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, eigsh
@@ -256,7 +256,6 @@ def _pt2(
 
 
 def main() -> None:
-    # Build molecule.
     mol = gto.M(
         atom="""
         O   0.00000000,  0.00000000,  0.00000000
@@ -279,11 +278,9 @@ def main() -> None:
         dtype=np.float64,
     )
 
-    # Build Hamiltonian.
     sector = DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
     hamiltonian = Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
 
-    # Run variational stage.
     state = _select(
         hamiltonian,
         eps=1e-4,
@@ -291,7 +288,6 @@ def main() -> None:
         mode="sparse",
     )
 
-    # Run correction stage.
     pt2, det_pt2, sample_pt2, error = _pt2(
         hamiltonian,
         state,

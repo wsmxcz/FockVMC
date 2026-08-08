@@ -540,8 +540,6 @@ class MCState:
             **obs_stats,
             "alpha": float(alpha_used),
             "accept": float(sample_stats.get("accept", 0.0)),
-            "n_sample": float(n_sample),
-            "n_unique": float(n_ket),
             "n_forward": float(n_forward),
             "unique_frac": float(n_ket) / max(1.0, float(n_sample)),
         }

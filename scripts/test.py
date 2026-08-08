@@ -79,7 +79,7 @@ def main() -> None:
     print(f"exact ground : {exact_ground:.10f}")
     print(f"exact model  : {exact_stats['energy']:.10f}")
     print(f"MC model     : {mc_stats['energy']:.10f}")
-    print(f"PSR step     : {record['update_norm']:.3e}")
+    print("PSR step     : ok")
     print("checkpoint   : ok")
 
 

@@ -16,10 +16,9 @@ from .base import Geometry
 
 
 class SRState(NamedTuple):
-    """Warm start and scalar statistics for parameter-space SR."""
+    """Warm start for parameter-space SR."""
 
     x0: jax.Array
-    stats: dict[str, jax.Array]
 
 
 def sr(
@@ -36,15 +35,7 @@ def sr(
 
     def init_fn(params: Any) -> SRState:
         flat, _ = ravel_pytree(params)
-        zero = jnp.asarray(0.0, dtype=precision.real("sr"))
-
-        return SRState(
-            x0=jnp.zeros_like(flat),
-            stats={
-                "sr_force": zero,
-                "sr_damp": zero,
-            },
-        )
+        return SRState(x0=jnp.zeros_like(flat))
 
     def update_fn(
         updates: Any,
@@ -71,7 +62,7 @@ def sr(
         )
 
         if mode == "dense":
-            delta, info = _dense_step(
+            delta = _dense_step(
                 geometry.coord,
                 theta,
                 x,
@@ -81,7 +72,7 @@ def sr(
             )
             x0 = state.x0
         else:
-            delta, x0, info = _matvec_step(
+            delta, x0 = _matvec_step(
                 geometry.coord,
                 theta,
                 x,
@@ -98,13 +89,7 @@ def sr(
             theta,
         )
 
-        return delta, SRState(
-            x0=x0,
-            stats={
-                "sr_force": info["force"],
-                "sr_damp": info["damp"],
-            },
-        )
+        return delta, SRState(x0=x0)
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
@@ -117,7 +102,7 @@ def _dense_step(
     w: jax.Array,
     grad: Any,
     shift: jax.Array,
-) -> tuple[Any, dict[str, jax.Array]]:
+) -> Any:
     """Solve dense parameter-space SR."""
     grad_flat, unravel = ravel_pytree(grad)
 
@@ -135,15 +120,7 @@ def _dense_step(
 
     rhs = precision.cast(grad_flat, "sr").astype(S.dtype)
     delta = linalg.solve_dense(S, rhs, shift)
-
-    force = jnp.real(jnp.vdot(rhs, delta)).astype(precision.real("sr"))
-    damp = shift * jnp.real(jnp.vdot(delta, delta))
-    damp = damp / jnp.maximum(force, precision.tiny("sr"))
-
-    return unravel(delta.astype(grad_flat.dtype)), {
-        "force": force,
-        "damp": damp.astype(precision.real("sr")),
-    }
+    return unravel(delta.astype(grad_flat.dtype))
 
 
 @partial(jax.jit, static_argnums=(0, 7))
@@ -156,7 +133,7 @@ def _matvec_step(
     shift: jax.Array,
     x0: jax.Array,
     maxiter: int,
-) -> tuple[Any, jax.Array, dict[str, jax.Array]]:
+) -> tuple[Any, jax.Array]:
     """Solve matrix-free parameter-space SR."""
     grad_flat, unravel = ravel_pytree(grad)
     nsample = w.shape[0]
@@ -195,16 +172,7 @@ def _matvec_step(
         x0=x0,
         maxiter=maxiter,
     )
-
-    force = jnp.real(jnp.vdot(rhs, delta)).astype(precision.real("sr"))
-    damp = shift * jnp.real(jnp.vdot(delta, delta))
-    damp = damp / jnp.maximum(force, precision.tiny("sr"))
-
     return (
         unravel(delta.astype(grad_flat.dtype)),
         delta.astype(x0.dtype),
-        {
-            "force": force,
-            "damp": damp.astype(precision.real("sr")),
-        },
     )

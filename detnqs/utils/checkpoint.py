@@ -38,17 +38,36 @@ def save(file: str | Path, tree: Any) -> Path:
     return path
 
 
-def load(file: str | Path) -> Any:
-    """Load a numerical tree."""
+def load(file: str | Path, *, key: str | None = None) -> Any:
+    """Load a numerical tree or one value from a top-level mapping."""
     with np.load(Path(file), allow_pickle=False) as data:
-        treedef = pickle.loads(bytes(np.asarray(data["treedef"], dtype=np.uint8)))
+        treedef = pickle.loads(
+            bytes(np.asarray(data["treedef"], dtype=np.uint8))
+        )
         is_key = np.asarray(data["is_key"], dtype=bool)
+
+        start = 0
+        stop = treedef.num_leaves
+        if key is not None:
+            node = treedef.node_data()
+            if node is None or node[0] is not dict:
+                raise ValueError("checkpoint root is not a mapping")
+
+            names = node[1]
+            if key not in names:
+                raise KeyError(key)
+
+            children = treedef.children()
+            index = names.index(key)
+            start = sum(child.num_leaves for child in children[:index])
+            treedef = children[index]
+            stop = start + treedef.num_leaves
 
         leaves = [
             jax.random.wrap_key_data(np.asarray(data[f"leaf_{i}"]))
-            if key
+            if is_prng
             else np.asarray(data[f"leaf_{i}"])
-            for i, key in enumerate(is_key)
+            for i, is_prng in enumerate(is_key[start:stop], start=start)
         ]
 
     return jax.tree_util.tree_unflatten(treedef, leaves)

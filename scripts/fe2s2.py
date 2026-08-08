@@ -16,8 +16,6 @@ from detnqs.utils import Logger, batch, precision
 
 def main() -> None:
     precision.configure("double")
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_log_compiles", False)
     batch.configure(
         forward_chunk=32768,
         backward_chunk=4096,
@@ -53,7 +51,7 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=4096,
         n_chains=4096,
-        thermal_steps=256,
+        thermal_steps=4096,
         discard_steps=16,
         proposal="ham",
         blur=0.5,
@@ -86,7 +84,7 @@ def main() -> None:
     print("reference   : Fe1 up, Fe2 down")
 
     vmc.run(
-        10000,
+        5000,
         obs={"s2": S2(sector)},
         logger=Logger(file=f"{name}.jsonl", every=10),
         profile=True,

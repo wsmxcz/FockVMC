@@ -6,10 +6,9 @@ from pathlib import Path
 from typing import Any, Self
 
 import jax
-import jax.numpy as jnp
 import optax
 
-from .utils import Timer, checkpoint, stats as stats_util
+from .utils import Timer, checkpoint
 from .utils.logger import Logger
 
 
@@ -48,7 +47,7 @@ class VMC:
         """Apply one update and return the pre-update scalar record."""
         timer = Timer(enabled=profile)
         with timer("total"):
-            state, energy, grad, stats, geometry = self.state.expect_and_grad(
+            state, _, grad, stats, geometry = self.state.expect_and_grad(
                 geometry=self.geometry,
                 obs=obs,
                 profile=profile,
@@ -61,8 +60,6 @@ class VMC:
                     self.opt_state,
                     state.params,
                     geometry=geometry,
-                    value=energy,
-                    stats=stats,
                 )
                 params = optax.apply_updates(state.params, updates)
                 jax.block_until_ready(params)
@@ -71,22 +68,6 @@ class VMC:
 
         rec = dict(stats)
         rec["step"] = float(self.step_count + 1)
-        rec.update(stats_util.update(grad, updates))
-
-        opt_states = jax.tree.leaves(
-            self.opt_state,
-            is_leaf=lambda x: isinstance(getattr(x, "stats", None), Mapping),
-        )
-        for opt_state in opt_states:
-            opt_stats = getattr(opt_state, "stats", None)
-            if isinstance(opt_stats, Mapping):
-                for key, value in opt_stats.items():
-                    arr = jnp.asarray(jax.device_get(value))
-                    if arr.ndim == 0 and not jnp.issubdtype(
-                        arr.dtype,
-                        jnp.complexfloating,
-                    ):
-                        rec[str(key)] = float(arr)
 
         if profile:
             rec.update(timer.stats())

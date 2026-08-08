@@ -8,15 +8,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-def normalize(w: Any, mask: Any | None = None) -> jax.Array:
+def normalize(w: Any) -> jax.Array:
     """Normalize non-negative weights to unit total mass."""
     w = jnp.asarray(w)
     if not jnp.issubdtype(w.dtype, jnp.inexact):
         w = w.astype(jnp.float64)
-
-    if mask is not None:
-        mask = jnp.asarray(mask, dtype=bool)
-        w = jnp.where(mask, w, 0.0)
 
     tiny = jnp.asarray(jnp.finfo(w.dtype).tiny, dtype=w.dtype)
     norm = jnp.maximum(jnp.sum(w), tiny)

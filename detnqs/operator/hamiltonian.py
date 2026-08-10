@@ -190,7 +190,7 @@ class Hamiltonian:
         *,
         seed: int = 0,
     ) -> libdet.LocalConn:
-        """Return exact strong terms and sampled weak coefficients."""
+        """Return exact strong terms and globally sampled weak coefficients."""
         return self._raw.local_conn(
             np.ascontiguousarray(kets, dtype=np.uint64),
             float(eps1),

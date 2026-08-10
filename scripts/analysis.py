@@ -66,6 +66,7 @@ def spin_correlation(
     orbital = np.arange(norb, dtype=np.int64)
     word = orbital >> 6
     bit = np.left_shift(np.uint64(1), (orbital & 63).astype(np.uint64))
+
     alpha = (x[:, 0, word] & bit) != 0
     beta = (x[:, 1, word] & bit) != 0
     single = alpha ^ beta
@@ -75,8 +76,8 @@ def spin_correlation(
     np.fill_diagonal(corr, 0.75 * np.einsum("n,np->p", weight, single))
 
     _, ptr, bra, value = S2(state.hamiltonian.sector).local_conn(x)
-    count = np.diff(ptr)
     if value.size:
+        count = np.diff(ptr)
         ket_index = np.repeat(np.arange(x.shape[0], dtype=np.int64), count)
         p = np.empty(value.size, dtype=np.int64)
         q = np.empty(value.size, dtype=np.int64)
@@ -84,6 +85,7 @@ def spin_correlation(
         for i, (lo, hi) in enumerate(zip(ptr[:-1], ptr[1:], strict=True)):
             if lo == hi:
                 continue
+
             alpha_only = np.flatnonzero(alpha[i] & ~beta[i])
             beta_only = np.flatnonzero(beta[i] & ~alpha[i])
             p[lo:hi] = np.repeat(alpha_only, beta_only.size)
@@ -92,6 +94,7 @@ def spin_correlation(
         ket_logpsi = batch.apply(state.model.logpsi, state.params, x)
         bra_logpsi = batch.apply(state.model.logpsi, state.params, bra)
         jax.block_until_ready((ket_logpsi, bra_logpsi))
+
         ket_logpsi = tree.host(ket_logpsi)
         bra_logpsi = tree.host(bra_logpsi)
         ratio = np.asarray(
@@ -109,13 +112,12 @@ def spin_correlation(
 
 
 def main() -> None:
-    npz = Path("H2O_ccpvdz_1.0re_03000.npz")
+    npz = Path("H2O_ccpvdz_1.0re_05000.npz")
     fcidump = (
         Path(__file__).with_name("FCIDUMP")
         / "H2O_ccpvdz"
         / "H2O_ccpvdz_1.0re.FCIDUMP"
     )
-    n_samples = 819_200
 
     batch.configure(
         forward_chunk=32768,
@@ -128,14 +130,20 @@ def main() -> None:
     saved_state = checkpoint.load(npz, key="state")
     saved_sampler = saved_state["sampler_state"]
     params = saved_state["params"]
+    alpha = float(np.asarray(saved_sampler["alpha"]))
 
     hamiltonian = Hamiltonian.load(fcidump)
     sector = hamiltonian.sector
+
     hidden_names = sorted(
         (key for key in params if key.startswith("hidden_")),
         key=lambda key: int(key.rsplit("_", 1)[1]),
     )
-    hidden = tuple(int(np.asarray(params[key]["bias"]).size) for key in hidden_names)
+    hidden = tuple(
+        int(np.asarray(params[key]["bias"]).size)
+        for key in hidden_names
+    )
+
     model = PBackflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
@@ -145,22 +153,23 @@ def main() -> None:
 
     chains = np.ascontiguousarray(saved_sampler["x"], dtype=np.uint64)
     sampler = MCSampler(
-        n_samples=n_samples,
+        n_samples=409600,
         n_chains=chains.shape[0],
-        thermal_steps=4096,
-        discard_steps=256,
-        proposal="single",
-        blur=0.0,
-        alpha=2.0,
+        thermal_steps=0,
+        discard_steps=0,
+        proposal="ham",
+        blur=0.5,
+        alpha=alpha,
     )
     sampler_state = sampler.init(
         params,
         hamiltonian,
         model,
         key=jax.device_put(saved_sampler["key"]),
-        eps1=0.0,
+        eps1=1.0e-3,
         chains=chains,
     )
+
     state = MCState(
         model=model,
         params=params,
@@ -174,15 +183,31 @@ def main() -> None:
     )
 
     state, stats, data = state.expect(data=True)
-    sup = support(data["weight"])
-    residual = tail(data["weight"], data["eloc"], stats["energy"])
-    corr = spin_correlation(state, data["x"], data["weight"])
 
-    np.set_printoptions(precision=6, suppress=True, linewidth=160)
+    sup = support(data["weight"])
+    residual = tail(
+        data["weight"],
+        data["eloc"],
+        stats["energy"],
+    )
+    corr = spin_correlation(
+        state,
+        data["x"],
+        data["weight"],
+    )
+
+    np.set_printoptions(
+        precision=6,
+        suppress=True,
+        linewidth=160,
+    )
+
     print(f"checkpoint : {npz}")
     print(f"FCIDUMP    : {fcidump}")
     print(f"active     : ({sector.nelec}e, {sector.norb}o)")
-    print(f"samples    : {n_samples}")
+    print(f"samples    : {sampler.n_samples}")
+    print(f"alpha      : {stats['alpha']:.6f}")
+    print(f"accept     : {stats['accept']:.3%}")
     print(f"energy     : {stats['energy']:.12f}")
     print(f"variance   : {stats['eloc_var']:.6e}")
     print(f"S^2        : {np.sum(corr):.8f}")

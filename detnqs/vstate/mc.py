@@ -28,7 +28,7 @@ class MCState:
 
     eps1: float = 1.0e-3
     eps2: float = 1.0e-6
-    eloc_sample: int = 256
+    eloc_sample: int = 32768
 
     @classmethod
     def init(
@@ -41,7 +41,7 @@ class MCState:
         key: jax.Array,
         eps1: float = 1.0e-3,
         eps2: float = 1.0e-6,
-        eloc_sample: int = 256,
+        eloc_sample: int = 32768,
     ) -> MCState:
         eps1 = float(eps1)
         eps2 = float(eps2)

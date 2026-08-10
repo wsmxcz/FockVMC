@@ -19,10 +19,11 @@ def smooth(y: np.ndarray, window: int = 11) -> np.ndarray:
 
 def main() -> None:
     runs = {
-        "exp1": Path("fe4s4.jsonl"),
+        "exp1": Path("data/H2O/H2O_ccpvdz_3.0re.jsonl"),
     }
     # benchmark = -116.6056091  # Fe2S2
-    benchmark = -327.248858  # Fe4S4
+    # benchmark = -327.248858  # Fe4S4
+    benchmark = -75.911946
     figure, axes = plt.subplots(
         2,
         3,

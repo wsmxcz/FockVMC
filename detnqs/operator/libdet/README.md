@@ -97,7 +97,8 @@ weak             eps2 <= |H_bk| < eps1
 A zero cutoff requests complete direct enumeration. Weak coefficients directly
 form an unbiased retained-window sum.
 
-`local_conn` requires `eps2 > 0` and positive counts when `eps2 < eps1`.
+`local_conn` uses one global weak draw budget for the complete ket batch. It
+requires `eps2 > 0` and a positive draw budget when `eps2 < eps1`.
 
 ## Stable development rules
 

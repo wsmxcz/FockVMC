@@ -68,6 +68,23 @@ def chunks(tree: Any, size: int | None):
         yield (pad(chunk, size) if hi - lo < size else chunk), hi - lo
 
 
+def slices(n: int, expansion: int = 1):
+    """Yield source slices whose expanded work fits one forward chunk."""
+    n = int(n)
+    expansion = int(expansion)
+    if n < 0 or expansion < 0:
+        raise ValueError("n and expansion must be nonnegative")
+    if n == 0:
+        return
+
+    expansion = max(1, expansion)
+    limit = config["forward_chunk"]
+    step = n if limit is None else max(1, int(limit) // expansion)
+
+    for start in range(0, n, step):
+        yield slice(start, min(start + step, n))
+
+
 def apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     """Evaluate `fun(theta, x)` over the leading axis."""
     size = config["forward_chunk"]

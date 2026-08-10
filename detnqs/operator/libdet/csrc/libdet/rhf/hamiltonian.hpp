@@ -61,7 +61,7 @@ public:
         DetBatchView kets,
         double eps1,
         double eps2,
-        i64 n_draw,
+        std::span<const i64> counts,
         u64 seed = 0
     ) const;
 

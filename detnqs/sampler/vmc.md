@@ -123,10 +123,8 @@ strong    |H_yx| >= eps1                 deterministic
 weak      eps2 <= |H_yx| < eps1          sampled
 ```
 
-Weak connections are sampled from equal-probability strata over the complete
-unique-ket batch and carry their final unbiased coefficients. `eloc_sample` is
-the total number of weak proposal targets. With `eps1=eps2=0`, the full action
-is deterministic.
+Weak connections are sampled from equal-probability strata and carry their
+final unbiased coefficients. With `eps1=eps2=0`, the full action is deterministic.
 
 Weak sampling requires `eps2 > 0` and `eloc_sample > 0` when `eps2 < eps1`.
 

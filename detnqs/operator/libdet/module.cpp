@@ -323,8 +323,9 @@ NB_MODULE(libdet, m) {
             std::uint64_t seed
         ) {
             const auto kv = states(kets);
+            const std::vector<libdet::i64> counts(kv.n_dets, n_draw);
             return no_gil([&] {
-                return ham.local_conn(kv, eps1, eps2, n_draw, seed);
+                return ham.local_conn(kv, eps1, eps2, counts, seed);
             });
         }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "n_draw"_a, "seed"_a = std::uint64_t{0})
 

@@ -124,7 +124,8 @@ inline void check_local(
 ) {
     const std::size_t n = basis.size();
     const auto matrix = dense(hamiltonian, basis);
-    const auto local = hamiltonian.local_conn(basis.view(), eps, eps, 0, 7);
+    const std::vector<i64> counts(n, 0);
+    const auto local = hamiltonian.local_conn(basis.view(), eps, eps, counts, 7);
     const auto configurations = batch_view(local.nword, local.bra);
 
     if (!local.weak_coeff.empty() || local.strong_ptr.size() != n + 1u) {
@@ -148,12 +149,13 @@ inline void check_local(
     }
 
     bool rejected = false;
+    const std::vector<i64> draws(n, 1);
     try {
         static_cast<void>(hamiltonian.local_conn(
             basis.view(),
             eps,
             0.0,
-            1,
+            draws,
             7
         ));
     } catch (const std::invalid_argument&) {
@@ -167,7 +169,7 @@ inline void check_local(
             basis.view(),
             eps,
             0.5 * eps,
-            0,
+            counts,
             7
         ));
     } catch (const std::invalid_argument&) {
@@ -185,11 +187,12 @@ inline void check_weak(
     const std::size_t n = basis.size();
     const i64 n_draw = 32768;
     const auto matrix = dense(hamiltonian, basis);
+    const std::vector<i64> counts(n, n_draw);
     const auto local = hamiltonian.local_conn(
         basis.view(),
         eps1,
         eps2,
-        n_draw,
+        counts,
         11
     );
     const auto configurations = batch_view(local.nword, local.bra);
@@ -199,7 +202,6 @@ inline void check_weak(
         local.weak_ptr.size() != n + 1u
         || local.weak_coeff.size()
             != static_cast<std::size_t>(local.weak_ptr.back())
-        || local.weak_coeff.size() > static_cast<std::size_t>(n_draw)
     ) {
         throw std::runtime_error("weak connection shape");
     }

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from functools import lru_cache, partial
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import jax
@@ -42,44 +41,28 @@ def configure(
         raise ValueError("bucket_min must be positive")
 
     config["bucket_min"] = bucket_min
-    _jit.cache_clear()
     jax.clear_caches()
 
 
-def chunks(tree: Any, size: int | None):
-    """Yield leading-axis chunks and their true sizes."""
-    n = int(jax.tree.leaves(tree)[0].shape[0])
-
-    if size is None:
-        yield tree, n
-        return
-
-    size = int(size)
-    if size <= 0:
-        raise ValueError("size must be positive or None")
-
-    if n == 0:
-        yield pad(tree, size), 0
-        return
-
-    for lo in range(0, n, size):
-        hi = min(lo + size, n)
-        chunk = jax.tree.map(lambda x: x[lo:hi], tree)
-        yield (pad(chunk, size) if hi - lo < size else chunk), hi - lo
-
-
-def slices(n: int, expansion: int = 1):
-    """Yield source slices whose expanded work fits one forward chunk."""
+def chunk(
+    n: int,
+    expansion: int = 1,
+    size: int | None = None,
+) -> Iterator[slice]:
+    """Partition source items by their estimated downstream work."""
     n = int(n)
     expansion = int(expansion)
     if n < 0 or expansion < 0:
         raise ValueError("n and expansion must be nonnegative")
+
+    size = config["forward_chunk"] if size is None else int(size)
+    if size is not None and size <= 0:
+        raise ValueError("size must be positive or None")
     if n == 0:
         return
 
     expansion = max(1, expansion)
-    limit = config["forward_chunk"]
-    step = n if limit is None else max(1, int(limit) // expansion)
+    step = n if size is None else max(1, size // expansion)
 
     for start in range(0, n, step):
         yield slice(start, min(start + step, n))
@@ -87,11 +70,25 @@ def slices(n: int, expansion: int = 1):
 
 def apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     """Evaluate `fun(theta, x)` over the leading axis."""
+    run = jax.jit(fun)
     size = config["forward_chunk"]
     if size is None:
-        return _apply(fun, theta, x)
+        return run(theta, x)
 
-    out = [trim(_apply(fun, theta, xb), n) for xb, n in chunks(x, size)]
+    n = int(jax.tree.leaves(x)[0].shape[0])
+    out = []
+    slices = (slice(0, 0),) if n == 0 else chunk(n, size=size)
+    for slc in slices:
+        n_chunk = slc.stop - slc.start
+        xb = jax.tree.map(
+            lambda a: jnp.pad(
+                jnp.asarray(a[slc]),
+                ((0, size - n_chunk),) + ((0, 0),) * (a.ndim - 1),
+            ),
+            x,
+        )
+        out.append(jax.tree.map(lambda a: a[:n_chunk], run(theta, xb)))
+
     return out[0] if len(out) == 1 else jax.tree.map(
         lambda *xs: jnp.concatenate(xs, axis=0),
         *out,
@@ -105,16 +102,29 @@ def jvp(
     x: Any,
 ) -> tuple[Any, Any]:
     """Evaluate `fun(theta, x)` and its parameter JVP."""
+    run = jax.jit(
+        lambda p, t, y: jax.jvp(lambda q: fun(q, y), (p,), (t,))
+    )
     size = config["backward_chunk"]
     if size is None:
-        return _jvp(fun, theta, tangent, x)
+        return run(theta, tangent, x)
 
+    n = int(jax.tree.leaves(x)[0].shape[0])
     vals = []
     tangents = []
-    for xb, n in chunks(x, size):
-        val, tan = _jvp(fun, theta, tangent, xb)
-        vals.append(trim(val, n))
-        tangents.append(trim(tan, n))
+    slices = (slice(0, 0),) if n == 0 else chunk(n, size=size)
+    for slc in slices:
+        n_chunk = slc.stop - slc.start
+        xb = jax.tree.map(
+            lambda a: jnp.pad(
+                jnp.asarray(a[slc]),
+                ((0, size - n_chunk),) + ((0, 0),) * (a.ndim - 1),
+            ),
+            x,
+        )
+        val, tan = run(theta, tangent, xb)
+        vals.append(jax.tree.map(lambda a: a[:n_chunk], val))
+        tangents.append(jax.tree.map(lambda a: a[:n_chunk], tan))
 
     if len(vals) == 1:
         return vals[0], tangents[0]
@@ -132,13 +142,33 @@ def vjp(
     cotangent: Any,
 ) -> Any:
     """Evaluate `sum_i J_i^dagger cotangent_i`."""
+    run = jax.jit(
+        lambda p, y, c: jax.vjp(lambda q: fun(q, y), p)[1](c)[0]
+    )
     size = config["backward_chunk"]
     if size is None:
-        return jax.tree.map(jnp.conj, _vjp(fun, theta, x, cotangent))
+        return jax.tree.map(jnp.conj, run(theta, x, cotangent))
 
+    n = int(jax.tree.leaves(x)[0].shape[0])
     grad = jax.tree.map(jnp.zeros_like, theta)
-    for (xb, cb), _ in chunks((x, cotangent), size):
-        grad = jax.tree.map(jnp.add, grad, _vjp(fun, theta, xb, cb))
+    slices = (slice(0, 0),) if n == 0 else chunk(n, size=size)
+    for slc in slices:
+        n_chunk = slc.stop - slc.start
+        xb = jax.tree.map(
+            lambda a: jnp.pad(
+                jnp.asarray(a[slc]),
+                ((0, size - n_chunk),) + ((0, 0),) * (a.ndim - 1),
+            ),
+            x,
+        )
+        cb = jax.tree.map(
+            lambda a: jnp.pad(
+                jnp.asarray(a[slc]),
+                ((0, size - n_chunk),) + ((0, 0),) * (a.ndim - 1),
+            ),
+            cotangent,
+        )
+        grad = jax.tree.map(jnp.add, grad, run(theta, xb, cb))
 
     return jax.tree.map(jnp.conj, grad)
 
@@ -168,88 +198,49 @@ def bucket(
         n = int(jax.tree.leaves(arg)[0].shape[int(axis)])
         break
 
+    run = jax.jit(fun, static_argnums=static_argnums)
     if n is None:
-        return _jit(fun, static_argnums)(*args)
+        return run(*args)
 
     size = max(n, int(config["bucket_min"]))
     size = 1 << (size - 1).bit_length()
 
     padded = tuple(
-        arg if i in static_argnums or axis is None else pad(arg, size, int(axis))
+        arg
+        if i in static_argnums or axis is None
+        else jax.tree.map(
+            lambda a, axis=int(axis): jnp.pad(
+                jnp.asarray(a),
+                [
+                    (0, size - a.shape[axis]) if j == axis % a.ndim else (0, 0)
+                    for j in range(a.ndim)
+                ],
+            ),
+            arg,
+        )
         for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True))
     )
 
-    out = _jit(fun, static_argnums)(*padded)
+    out = run(*padded)
 
     if out_axes is None:
         return out
 
     if isinstance(out_axes, tuple):
         return tuple(
-            y if axis is None else trim(y, n, int(axis))
+            y
+            if axis is None
+            else jax.tree.map(
+                lambda a, axis=int(axis): a[
+                    (slice(None),) * (axis % a.ndim) + (slice(0, n),)
+                ],
+                y,
+            )
             for y, axis in zip(out, out_axes, strict=True)
         )
 
-    return trim(out, n, int(out_axes))
-
-
-def pad(tree: Any, size: int, axis: int = 0) -> Any:
-    """Pad a PyTree along one axis."""
-    axis = int(axis)
-    size = int(size)
-
-    def one(x: Any) -> jax.Array:
-        x = jnp.asarray(x)
-        n = size - int(x.shape[axis])
-        if n <= 0:
-            return x
-
-        width = [(0, 0)] * x.ndim
-        width[axis] = (0, n)
-        return jnp.pad(x, width)
-
-    return jax.tree.map(one, tree)
-
-
-def trim(tree: Any, size: int, axis: int = 0) -> Any:
-    """Trim a PyTree along one axis."""
-    axis = int(axis)
-    size = int(size)
-
-    def one(x: Any) -> jax.Array:
-        slc = [slice(None)] * x.ndim
-        slc[axis] = slice(0, size)
-        return x[tuple(slc)]
-
-    return jax.tree.map(one, tree)
-
-
-@lru_cache(maxsize=16)
-def _jit(fun: Callable[..., Any], static_argnums: tuple[int, ...]):
-    return jax.jit(fun, static_argnums=static_argnums)
-
-
-@partial(jax.jit, static_argnums=0)
-def _apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
-    return fun(theta, x)
-
-
-@partial(jax.jit, static_argnums=0)
-def _jvp(
-    fun: Callable[[Any, Any], Any],
-    theta: Any,
-    tangent: Any,
-    x: Any,
-) -> tuple[Any, Any]:
-    return jax.jvp(lambda p: fun(p, x), (theta,), (tangent,))
-
-
-@partial(jax.jit, static_argnums=0)
-def _vjp(
-    fun: Callable[[Any, Any], Any],
-    theta: Any,
-    x: Any,
-    cotangent: Any,
-) -> Any:
-    _, pullback = jax.vjp(lambda p: fun(p, x), theta)
-    return pullback(cotangent)[0]
+    axis = int(out_axes)
+    return jax.tree.map(
+        lambda a: a[(slice(None),) * (axis % a.ndim) + (slice(0, n),)],
+        out,
+    )

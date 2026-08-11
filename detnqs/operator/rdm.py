@@ -29,7 +29,7 @@ def rdm1(state: Any, x: Any, weight: Any) -> np.ndarray:
     for spin, nelec in enumerate((sector.n_alpha, sector.n_beta)):
         degree = nelec * (norb - nelec)
 
-        for slc in batch.slices(x.shape[0], degree):
+        for slc in batch.chunk(x.shape[0], expansion=degree):
             ket = x[slc]
             mass = weight[slc]
             occ = (ket[:, spin, word] & bit) != 0
@@ -150,7 +150,7 @@ def rdm2(state: Any, x: Any, weight: Any) -> np.ndarray:
                     spool[:, -1] = q
                     ncreate = rpool.shape[1] * spool.shape[1]
 
-                for slc in batch.slices(npair * ncreate):
+                for slc in batch.chunk(npair * ncreate):
                     index = np.arange(slc.start, slc.stop, dtype=np.int64)
                     pair, creation = np.divmod(index, ncreate)
                     if spin == tau:
@@ -257,3 +257,30 @@ def rdm2(state: Any, x: Any, weight: Any) -> np.ndarray:
                         )
 
     return np.real_if_close(out)
+
+
+def density_correlation(sector: Any, x: Any, weight: Any) -> np.ndarray:
+    """Return C[p,q] = <n[p] n[q]> - <n[p]><n[q]>."""
+    norb = sector.norb
+    x = sector.asarray(x)
+    weight = np.asarray(weight, dtype=np.float64).reshape(-1)
+    weight /= np.sum(weight)
+
+    density = np.zeros(norb, dtype=np.float64)
+    density_product = np.zeros((norb, norb), dtype=np.float64)
+    orbital = np.arange(norb, dtype=np.int64)
+    word = orbital >> 6
+    bit = np.left_shift(np.uint64(1), (orbital & 63).astype(np.uint64))
+
+    for slc in batch.chunk(x.shape[0]):
+        occupation = np.sum(
+            (x[slc, :, word] & bit) != 0,
+            axis=1,
+            dtype=np.float64,
+        )
+        weighted = weight[slc, None] * occupation
+        density += np.sum(weighted, axis=0)
+        density_product += weighted.T @ occupation
+
+    out = density_product - np.outer(density, density)
+    return 0.5 * (out + out.T)

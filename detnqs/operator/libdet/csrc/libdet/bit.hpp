@@ -24,6 +24,13 @@ using i64 = std::int64_t;
     return static_cast<i32>(n);
 }
 
+[[nodiscard]] inline i64 to_i64(std::size_t n) {
+    if (n > static_cast<std::size_t>(std::numeric_limits<i64>::max())) {
+        throw std::overflow_error("offset overflow");
+    }
+    return static_cast<i64>(n);
+}
+
 [[nodiscard]] inline std::size_t ceil_pow2(std::size_t n) noexcept {
     std::size_t p = 1;
     while (p < n) p <<= 1u;

@@ -9,14 +9,14 @@ import numpy as np
 
 from detnqs import Hamiltonian, MCState
 from detnqs.model import PBackflow
-from detnqs.operator import rdm1, rdm2, spin_correlation
+from detnqs.operator import density_correlation, rdm1, spin_correlation
 from detnqs.sampler import MCSampler
 from detnqs.utils import batch, checkpoint, precision
 
 
 def main() -> None:
-    checkpoint_name = "H2O_ccpvdz_1.0re_05000.npz"
-    fcidump_name = "H2O_ccpvdz_1.0re.FCIDUMP"
+    checkpoint_name = "H2O_ccpvdz_2.5re_05000.npz"
+    fcidump_name = "H2O_ccpvdz_2.5re.FCIDUMP"
     npz = next(Path.cwd().rglob(checkpoint_name))
     fcidump = next(Path.cwd().rglob(fcidump_name))
 
@@ -53,7 +53,7 @@ def main() -> None:
 
     chains = np.ascontiguousarray(saved_sampler["x"], dtype=np.uint64)
     sampler = MCSampler(
-        n_samples=409600,
+        n_samples=1048576,
         n_chains=chains.shape[0],
         thermal_steps=4096,
         discard_steps=0,
@@ -82,7 +82,7 @@ def main() -> None:
         eloc_sample=0,
     )
 
-    state, _, data = state.expect(data=True)
+    state, stats, data = state.expect(data=True)
 
     probability = data["weight"]
     participation_ratio = 1.0 / np.sum(probability**2)
@@ -97,19 +97,11 @@ def main() -> None:
     gamma = 0.5 * (gamma + np.conjugate(gamma.T))
     occupation = np.linalg.eigvalsh(gamma)[::-1]
 
-    two_rdm = rdm2(
-        state,
+    density_corr = density_correlation(
+        sector,
         data["x"],
         probability,
     )
-    density = np.einsum("spp->p", one_rdm)
-    density_product = np.einsum("abijij->ij", two_rdm)
-    density_product[np.diag_indices(sector.norb)] += density
-    density_correlation = density_product - np.outer(density, density)
-    density_correlation = 0.5 * (
-        density_correlation + np.conjugate(density_correlation.T)
-    )
-    density_correlation = np.real_if_close(density_correlation)
 
     spin = spin_correlation(state, data["x"], probability)
     spin = np.real_if_close(spin)
@@ -123,6 +115,10 @@ def main() -> None:
         file.write(f"fcidump = {fcidump}\n")
         file.write(f"active = {sector.nelec}e, {sector.norb}o\n")
         file.write(f"samples = {sampler.n_samples}\n\n")
+
+        file.write("[energy]\n")
+        file.write(f"value = {stats['energy']:.12e}\n")
+        file.write(f"variance = {stats['eloc_var']:.12e}\n\n")
 
         file.write("[participation_ratio]\n")
         file.write(f"{participation_ratio:.12e}\n\n")
@@ -144,7 +140,7 @@ def main() -> None:
         )
 
         file.write("\n[density_correlation]\n")
-        np.savetxt(file, density_correlation, fmt="%.12e")
+        np.savetxt(file, density_corr, fmt="%.12e")
 
         file.write("\n[spin_correlation]\n")
         np.savetxt(file, spin, fmt="%.12e")

@@ -74,10 +74,10 @@ inline void copy_det_to(std::vector<u64>& words, std::size_t idet, DetRef det) {
 
     std::size_t n_term = 0;
     for (std::size_t row = 0; row < items.size(); ++row) {
-        out.ptr[row] = to_i32(n_term);
+        out.ptr[row] = to_i64(n_term);
         n_term += items[row].term.size();
     }
-    out.ptr[items.size()] = to_i32(n_term);
+    out.ptr[items.size()] = to_i64(n_term);
     out.h.resize(n_term);
 
     const std::size_t stride = det_size(nword);
@@ -521,13 +521,13 @@ inline ::libdet::LocalConn Hamiltonian::local_conn(
         const Item& item = items[iket];
         out.diag[iket] = item.diag;
         out.strong_degree[iket] = item.strong_degree;
-        out.strong_ptr[iket] = to_i32(n_strong);
-        out.weak_ptr[iket] = to_i32(n_weak);
+        out.strong_ptr[iket] = to_i64(n_strong);
+        out.weak_ptr[iket] = to_i64(n_weak);
         n_strong += item.strong.end - item.strong.begin;
         n_weak += item.weak.size();
     }
-    out.strong_ptr[kets.n_dets] = to_i32(n_strong);
-    out.weak_ptr[kets.n_dets] = to_i32(n_weak);
+    out.strong_ptr[kets.n_dets] = to_i64(n_strong);
+    out.weak_ptr[kets.n_dets] = to_i64(n_weak);
 
     out.strong_h.resize(n_strong);
     out.weak_coeff.resize(n_weak);

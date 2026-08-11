@@ -10,7 +10,7 @@ namespace libdet {
 struct Matrix {
     std::size_t n_bra = 0;
     std::size_t n_ket = 0;
-    std::vector<i32> indptr;
+    std::vector<i64> indptr;
     std::vector<i32> indices;
     std::vector<double> data;
 };
@@ -22,7 +22,7 @@ struct Conns {
     std::size_t n_streams = 1;
     std::vector<u64> bra;
     std::vector<double> diag;
-    std::vector<i32> ptr;
+    std::vector<i64> ptr;
     std::vector<double> h;
     std::vector<double> degree;
 };
@@ -33,10 +33,10 @@ struct LocalConn {
     std::size_t n_kets = 0;
     std::vector<u64> bra;
     std::vector<double> diag;
-    std::vector<i32> strong_ptr;
+    std::vector<i64> strong_ptr;
     std::vector<double> strong_h;
     std::vector<double> strong_degree;
-    std::vector<i32> weak_ptr;
+    std::vector<i64> weak_ptr;
     std::vector<double> weak_coeff;
 };
 

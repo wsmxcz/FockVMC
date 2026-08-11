@@ -101,7 +101,10 @@ def spin_correlation(state: Any, x: Any, weight: Any) -> np.ndarray:
     word = orbital >> 6
     bit = np.left_shift(np.uint64(1), (orbital & 63).astype(np.uint64))
 
-    for slc in batch.slices(x.shape[0], sector.n_alpha * sector.n_beta):
+    for slc in batch.chunk(
+        x.shape[0],
+        expansion=sector.n_alpha * sector.n_beta,
+    ):
         ket = x[slc]
         mass = weight[slc]
         alpha = (ket[:, 0, word] & bit) != 0

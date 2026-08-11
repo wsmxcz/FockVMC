@@ -19,10 +19,15 @@ def smooth(y: np.ndarray, window: int = 11) -> np.ndarray:
 
 def main() -> None:
     runs = {
-        "exp1": Path("fe4s4.jsonl"),
+        "32768": Path("fe2s2.jsonl"),
+        "8192": Path("fe2s2_eloc8192.jsonl"),
+        # "1024": Path("fe2s2_eps1e-3.jsonl"),
+        "1e-4": Path("fe2s2_eps1e-4.jsonl"),
+        "1e-5": Path("fe2s2_eps1e-5.jsonl"),
+        "1e-6": Path("fe2s2_eps1e-6.jsonl"),
     }
-    # benchmark = -116.6056091  # Fe2S2
-    benchmark = -327.248858  # Fe4S4
+    benchmark = -116.6056091  # Fe2S2
+    # benchmark = -327.248858  # Fe4S4
     figure, axes = plt.subplots(
         2,
         3,

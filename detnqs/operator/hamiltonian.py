@@ -243,7 +243,9 @@ class Hamiltonian:
             else np.ascontiguousarray(kets, dtype=np.uint64)
         )
         indptr, indices, data, shape = self._raw.matrix(bras_arr, kets_arr)
-        return csr_matrix((data, indices, indptr), shape=tuple(shape))
+        matrix = csr_matrix((data, indices, indptr), shape=tuple(shape))
+        matrix.indptr = indptr
+        return matrix
 
     def matvec(
         self,

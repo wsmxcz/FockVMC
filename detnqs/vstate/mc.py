@@ -260,109 +260,99 @@ class MCState:
         with timer("conns"):
             conn = self.hamiltonian.local_conn(
                 ket,
-                float(self.eps1),
-                float(self.eps2),
-                int(self.eloc_sample),
+                self.eps1,
+                self.eps2,
+                self.eloc_sample,
                 seed=seed,
             )
-
-            h_bra = conn.bra
-            strong_ptr = conn.strong_ptr
-            strong_h = precision.cast(conn.strong_h, "calc", host=True)
-            strong_degree = precision.cast(
-                conn.strong_degree,
-                "calc",
-                "real",
-                host=True,
-            )
-            diag = precision.cast(conn.diag, "calc", host=True)
-            weak_ptr = conn.weak_ptr
-            weak_coeff = precision.cast(conn.weak_coeff, "calc", host=True)
-
+            n_strong = conn.strong_h.size
+            n_weak = conn.weak_coeff.size
+            bra_parts = [conn.bra]
             obs_conn = []
-            raw_parts = [h_bra]
+            start = conn.bra.shape[0]
+
             for name, op in obs.items():
-                o_diag, o_ptr, o_bra, o_val = op.local_conn(ket)
-                o_bra = np.asarray(o_bra, dtype=np.uint64)
+                o_diag, o_ptr, o_bra, o_value = op.local_conn(ket)
+                stop = start + o_bra.shape[0]
                 obs_conn.append((
                     str(name),
-                    np.asarray(o_diag),
-                    np.asarray(o_ptr, dtype=np.int64),
-                    o_bra,
-                    np.asarray(o_val),
+                    o_diag,
+                    o_ptr,
+                    slice(start, stop),
+                    o_value,
                 ))
-                raw_parts.append(o_bra)
+                bra_parts.append(o_bra)
+                start = stop
 
-        with timer("reduce"):
-            raw_bra = (
-                h_bra
-                if len(raw_parts) == 1
-                else np.concatenate(raw_parts, axis=0)
+            bra = (
+                bra_parts[0]
+                if len(bra_parts) == 1
+                else np.concatenate(bra_parts)
             )
-            n_strong = int(strong_h.size)
-            n_weak = int(weak_coeff.size)
-            strong_slice = slice(n_ket, n_ket + n_strong)
-            weak_slice = slice(n_ket + n_strong, n_ket + n_strong + n_weak)
-
-            obs_mapped = []
-            start = int(h_bra.shape[0])
-            for name, o_diag, o_ptr, o_bra, o_val in obs_conn:
-                end = start + int(o_bra.shape[0])
-                obs_mapped.append((name, o_diag, o_ptr, slice(start, end), o_val))
-                start = end
+            n_forward = bra.shape[0]
 
         with timer("forward"):
-            bra_logpsi = batch.apply(self.model.logpsi, self.params, raw_bra)
+            bra_logpsi = batch.apply(self.model.logpsi, self.params, bra)
             jax.block_until_ready(bra_logpsi)
             bra_logpsi = tree.host(bra_logpsi)
 
         with timer("reduce"):
-            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
-            strong_logpsi = jax.tree.map(lambda a: a[strong_slice], bra_logpsi)
-            weak_logpsi = jax.tree.map(lambda a: a[weak_slice], bra_logpsi)
-            bra_logabs = precision.cast(
-                np.asarray(to_logabs(bra_logpsi)).reshape(-1),
-                "calc",
-                "real",
-                host=True,
-            )
-            ket_logabs = bra_logabs[:n_ket]
-
             rdtype = precision.real("calc", host=True)
+            ket_logpsi = jax.tree.map(lambda a: a[:n_ket], bra_logpsi)
+            ket_logabs = np.asarray(
+                to_logabs(ket_logpsi),
+                dtype=rdtype,
+            ).reshape(-1)
+            eloc_dtype = (
+                precision.complex("calc", host=True)
+                if any(np.iscomplexobj(a) for a in jax.tree.leaves(ket_logpsi))
+                else rdtype
+            )
+            strong_h = np.asarray(conn.strong_h, dtype=rdtype)
+            weak_coeff = np.asarray(conn.weak_coeff, dtype=rdtype)
+            strong_degree = np.asarray(conn.strong_degree, dtype=rdtype)
+            strong_slice = slice(n_ket, n_ket + n_strong)
+            weak_slice = slice(
+                n_ket + n_strong,
+                n_ket + n_strong + n_weak,
+            )
+            strong_count = np.diff(conn.strong_ptr)
+            strong_row = np.flatnonzero(strong_count)
+            strong_start = conn.strong_ptr[strong_row]
+            strong_source = np.repeat(
+                np.arange(n_ket, dtype=np.int32),
+                strong_count,
+            )
+
             tiny = rdtype(precision.tiny("calc"))
             auto = self.sampler.alpha is None
             alpha_used = sampler_state.alpha if auto else self.sampler.alpha
             alpha = rdtype(alpha_used)
             beta = rdtype(self.sampler.blur)
-
-            strong_count = np.diff(strong_ptr)
-            strong_active = strong_count > 0
-            strong_start = strong_ptr[:-1][strong_active]
-            ket_idx = np.repeat(np.arange(n_ket, dtype=np.int64), strong_count)
-            source_logamp = precision.cast(
-                alpha * ket_logabs,
-                "calc",
-                "real",
-                host=True,
-            )
-
-            eloc = diag.copy()
-            if strong_h.size:
-                ratio = precision.cast(
-                    np.asarray(
-                        to_ratio(
-                            strong_logpsi,
-                            jax.tree.map(lambda a: a[ket_idx], ket_logpsi),
-                        )
-                    ),
-                    "calc",
-                    host=True,
-                )
-                contrib = strong_h * ratio
-                eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
-                eloc[strong_active] += np.add.reduceat(contrib, strong_start)
-
             tilted = self.sampler.proposal == "ham" or beta > 0.0
+            source_logamp = alpha * ket_logabs
+
+            eloc = np.array(conn.diag, dtype=eloc_dtype, copy=True)
+            if n_strong:
+                strong_logpsi = jax.tree.map(
+                    lambda a: a[strong_slice],
+                    bra_logpsi,
+                )
+                ratio = np.asarray(
+                    to_ratio(
+                        strong_logpsi,
+                        jax.tree.map(
+                            lambda a: a[strong_source],
+                            ket_logpsi,
+                        ),
+                    ),
+                    dtype=eloc_dtype,
+                )
+                eloc[strong_row] += np.add.reduceat(
+                    strong_h * ratio,
+                    strong_start,
+                )
+
             if not tilted:
                 log_observation = source_logamp
                 if auto:
@@ -375,81 +365,83 @@ class MCState:
                     rdtype(1.0),
                 )
                 log_stay = np.full(n_ket, -np.inf, dtype=rdtype)
-                ok = stay > 0.0
-                log_stay[ok] = (
-                    np.log(np.maximum(stay[ok], tiny)) + source_logamp[ok]
+                active = stay > 0.0
+                log_stay[active] = (
+                    np.log(np.maximum(stay[active], tiny))
+                    + source_logamp[active]
                 )
 
-                if auto:
-                    score = np.zeros(n_ket, dtype=rdtype)
-                    score2 = np.zeros(n_ket, dtype=rdtype)
-
-                if beta > 0.0 and strong_h.size:
-                    terms = alpha * bra_logabs[strong_slice] + np.log(
+                if beta > 0.0 and n_strong:
+                    strong_logabs = np.asarray(
+                        to_logabs(strong_logpsi),
+                        dtype=rdtype,
+                    ).reshape(-1)
+                    terms = alpha * strong_logabs + np.log(
                         np.maximum(np.abs(strong_h), tiny)
                     )
                     log_blur = np.log(beta) + math.segment_logsumexp(
-                        strong_ptr,
+                        conn.strong_ptr,
                         terms,
                         n_ket,
                     )
-                    log_observation = precision.cast(
-                        np.logaddexp(log_stay, log_blur),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
+                    log_observation = np.logaddexp(log_stay, log_blur)
                 else:
                     log_observation = log_stay
 
                 if auto:
                     # S=d_alpha log r_alpha is the latent log-amplitude moment.
-                    ok = np.isfinite(log_stay) & np.isfinite(log_observation)
+                    finite = np.isfinite(log_stay) & np.isfinite(log_observation)
                     stay_weight = np.zeros(n_ket, dtype=rdtype)
-                    stay_weight[ok] = np.exp(
-                        log_stay[ok] - log_observation[ok]
+                    stay_weight[finite] = np.exp(
+                        log_stay[finite] - log_observation[finite]
                     )
-                    score += stay_weight * ket_logabs
-                    score2 += stay_weight * ket_logabs * ket_logabs
+                    score = stay_weight * ket_logabs
+                    score2 = score * ket_logabs
 
-                    if beta > 0.0 and strong_h.size:
+                    if beta > 0.0 and n_strong:
                         term_log = (
-                            np.log(beta) + terms - log_observation[ket_idx]
+                            np.log(beta)
+                            + terms
+                            - log_observation[strong_source]
                         )
-                        ok = np.isfinite(term_log)
+                        finite = np.isfinite(term_log)
                         conn_weight = np.zeros_like(term_log, dtype=rdtype)
-                        conn_weight[ok] = np.exp(term_log[ok])
-
-                        ell = bra_logabs[strong_slice]
-                        score[strong_active] += np.add.reduceat(
-                            conn_weight * ell,
+                        conn_weight[finite] = np.exp(term_log[finite])
+                        score[strong_row] += np.add.reduceat(
+                            conn_weight * strong_logabs,
                             strong_start,
                         )
-                        score2[strong_active] += np.add.reduceat(
-                            conn_weight * ell * ell,
+                        score2[strong_row] += np.add.reduceat(
+                            conn_weight * strong_logabs * strong_logabs,
                             strong_start,
                         )
 
-            if weak_coeff.size:
-                weak_count = np.diff(weak_ptr)
-                weak_active = weak_count > 0
-                weak_start = weak_ptr[:-1][weak_active]
-                weak_ket = np.repeat(np.arange(n_ket, dtype=np.int64), weak_count)
-                ratio = precision.cast(
-                    np.asarray(
-                        to_ratio(
-                            weak_logpsi,
-                            jax.tree.map(lambda a: a[weak_ket], ket_logpsi),
-                        )
-                    ),
-                    "calc",
-                    host=True,
+            if n_weak:
+                weak_count = np.diff(conn.weak_ptr)
+                weak_row = np.flatnonzero(weak_count)
+                weak_start = conn.weak_ptr[weak_row]
+                weak_source = np.repeat(
+                    np.arange(n_ket, dtype=np.int32),
+                    weak_count,
                 )
-                contrib = weak_coeff * ratio
-                eloc = eloc.astype(np.result_type(eloc, contrib), copy=False)
-                eloc[weak_active] += np.add.reduceat(contrib, weak_start)
+                ratio = np.asarray(
+                    to_ratio(
+                        jax.tree.map(
+                            lambda a: a[weak_slice],
+                            bra_logpsi,
+                        ),
+                        jax.tree.map(
+                            lambda a: a[weak_source],
+                            ket_logpsi,
+                        ),
+                    ),
+                    dtype=eloc_dtype,
+                )
+                eloc[weak_row] += np.add.reduceat(
+                    weak_coeff * ratio,
+                    weak_start,
+                )
 
-            eloc = precision.cast(eloc, "calc", host=True)
             # Reweight the observed auxiliary law back to the Born target pi.
             weight, weight_stats = stats.weight(
                 mass,
@@ -471,26 +463,37 @@ class MCState:
 
             obs_stats: dict[str, float] = {}
             obs_data = {}
-            for name, o_diag, o_ptr, o_slice, o_val in obs_mapped:
-                oloc = precision.cast(np.asarray(o_diag).copy(), "calc", host=True)
-                if o_val.size:
+            for name, o_diag, o_ptr, o_slice, o_value in obs_conn:
+                o_dtype = (
+                    precision.complex("calc", host=True)
+                    if np.iscomplexobj(o_diag) or np.iscomplexobj(o_value)
+                    else eloc_dtype
+                )
+                o_value = np.asarray(o_value, dtype=o_dtype)
+                oloc = np.array(o_diag, dtype=o_dtype, copy=True)
+                if o_value.size:
                     o_count = np.diff(o_ptr)
-                    o_active = o_count > 0
-                    o_start = o_ptr[:-1][o_active]
-                    o_ket = np.repeat(np.arange(n_ket, dtype=np.int64), o_count)
-                    ratio = precision.cast(
-                        np.asarray(
-                            to_ratio(
-                                jax.tree.map(lambda a: a[o_slice], bra_logpsi),
-                                jax.tree.map(lambda a: a[o_ket], ket_logpsi),
-                            )
-                        ),
-                        "calc",
-                        host=True,
+                    o_row = np.flatnonzero(o_count)
+                    o_start = o_ptr[o_row]
+                    o_source = np.repeat(
+                        np.arange(n_ket, dtype=np.int32),
+                        o_count,
                     )
-                    contrib = precision.cast(o_val, "calc", host=True) * ratio
-                    oloc = oloc.astype(np.result_type(oloc, contrib), copy=False)
-                    oloc[o_active] += np.add.reduceat(contrib, o_start)
+                    ratio = np.asarray(
+                        to_ratio(
+                            jax.tree.map(lambda a: a[o_slice], bra_logpsi),
+                            jax.tree.map(
+                                lambda a: a[o_source],
+                                ket_logpsi,
+                            ),
+                        ),
+                        dtype=eloc_dtype,
+                    )
+                    oloc[o_row] += np.add.reduceat(
+                        o_value * ratio,
+                        o_start,
+                    )
+
                 obs_stats.update(stats.observable(name, weight, oloc))
                 if data:
                     obs_data[name] = oloc
@@ -532,7 +535,6 @@ class MCState:
 
         new_state = replace(self, sampler_state=sampler_state)
         n_sample = int(observations.shape[0])
-        n_forward = int(raw_bra.shape[0])
 
         out = {
             **energy_stats,

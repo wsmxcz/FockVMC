@@ -235,13 +235,14 @@ inline Matrix Hamiltonian::matrix(
             const DetRef bra = bras[ibra];
             element.load(ints_, bra);
             const double h_bra_bra = element.diag();
-            i32 nnz = find_det(ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1 : 0;
+            std::size_t nnz =
+                find_det(ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1u : 0u;
 
             visit_internal(ints_, ket_space, bra, element, scratch, [&](i32, double) {
                 ++nnz;
             });
             hdiag[ibra] = h_bra_bra;
-            out.indptr[ibra + 1u] = nnz;
+            out.indptr[ibra + 1u] = to_i64(nnz);
         }
 
 #pragma omp single
@@ -249,7 +250,7 @@ inline Matrix Hamiltonian::matrix(
             std::size_t nnz = 0;
             for (std::size_t ibra = 0; ibra < nbras; ++ibra) {
                 nnz += static_cast<std::size_t>(out.indptr[ibra + 1u]);
-                out.indptr[ibra + 1u] = to_i32(nnz);
+                out.indptr[ibra + 1u] = to_i64(nnz);
             }
             out.indices.resize(nnz);
             out.data.resize(nnz);

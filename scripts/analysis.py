@@ -15,8 +15,8 @@ from detnqs.utils import batch, checkpoint, precision
 
 
 def main() -> None:
-    checkpoint_name = "H2O_ccpvdz_2.5re_05000.npz"
-    fcidump_name = "H2O_ccpvdz_2.5re.FCIDUMP"
+    checkpoint_name = "H2O_ccpvdz_1.0re_05000.npz"
+    fcidump_name = "H2O_ccpvdz_1.0re.FCIDUMP"
     npz = next(Path.cwd().rglob(checkpoint_name))
     fcidump = next(Path.cwd().rglob(fcidump_name))
 
@@ -53,13 +53,13 @@ def main() -> None:
 
     chains = np.ascontiguousarray(saved_sampler["x"], dtype=np.uint64)
     sampler = MCSampler(
-        n_samples=1048576,
+        n_samples=4096,
         n_chains=chains.shape[0],
-        thermal_steps=4096,
+        thermal_steps=0,
         discard_steps=0,
         proposal="ham",
-        blur=0.0,
-        alpha=2.0,
+        blur=0.5,
+        alpha=float(np.asarray(saved_sampler["alpha"])),
     )
     sampler_state = sampler.init(
         params,
@@ -85,8 +85,6 @@ def main() -> None:
     state, stats, data = state.expect(data=True)
 
     probability = data["weight"]
-    participation_ratio = 1.0 / np.sum(probability**2)
-    sorted_probability = np.sort(probability)[::-1]
 
     one_rdm = rdm1(
         state,
@@ -105,8 +103,8 @@ def main() -> None:
 
     spin = spin_correlation(state, data["x"], probability)
     spin = np.real_if_close(spin)
+    s2 = np.real_if_close(np.sum(spin)).item()
 
-    rank = np.arange(1, sorted_probability.size + 1)
     orbital = np.arange(1, occupation.size + 1)
     log = npz.with_suffix(".log")
 
@@ -119,17 +117,6 @@ def main() -> None:
         file.write("[energy]\n")
         file.write(f"value = {stats['energy']:.12e}\n")
         file.write(f"variance = {stats['eloc_var']:.12e}\n\n")
-
-        file.write("[participation_ratio]\n")
-        file.write(f"{participation_ratio:.12e}\n\n")
-
-        file.write("[determinant_probability]\n")
-        file.write("rank probability\n")
-        np.savetxt(
-            file,
-            np.column_stack((rank, sorted_probability)),
-            fmt=("%d", "%.12e"),
-        )
 
         file.write("\n[natural_occupations]\n")
         file.write("orbital occupation\n")
@@ -144,6 +131,9 @@ def main() -> None:
 
         file.write("\n[spin_correlation]\n")
         np.savetxt(file, spin, fmt="%.12e")
+
+        file.write("\n[s2]\n")
+        file.write(f"{s2:.12e}\n")
 
 
 if __name__ == "__main__":

@@ -41,7 +41,6 @@ def configure(
         raise ValueError("bucket_min must be positive")
 
     config["bucket_min"] = bucket_min
-    jax.clear_caches()
 
 
 def chunk(

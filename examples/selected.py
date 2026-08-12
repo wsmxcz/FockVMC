@@ -47,13 +47,12 @@ def main() -> None:
 
     vmc = VMC.init(state, optax.adamw(1.0e-3), geometry=False)
     log = Logger(every=1, keys=("step", "outer", "energy", "eloc_var", "n_basis"))
-
     for outer in range(2):
         vmc.state = vmc.state.evolve(topk_selector(k=128), eps=1.0e-6)
         rec = vmc.run(50)
         rec["outer"] = outer + 1
         rec["n_basis"] = vmc.state.n_basis
-        log.add(rec)
+        log(rec)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -9,20 +7,13 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class Sector(ABC):
-    """Fock-space sector using the PySCF convention.
-
-    spin = n_alpha - n_beta.
-    """
+    """Fock-space sector with spin = n_alpha - n_beta."""
 
     norb: int
     nelec: int
     spin: int
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "norb", int(self.norb))
-        object.__setattr__(self, "nelec", int(self.nelec))
-        object.__setattr__(self, "spin", int(self.spin))
-
         if self.norb <= 0:
             raise ValueError("norb must be positive")
         if (self.nelec + self.spin) % 2:

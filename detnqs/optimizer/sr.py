@@ -8,9 +8,7 @@ import jax.numpy as jnp
 import optax
 from jax.flatten_util import ravel_pytree
 
-from ..utils import batch
-from ..utils import math
-from ..utils import precision
+from ..utils import batch, math, precision
 from . import linalg
 from .base import Geometry
 
@@ -25,7 +23,7 @@ def sr(
     *,
     shift: float = 1.0e-3,
     mode: Literal["dense", "matvec"] = "matvec",
-    maxiter: int = 64,
+    max_iter: int = 64,
 ) -> optax.GradientTransformationExtraArgs:
     """Precondition updates with the parameter-space SR geometry."""
     if shift < 0.0:
@@ -80,7 +78,7 @@ def sr(
                 grad,
                 shift_t,
                 state.x0,
-                int(maxiter),
+                max_iter,
             )
 
         delta = jax.tree.map(
@@ -132,7 +130,7 @@ def _matvec_step(
     grad: Any,
     shift: jax.Array,
     x0: jax.Array,
-    maxiter: int,
+    max_iter: int,
 ) -> tuple[Any, jax.Array]:
     """Solve matrix-free parameter-space SR."""
     grad_flat, unravel = ravel_pytree(grad)
@@ -170,7 +168,7 @@ def _matvec_step(
         rhs,
         shift,
         x0=x0,
-        maxiter=maxiter,
+        max_iter=max_iter,
     )
     return (
         unravel(delta.astype(grad_flat.dtype)),

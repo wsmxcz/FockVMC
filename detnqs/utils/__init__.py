@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from . import batch, checkpoint, math, precision, stats, tree
 from .logger import Logger
 from .timer import Timer

@@ -84,9 +84,9 @@ alpha     auxiliary tempering exponent
 ```
 
 ```text
-burnin_steps     transitions whenever a sampler state is initialized
-discard_steps    transitions before observations are collected in each draw
-sweep_steps      transitions between successive collection rounds
+burn_in          transitions whenever a sampler state is initialized
+discard          transitions before observations are collected in each draw
+sweep            transitions between successive collection rounds
 ```
 
 Initial configurations are passed to `MCState.init`; the sampler does not
@@ -152,7 +152,7 @@ weak      eps2 <= |H_yx| < eps1          sampled
 Weak connections are sampled from equal-probability strata and carry their
 final unbiased coefficients. With `eps1=eps2=0`, the full action is deterministic.
 
-Weak sampling requires `eps2 > 0` and `eloc_sample > 0` when `eps2 < eps1`.
+Weak sampling requires `eps2 > 0` and `n_eloc > 0` when `eps2 < eps1`.
 
 Kets and all connected bras share one `logpsi` evaluation pool. The final
 energy, residual, gradient cotangent, and SR residual are

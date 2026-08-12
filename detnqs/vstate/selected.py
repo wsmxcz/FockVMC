@@ -16,12 +16,7 @@ from ..utils import Timer, batch, precision, tree
 
 @dataclass(frozen=True, slots=True)
 class SelectedState:
-    """Variational state on a selected Fock subspace.
-
-    This state is a deterministic projected-space baseline. It evaluates the
-    selected Hamiltonian exactly and does not support instantaneous local
-    operators.
-    """
+    """Variational state on a selected Fock subspace."""
 
     model: Model
     params: Any
@@ -57,7 +52,7 @@ class SelectedState:
 
     @property
     def n_basis(self) -> int:
-        return int(self.basis.shape[0])
+        return self.basis.shape[0]
 
     def evolve(
         self,
@@ -70,29 +65,25 @@ class SelectedState:
 
         if eps is not None:
             logpsi_jax = batch.apply(self.model.logpsi, self.params, basis)
-            jax.block_until_ready(logpsi_jax)
 
-            psi = np.asarray(to_psi(tree.host(logpsi_jax))).reshape(-1)
-            scale = np.abs(psi).astype(np.float64, copy=False)
-            norm = float(np.linalg.norm(scale))
+            psi = to_psi(tree.host(logpsi_jax)).reshape(-1)
+            scale = np.abs(psi)
+            norm = np.linalg.norm(scale)
 
             if norm > 0.0:
                 scale = scale / norm
 
             bra = self.hamiltonian.expand(
                 basis,
-                float(eps),
+                eps,
                 scale=scale,
                 exclude=basis,
             )
 
             if bra.shape[0] > 0:
-                basis = np.ascontiguousarray(
-                    np.concatenate([basis, bra], axis=0),
-                )
+                basis = np.concatenate([basis, bra], axis=0)
 
         logabs_jax = batch.apply(self.model.logabs, self.params, basis)
-        jax.block_until_ready(logabs_jax)
 
         logabs = precision.host(logabs_jax, "calc", "real").reshape(-1)
         basis = self.hamiltonian.sector.asarray(selector(logabs, basis))
@@ -102,63 +93,52 @@ class SelectedState:
 
         return replace(self, basis=basis, hmat=self.hamiltonian.matrix(basis))
 
-    def expect(
-        self,
-        *,
-        obs: Any | None = None,
-        profile: bool = False,
-        data: bool = False,
-    ):
-        """Evaluate energy statistics in the selected basis."""
-        result = self._run(grad=False, geometry=False, profile=profile, data=data)
-        if data:
-            new_state, _, _, out, _, sample = result
-            return new_state, out, sample
-
-        new_state, _, _, out, _ = result
-        return new_state, out
-
-    def expect_and_grad(
-        self,
-        *,
-        geometry: bool = False,
-        obs: Any | None = None,
-        profile: bool = False,
-    ):
-        """Evaluate selected-space energy, gradient, and SR geometry."""
-        return self._run(grad=True, geometry=geometry, profile=profile, data=False)
-
     def replace(self, **updates: Any) -> Self:
         return replace(self, **updates)
 
-    def _run(
+    def state_dict(self) -> dict[str, Any]:
+        """Return dynamic state for checkpointing."""
+        return {"params": self.params, "basis": self.basis}
+
+    def load_state(self, data: dict[str, Any]) -> Self:
+        """Restore parameters and selected basis from a checkpoint."""
+        basis = data["basis"]
+        return replace(
+            self,
+            params=data["params"],
+            basis=basis,
+            hmat=self.hamiltonian.matrix(basis),
+        )
+
+    def expect(
         self,
         *,
-        grad: bool,
-        geometry: bool,
-        profile: bool,
-        data: bool,
+        grad: bool = False,
+        geometry: bool = False,
+        obs: Any | None = None,
+        timer: Timer | None = None,
+        data: bool = False,
     ):
-        timer = Timer(enabled=profile)
+        """Evaluate the state and optional gradient or sample data."""
+        timer = Timer(timing=False) if timer is None else timer
         rdtype = precision.real("calc", host=True)
         n_basis = self.n_basis
 
         with timer("forward", n=n_basis):
             logpsi_jax = batch.apply(self.model.logpsi, self.params, self.basis)
-            jax.block_until_ready(logpsi_jax)
             logpsi = tree.host(logpsi_jax)
 
         with timer("reduce"):
             psi = precision.cast(
-                np.asarray(to_psi(logpsi)).reshape(-1),
+                to_psi(logpsi),
                 "calc",
                 host=True,
-            )
+            ).reshape(-1)
             hpsi = precision.cast(
-                np.asarray(self.hmat.dot(psi)).reshape(-1),
+                self.hmat.dot(psi),
                 "calc",
                 host=True,
-            )
+            ).reshape(-1)
 
             norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
             energy = float((np.vdot(psi, hpsi) / norm).real)
@@ -170,7 +150,7 @@ class SelectedState:
                 host=True,
             )
 
-            out = {
+            rec = {
                 "energy": energy,
                 "eloc_var": float((np.vdot(residual, residual) / norm).real),
                 "n_basis": n_basis,
@@ -200,7 +180,6 @@ class SelectedState:
                     self.basis,
                     precision.device(cot, "model", "real"),
                 )
-                jax.block_until_ready(gradient)
 
                 if geometry:
                     sqrt_w = np.sqrt(weight)
@@ -219,17 +198,20 @@ class SelectedState:
                         ),
                     )
 
-        out.update(timer.stats())
+                if timer.timing:
+                    jax.block_until_ready(gradient)
+
+        rec.update(timer.stats())
 
         if data:
-            return self, energy, gradient, out, geom, sample
-        return self, energy, gradient, out, geom
+            return self, rec, sample
+        if grad:
+            return self, rec, gradient, geom
+        return self, rec
 
 
 def topk_selector(k: int) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
     """Return a selector that keeps the largest log-amplitudes."""
-    k = int(k)
-
     def select(logabs: np.ndarray, basis: np.ndarray) -> np.ndarray:
         logabs = np.asarray(logabs, dtype=np.float64).reshape(-1)
 
@@ -237,12 +219,12 @@ def topk_selector(k: int) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
             raise ValueError("logabs length must match basis size")
 
         if basis.shape[0] == 0 or k <= 0:
-            return np.ascontiguousarray(basis[:0])
+            return basis[:0]
 
         n = min(k, basis.shape[0])
         pick = np.argpartition(logabs, -n)[-n:]
         pick = pick[np.argsort(logabs[pick])[::-1]]
 
-        return np.ascontiguousarray(basis[pick])
+        return basis[pick]
 
     return select

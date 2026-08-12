@@ -9,7 +9,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
-#include <libdet/rhf/hamiltonian.hpp>
+#include <libdet/hamiltonian.hpp>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -44,7 +44,7 @@ using I64Array = nb::ndarray<
     nb::device::cpu
 >;
 
-[[nodiscard]] libdet::rhf::DetBatchView states(const StateArray& x) noexcept {
+[[nodiscard]] libdet::DetBatchView states(const StateArray& x) noexcept {
     return {
         x.data(),
         static_cast<std::size_t>(x.shape(0)),
@@ -52,7 +52,7 @@ using I64Array = nb::ndarray<
     };
 }
 
-[[nodiscard]] libdet::rhf::DetRef state(const StateArray& x) {
+[[nodiscard]] libdet::DetRef state(const StateArray& x) {
     const auto view = states(x);
     if (view.n_dets != 1) throw std::invalid_argument("expected exactly one state");
     return view[0];
@@ -80,31 +80,29 @@ struct OptionalStates {
         }
     }
 
-    [[nodiscard]] const libdet::rhf::DetBatchView* ptr() const noexcept {
+    [[nodiscard]] const libdet::DetBatchView* ptr() const noexcept {
         return view ? &*view : nullptr;
     }
 
     std::optional<StateArray> array;
-    std::optional<libdet::rhf::DetBatchView> view;
+    std::optional<libdet::DetBatchView> view;
 };
 
-struct Counts {
-    std::span<const libdet::i64> data;
-    std::size_t n_stream = 0;
-};
-
-
-[[nodiscard]] Counts counts(const I64Array& x, std::size_t n_ket) {
+[[nodiscard]] std::span<const libdet::i64> counts(
+    const I64Array& x,
+    std::size_t n_ket,
+    std::size_t& n_streams
+) {
     if (x.ndim() != 1 && x.ndim() != 2) {
         throw std::invalid_argument("counts must have shape (N,) or (S, N)");
     }
 
-    const std::size_t n_stream =
+    n_streams =
         x.ndim() == 1 ? 1u : static_cast<std::size_t>(x.shape(0));
     const std::size_t last = static_cast<std::size_t>(x.shape(x.ndim() - 1));
 
     if (last != n_ket) throw std::invalid_argument("counts last dimension must match kets");
-    return {{x.data(), n_stream * n_ket}, n_stream};
+    return {x.data(), n_streams * n_ket};
 }
 
 template <class T>
@@ -128,7 +126,7 @@ auto own(std::vector<T>&& x, std::size_t nrow, std::size_t ncol) {
 }
 
 auto own_states(std::vector<std::uint64_t>&& x, libdet::u32 nword) {
-    const std::size_t n_state = x.size() / libdet::word_pair_size(nword);
+    const std::size_t n_state = x.size() / libdet::state_size(nword);
     auto* heap = new std::vector<std::uint64_t>(std::move(x));
     nb::capsule owner(heap, [](void* p) noexcept {
         delete static_cast<std::vector<std::uint64_t>*>(p);
@@ -168,7 +166,7 @@ auto view_states(const std::vector<std::uint64_t>& x, std::size_t n_state, libde
 }
 
 auto view_states(const std::vector<std::uint64_t>& x, libdet::u32 nword) {
-    return view_states(x, x.size() / libdet::word_pair_size(nword), nword);
+    return view_states(x, x.size() / libdet::state_size(nword), nword);
 }
 
 } // namespace
@@ -177,71 +175,105 @@ NB_MODULE(libdet, m) {
     m.doc() = "Electronic Hamiltonian primitives";
 
     nb::class_<libdet::Conns>(m, "Conns")
-        .def_prop_ro("n_kets", [](const libdet::Conns& x) { return x.n_kets; })
-        .def_prop_ro("n_streams", [](const libdet::Conns& x) { return x.n_streams; })
+        .def_ro("n_kets", &libdet::Conns::n_kets)
+        .def_ro("n_streams", &libdet::Conns::n_streams)
         .def_prop_ro("bra", [](const libdet::Conns& x) {
             return view_states(x.bra, x.nword);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::Conns& x) { return view(x.diag); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("ptr", [](const libdet::Conns& x) { return view(x.ptr); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("h", [](const libdet::Conns& x) { return view(x.h); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("degree", [](const libdet::Conns& x) { return view(x.degree); }, nb::rv_policy::reference_internal);
-
+        .def_prop_ro("diag", [](const libdet::Conns& x) {
+            return view(x.diag);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("ptr", [](const libdet::Conns& x) {
+            return view(x.ptr);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("h", [](const libdet::Conns& x) {
+            return view(x.h);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("degree", [](const libdet::Conns& x) {
+            return view(x.degree);
+        }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::LocalConn>(m, "LocalConn")
-        .def_prop_ro("n_kets", [](const libdet::LocalConn& x) { return x.n_kets; })
+        .def_ro("n_kets", &libdet::LocalConn::n_kets)
         .def_prop_ro("bra", [](const libdet::LocalConn& x) {
             return view_states(x.bra, x.nword);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::LocalConn& x) { return view(x.diag); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_ptr", [](const libdet::LocalConn& x) { return view(x.strong_ptr); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_h", [](const libdet::LocalConn& x) { return view(x.strong_h); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("strong_degree", [](const libdet::LocalConn& x) { return view(x.strong_degree); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_ptr", [](const libdet::LocalConn& x) { return view(x.weak_ptr); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("weak_coeff", [](const libdet::LocalConn& x) { return view(x.weak_coeff); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("diag", [](const libdet::LocalConn& x) {
+            return view(x.diag);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_ptr", [](const libdet::LocalConn& x) {
+            return view(x.strong_ptr);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_h", [](const libdet::LocalConn& x) {
+            return view(x.strong_h);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("strong_degree", [](const libdet::LocalConn& x) {
+            return view(x.strong_degree);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_ptr", [](const libdet::LocalConn& x) {
+            return view(x.weak_ptr);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("weak_coeff", [](const libdet::LocalConn& x) {
+            return view(x.weak_coeff);
+        }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projection>(m, "Projection")
         .def_prop_ro("bra", [](const libdet::Projection& x) {
             return view_states(x.bra, x.hpsi.size(), x.nword);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("hpsi", [](const libdet::Projection& x) { return view(x.hpsi); }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::Projection& x) { return view(x.diag); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("hpsi", [](const libdet::Projection& x) {
+            return view(x.hpsi);
+        }, nb::rv_policy::reference_internal)
+        .def_prop_ro("diag", [](const libdet::Projection& x) {
+            return view(x.diag);
+        }, nb::rv_policy::reference_internal);
 
     nb::class_<libdet::Projections>(m, "Projections")
-        .def_prop_ro("n_streams", [](const libdet::Projections& x) { return x.n_streams; })
+        .def_ro("n_streams", &libdet::Projections::n_streams)
         .def_prop_ro("bra", [](const libdet::Projections& x) {
             return view_states(x.bra, x.nword);
         }, nb::rv_policy::reference_internal)
         .def_prop_ro("hpsi", [](const libdet::Projections& x) {
-            const std::size_t n_bra = x.bra.size() / libdet::word_pair_size(x.nword);
+            const std::size_t n_bra = x.bra.size() / libdet::state_size(x.nword);
             return view(x.hpsi, x.n_streams, n_bra);
         }, nb::rv_policy::reference_internal)
-        .def_prop_ro("diag", [](const libdet::Projections& x) { return view(x.diag); }, nb::rv_policy::reference_internal);
+        .def_prop_ro("diag", [](const libdet::Projections& x) {
+            return view(x.diag);
+        }, nb::rv_policy::reference_internal);
 
-    nb::class_<libdet::rhf::Hamiltonian>(m, "Hamiltonian")
-        .def("__init__", [](libdet::rhf::Hamiltonian* self, const F64Mat& h1, const F64Vec& eri, double ecore) {
+    nb::class_<libdet::Hamiltonian>(m, "Hamiltonian")
+        .def("__init__", [](
+            libdet::Hamiltonian* self,
+            const F64Mat& h1,
+            const F64Vec& eri,
+            double ecore
+        ) {
             if (h1.shape(0) != h1.shape(1)) throw std::invalid_argument("h1 must be square");
             const int norb = static_cast<int>(h1.shape(0));
             const auto h1v = f64(h1);
             const auto eriv = f64(eri);
             no_gil([&] {
-                new (self) libdet::rhf::Hamiltonian(h1v, norb, eriv, ecore);
+                new (self) libdet::Hamiltonian(h1v, norb, eriv, ecore);
             });
         }, "h1"_a.noconvert(), "eri"_a.noconvert(), "ecore"_a = 0.0)
 
-        .def("hij", [](const libdet::rhf::Hamiltonian& ham, const StateArray& bra, const StateArray& ket) {
+        .def("hij", [](
+            const libdet::Hamiltonian& ham,
+            const StateArray& bra,
+            const StateArray& ket
+        ) {
             const auto b = state(bra);
             const auto k = state(ket);
             return no_gil([&] { return ham.hij(b, k); });
         }, "bra"_a.noconvert(), "ket"_a.noconvert())
 
-        .def("diag", [](const libdet::rhf::Hamiltonian& ham, const StateArray& x) {
+        .def("diag", [](const libdet::Hamiltonian& ham, const StateArray& x) {
             const auto xv = states(x);
             return own(no_gil([&] { return ham.diag(xv); }));
         }, "x"_a.noconvert())
 
         .def("expand", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& kets,
             double eps,
             nb::object scale,
@@ -262,7 +294,7 @@ NB_MODULE(libdet, m) {
         }, "kets"_a.noconvert(), "eps"_a, "scale"_a = nb::none(), "exclude"_a = nb::none())
 
         .def("project", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             nb::object bras,
             const StateArray& kets,
             const F64Vec& scale,
@@ -276,15 +308,23 @@ NB_MODULE(libdet, m) {
                 return no_gil([&] { return ham.project(kv, sv, eps, exclude_v.ptr()); });
             }
 
-            if (!exclude.is_none()) throw std::invalid_argument("exclude is only valid when bras is None");
+            if (!exclude.is_none()) {
+                throw std::invalid_argument("exclude is only valid when bras is None");
+            }
 
             const StateArray ba = nb::cast<StateArray>(bras);
             const auto bv = states(ba);
             return no_gil([&] { return ham.project(bv, kv, sv, eps); });
-        }, "bras"_a.none(), "kets"_a.noconvert(), "scale"_a.noconvert(), "eps"_a = 0.0, "exclude"_a = nb::none())
+        },
+            "bras"_a.none(),
+            "kets"_a.noconvert(),
+            "scale"_a.noconvert(),
+            "eps"_a = 0.0,
+            "exclude"_a = nb::none()
+        )
 
         .def("conn", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& kets,
             double eps
         ) {
@@ -293,7 +333,7 @@ NB_MODULE(libdet, m) {
         }, "kets"_a.noconvert(), "eps"_a = 0.0)
 
         .def("sample_conn", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& kets,
             const I64Array& counts_arr,
             double eps1,
@@ -301,21 +341,28 @@ NB_MODULE(libdet, m) {
             std::uint64_t seed
         ) {
             const auto kv = states(kets);
-            const auto cv = counts(counts_arr, kv.n_dets);
+            std::size_t n_streams;
+            const auto cv = counts(counts_arr, kv.n_dets, n_streams);
             return no_gil([&] {
                 return ham.sample_conn(
                     kv,
-                    cv.data,
-                    cv.n_stream,
+                    cv,
+                    n_streams,
                     eps1,
                     eps2,
                     seed
                 );
             });
-        }, "kets"_a.noconvert(), "counts"_a.noconvert(), "eps1"_a, "eps2"_a = 0.0, "seed"_a = std::uint64_t{0})
+        },
+            "kets"_a.noconvert(),
+            "counts"_a.noconvert(),
+            "eps1"_a,
+            "eps2"_a = 0.0,
+            "seed"_a = std::uint64_t{0}
+        )
 
         .def("local_conn", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& kets,
             double eps1,
             double eps2,
@@ -330,7 +377,7 @@ NB_MODULE(libdet, m) {
         }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "n_draw"_a, "seed"_a = std::uint64_t{0})
 
         .def("sample_project", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& kets,
             const F64Vec& scale,
             const I64Array& counts_arr,
@@ -341,24 +388,33 @@ NB_MODULE(libdet, m) {
         ) {
             const auto kv = states(kets);
             const auto sv = f64(scale);
-            const auto cv = counts(counts_arr, kv.n_dets);
+            std::size_t n_streams;
+            const auto cv = counts(counts_arr, kv.n_dets, n_streams);
             const OptionalStates exclude_v(exclude);
             return no_gil([&] {
                 return ham.sample_project(
                     kv,
                     sv,
-                    cv.data,
-                    cv.n_stream,
+                    cv,
+                    n_streams,
                     eps1,
                     eps2,
                     exclude_v.ptr(),
                     seed
                 );
             });
-        }, "kets"_a.noconvert(), "scale"_a.noconvert(), "counts"_a.noconvert(), "eps1"_a, "eps2"_a = 0.0, "exclude"_a = nb::none(), "seed"_a = std::uint64_t{0})
+        },
+            "kets"_a.noconvert(),
+            "scale"_a.noconvert(),
+            "counts"_a.noconvert(),
+            "eps1"_a,
+            "eps2"_a = 0.0,
+            "exclude"_a = nb::none(),
+            "seed"_a = std::uint64_t{0}
+        )
 
         .def("matrix", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& bras,
             const StateArray& kets
         ) {
@@ -374,7 +430,7 @@ NB_MODULE(libdet, m) {
         }, "bras"_a.noconvert(), "kets"_a.noconvert())
 
         .def("matvec", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& bras,
             const StateArray& kets,
             const F64Vec& x
@@ -386,7 +442,7 @@ NB_MODULE(libdet, m) {
         }, "bras"_a.noconvert(), "kets"_a.noconvert(), "x"_a.noconvert())
 
         .def("matmat", [](
-            const libdet::rhf::Hamiltonian& ham,
+            const libdet::Hamiltonian& ham,
             const StateArray& bras,
             const StateArray& kets,
             const F64Mat& x

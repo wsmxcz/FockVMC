@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .backflow import Backflow, GBackflow, PBackflow, SBackflow
 from .base import Model
 from .init import slater_reference

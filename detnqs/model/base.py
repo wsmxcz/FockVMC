@@ -9,37 +9,19 @@ from flax import linen as nn
 
 
 def to_logabs(logpsi: Any) -> Any:
-    """Return log|psi| from a supported wavefunction representation.
-
-    Supported representations:
-        real array:
-            log|psi|.
-
-        complex array:
-            log|psi| + i phase.
-
-        (sign, logabs):
-            signed real wavefunction representation.
-    """
+    """Extract log|psi| from real, complex, or signed output."""
     if isinstance(logpsi, tuple):
         return logpsi[1]
 
+    xp = np if isinstance(logpsi, np.ndarray) else jnp
     if jnp.issubdtype(jnp.asarray(logpsi).dtype, jnp.complexfloating):
-        return (
-            np.real(logpsi)
-            if isinstance(logpsi, np.ndarray)
-            else jnp.real(logpsi)
-        )
+        return xp.real(logpsi)
 
     return logpsi
 
 
 def to_psi(logpsi: Any) -> Any:
-    """Return shifted wavefunction values.
-
-    The global shift does not change Rayleigh quotients or amplitude ratios.
-    It only improves numerical stability when exponentiating log-amplitudes.
-    """
+    """Exponentiate after a numerically stable global shift."""
     if isinstance(logpsi, tuple):
         sign, logabs = logpsi
         xp = np if isinstance(logabs, np.ndarray) else jnp
@@ -68,28 +50,7 @@ def to_ratio(num: Any, den: Any) -> Any:
 
 
 class Model(nn.Module):
-    """Base class for Fock-space neural quantum states.
-
-    Raw model output:
-        real:
-            log|psi|.
-
-        complex:
-            log|psi| + i phase.
-
-        (sign, logabs):
-            signed real wavefunction.
-
-    Differentiated coordinate:
-        real:
-            log|psi|.
-
-        complex:
-            [log|psi|, phase].
-
-        signed real:
-            logabs with sign stopped.
-    """
+    """Base class for real, complex, and signed-log wavefunctions."""
 
     def __call__(self, x: Any) -> Any:
         raise NotImplementedError
@@ -125,26 +86,13 @@ class Model(nn.Module):
         return logpsi
 
     def cotangent(self, logpsi: Any, dlogpsi: Any) -> Any:
-        """Map dL/dlogpsi to dL/dcoord.
+        """Map wavefunction cotangents to real autodiff coordinates."""
+        xp = np if isinstance(dlogpsi, np.ndarray) else jnp
 
-        This method keeps optimizer-facing autodiff coordinates real. Complex
-        cotangents are represented by real and imaginary channels.
-        """
         if isinstance(logpsi, tuple):
-            return (
-                np.real(dlogpsi)
-                if isinstance(dlogpsi, np.ndarray)
-                else jnp.real(dlogpsi)
-            )
+            return xp.real(dlogpsi)
 
         if jnp.issubdtype(jnp.asarray(logpsi).dtype, jnp.complexfloating):
-            if isinstance(dlogpsi, np.ndarray):
-                return np.stack((np.real(dlogpsi), np.imag(dlogpsi)), axis=-1)
+            return xp.stack((xp.real(dlogpsi), xp.imag(dlogpsi)), axis=-1)
 
-            return jnp.stack((jnp.real(dlogpsi), jnp.imag(dlogpsi)), axis=-1)
-
-        return (
-            np.real(dlogpsi)
-            if isinstance(dlogpsi, np.ndarray)
-            else jnp.real(dlogpsi)
-        )
+        return xp.real(dlogpsi)

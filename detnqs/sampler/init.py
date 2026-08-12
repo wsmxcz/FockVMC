@@ -14,9 +14,9 @@ def sample_slater(
     seed: int,
 ) -> np.ndarray:
     """Sample configurations from a real Slater determinant."""
-    norb = int(sector.norb)
-    n_alpha = int(sector.n_alpha)
-    n_beta = int(sector.n_beta)
+    norb = sector.norb
+    n_alpha = sector.n_alpha
+    n_beta = sector.n_beta
     ref_mat = np.asarray(ref_mat, dtype=np.float64, order="C")
 
     if ref_mat.shape != (n_alpha + n_beta, 2 * norb):
@@ -65,4 +65,4 @@ def sample_slater(
             np.uint64(1) << bit,
         )
 
-    return np.ascontiguousarray(x)
+    return x

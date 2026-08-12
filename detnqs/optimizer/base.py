@@ -7,28 +7,7 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class Geometry:
-    """Local geometry consumed by SR-like optimizers.
-
-    The centered weighted Jacobian is
-
-        O = sqrt(w) * (J - <J>_w).
-
-    Fields:
-        params:
-            Parameters used to build the geometry.
-
-        coord:
-            Real autodiff coordinate, coord(params, x).
-
-        x:
-            Sample axis used by the geometry.
-
-        weight:
-            Non-negative weights. Optimizers normalize them internally.
-
-        b:
-            Sample-space right-hand side used by PSR.
-    """
+    """SR geometry with O = sqrt(w) (J - <J>_w)."""
 
     params: Any
     coord: Callable[[Any, Any], Any]

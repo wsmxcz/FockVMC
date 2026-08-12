@@ -112,7 +112,7 @@ Public method parameters are limited to the solve:
 ```text
 shift      diagonal regularization
 mode       dense or matrix-free parameter-space SR
-maxiter    matrix-free iteration limit
+max_iter   matrix-free iteration limit
 mu         predictive strength; zero gives sample-space SR
 ```
 

@@ -22,20 +22,15 @@ class ChainState:
 
 @dataclass(frozen=True, slots=True)
 class MCSampler:
-    """Metropolis sampler for Fock-space chains.
-
-    Hamiltonian proposals yield the degree-tilted auxiliary distribution
-    ``rho_alpha(x) s(x)``, so no reverse ket degree is needed.
-    Single proposals are a Born distribution baseline with ``beta=0``.
-    """
+    """Metropolis sampler with Hamiltonian or single-excitation proposals."""
 
     n_samples: int = 1024
     n_chains: int = 1024
 
-    burnin_steps: int = 32
-    discard_steps: int = 0
-    sweep_steps: int = 1
-    reset_chains: bool = False
+    burn_in: int = 32
+    discard: int = 0
+    sweep: int = 1
+    reset: bool = False
 
     alpha: float | None = 1.0
     proposal: str = "ham"
@@ -43,47 +38,29 @@ class MCSampler:
     beta: float = 0.5
 
     def __post_init__(self) -> None:
-        n_samples = int(self.n_samples)
-        n_chains = int(self.n_chains)
-        burnin_steps = int(self.burnin_steps)
-        discard_steps = int(self.discard_steps)
-        sweep_steps = int(self.sweep_steps)
-        proposal = str(self.proposal)
-        reset_chains = bool(self.reset_chains)
-        beta = float(self.beta)
-
-        if n_samples <= 0:
+        if self.n_samples <= 0:
             raise ValueError("n_samples must be positive")
-        if n_chains <= 0:
+        if self.n_chains <= 0:
             raise ValueError("n_chains must be positive")
-        if burnin_steps < 0 or discard_steps < 0:
-            raise ValueError("burnin_steps and discard_steps must be nonnegative")
-        if sweep_steps <= 0:
-            raise ValueError("sweep_steps must be positive")
-        if proposal not in {"ham", "single"}:
+        if self.burn_in < 0 or self.discard < 0:
+            raise ValueError("burn_in and discard must be nonnegative")
+        if self.sweep <= 0:
+            raise ValueError("sweep must be positive")
+        if self.proposal not in {"ham", "single"}:
             raise ValueError("proposal must be 'ham' or 'single'")
-        if not 0.0 <= beta <= 1.0:
+        if not 0.0 <= self.beta <= 1.0:
             raise ValueError("beta must satisfy 0 <= beta <= 1")
 
-        alpha = None
-        if self.alpha is not None:
-            alpha = float(self.alpha)
-            if not np.isfinite(alpha) or not 0.0 <= alpha <= 2.0:
-                raise ValueError("alpha must be None or satisfy 0 <= alpha <= 2")
-        if proposal == "single" and (alpha != 2.0 or beta != 0.0):
+        if self.alpha is not None and (
+            not np.isfinite(self.alpha) or not 0.0 <= self.alpha <= 2.0
+        ):
+            raise ValueError("alpha must be None or satisfy 0 <= alpha <= 2")
+        if self.proposal == "single" and (
+            self.alpha != 2.0 or self.beta != 0.0
+        ):
             raise ValueError(
                 "proposal='single' requires alpha=2.0 and beta=0.0"
             )
-
-        object.__setattr__(self, "n_samples", n_samples)
-        object.__setattr__(self, "n_chains", n_chains)
-        object.__setattr__(self, "burnin_steps", burnin_steps)
-        object.__setattr__(self, "discard_steps", discard_steps)
-        object.__setattr__(self, "sweep_steps", sweep_steps)
-        object.__setattr__(self, "reset_chains", reset_chains)
-        object.__setattr__(self, "proposal", proposal)
-        object.__setattr__(self, "beta", beta)
-        object.__setattr__(self, "alpha", alpha)
 
     def init(
         self,
@@ -98,28 +75,23 @@ class MCSampler:
         timer: Timer | None = None,
     ) -> ChainState:
         """Initialize chains and run burn-in."""
-        timer = Timer(enabled=False) if timer is None else timer
-        n_chains = self.n_chains
-
+        timer = Timer(timing=False) if timer is None else timer
         key, _ = jax.random.split(key)
         x = hamiltonian.sector.asarray(chains)
-        if x.shape[0] != n_chains:
+        if x.shape[0] != self.n_chains:
             raise ValueError("chains size must equal sampler.n_chains")
-        x = np.ascontiguousarray(x)
 
         with timer("unique"):
             unique, _, inv = hamiltonian.sector.unique(x)
 
         with timer("forward", n=unique.shape[0]):
             value = batch.apply(model.logabs, params, unique)
-            jax.block_until_ready(value)
             unique_logabs = precision.host(value, "calc", "real").reshape(-1)
 
-        with timer("reduce"):
-            logabs = precision.cast(unique_logabs[inv], "calc", "real", host=True)
+        logabs = unique_logabs[inv]
 
         if self.alpha is None:
-            alpha0 = 2.0 if alpha is None else float(alpha)
+            alpha0 = 2.0 if alpha is None else alpha
         else:
             alpha0 = self.alpha
 
@@ -130,7 +102,7 @@ class MCSampler:
             alpha=float(np.clip(alpha0, 0.0, 2.0)),
         )
 
-        for _ in range(self.burnin_steps):
+        for _ in range(self.burn_in):
             state, _, _, _ = self._step(
                 params,
                 hamiltonian,
@@ -150,29 +122,23 @@ class MCSampler:
         state: ChainState,
         *,
         eps1: float,
-        profile: bool = False,
         timer: Timer | None = None,
     ) -> tuple[ChainState, np.ndarray, np.ndarray, dict[str, float | int]]:
-        """Advance chains and return observed configurations.
-
-        The caller owns logabs synchronization. The sampler only advances
-        chains and reports proposal health; estimator weights are built in
-        vstate.
-        """
+        """Advance chains and return configurations, masses, and diagnostics."""
         n_samples = self.n_samples
         n_chains = self.n_chains
 
         if state.x.shape[0] != n_chains:
             raise ValueError("chain state size must equal n_chains")
 
-        timer = Timer(enabled=profile) if timer is None else timer
+        timer = Timer(timing=False) if timer is None else timer
         rdtype = precision.real("calc", host=True)
 
         accepted = 0
         proposed = 0
         n_conn = 0
 
-        for _ in range(self.discard_steps):
+        for _ in range(self.discard):
             state, _, _, info = self._step(
                 params,
                 hamiltonian,
@@ -188,7 +154,6 @@ class MCSampler:
         observations = np.empty((n_samples, *state.x.shape[1:]), dtype=np.uint64)
         mass = np.empty(n_samples, dtype=rdtype)
 
-        sweep_steps = self.sweep_steps
         offset = 0
 
         while offset < n_samples:
@@ -211,7 +176,7 @@ class MCSampler:
             proposed += info["proposed"]
             n_conn += info["n_conn"]
 
-            for _ in range(sweep_steps - 1):
+            for _ in range(self.sweep - 1):
                 state, _, _, info = self._step(
                     params,
                     hamiltonian,
@@ -224,13 +189,12 @@ class MCSampler:
                 proposed += info["proposed"]
                 n_conn += info["n_conn"]
 
-        stats = {
-            "acceptance_rate": float(accepted / proposed if proposed else 0.0)
+        rec = {
+            "acceptance_rate": float(accepted / proposed if proposed else 0.0),
+            "n_conn": n_conn,
         }
-        if profile:
-            stats["n_conn"] = n_conn
 
-        return state, observations, mass, stats
+        return state, observations, mass, rec
 
     def _step(
         self,
@@ -244,15 +208,14 @@ class MCSampler:
         timer: Timer | None = None,
     ) -> tuple[ChainState, np.ndarray, np.ndarray, dict[str, int]]:
         """Observe selected chains and make one Metropolis transition."""
-        timer = Timer(enabled=False) if timer is None else timer
+        timer = Timer(timing=False) if timer is None else timer
         rdtype = precision.real("calc", host=True)
-        n_chain = int(state.x.shape[0])
-        n_observe = int(n_observe)
+        n_chain = state.x.shape[0]
         beta = self.beta
 
         with timer("sample"):
-            key, random_key = jax.random.split(state.key)
-            seed = int(jax.random.bits(random_key, (), dtype=jnp.uint32))
+            key, subkey = jax.random.split(state.key)
+            seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
             rng = np.random.default_rng(seed)
 
             pick = (
@@ -260,14 +223,14 @@ class MCSampler:
                 if n_observe == n_chain
                 else rng.choice(n_chain, size=n_observe, replace=False)
             )
-            observed = np.ascontiguousarray(state.x[pick])
+            observed = state.x[pick]
             obs_mass = np.ones(n_observe, dtype=rdtype)
 
         if self.proposal == "single":
             sector = hamiltonian.sector
-            n_move_a = sector.n_alpha * (sector.norb - sector.n_alpha)
-            n_move_b = sector.n_beta * (sector.norb - sector.n_beta)
-            n_move = n_move_a + n_move_b
+            move_a = sector.n_alpha * (sector.norb - sector.n_alpha)
+            move_b = sector.n_beta * (sector.norb - sector.n_beta)
+            n_move = move_a + move_b
 
             if n_move == 0:
                 return (
@@ -280,8 +243,8 @@ class MCSampler:
             with timer("sample"):
                 item = np.arange(n_chain, dtype=np.int64)
                 move = rng.integers(n_move, size=n_chain, dtype=np.int64)
-                spin = (move >= n_move_a).astype(np.int64)
-                move_spin = move - spin * n_move_a
+                spin = (move >= move_a).astype(np.int64)
+                move_spin = move - spin * move_a
 
                 n_occ = np.where(spin == 0, sector.n_alpha, sector.n_beta)
                 n_vir = sector.norb - n_occ
@@ -358,17 +321,15 @@ class MCSampler:
                     value = batch.apply(
                         model.logabs,
                         params,
-                        np.ascontiguousarray(unique[unknown]),
+                        unique[unknown],
                     )
-                    jax.block_until_ready(value)
                     unknown_logabs = precision.host(
                         value,
                         "calc",
                         "real",
                     ).reshape(-1)
 
-                with timer("reduce"):
-                    unique_logabs[unknown] = unknown_logabs
+                unique_logabs[unknown] = unknown_logabs
 
             with timer("sample"):
                 candidate_logabs = unique_logabs[inverse[n_chain:]]
@@ -388,12 +349,7 @@ class MCSampler:
                     state,
                     key=key,
                     x=candidate,
-                    logabs=precision.cast(
-                        candidate_logabs,
-                        "calc",
-                        "real",
-                        host=True,
-                    ),
+                    logabs=candidate_logabs,
                 )
 
             return (
@@ -409,10 +365,9 @@ class MCSampler:
 
         with timer("unique"):
             ket, _, ket_index = hamiltonian.sector.unique(state.x)
-            n_ket = int(ket.shape[0])
+            n_ket = ket.shape[0]
 
-        with timer("reduce"):
-            obs_ket = ket_index[pick] if n_observe else np.empty(0, dtype=np.int64)
+        obs_ket = ket_index[pick] if n_observe else np.empty(0, dtype=np.int64)
 
         with timer("sample"):
             kernel_move = (
@@ -427,8 +382,7 @@ class MCSampler:
                 minlength=n_ket,
             ).astype(np.int64)
 
-        candidate = np.ascontiguousarray(state.x.copy())
-        active = np.zeros(n_chain, dtype=bool)
+        candidate = state.x.copy()
         candidate_pos = np.full(n_chain, -1, dtype=np.int64)
 
         with timer("reduce"):
@@ -447,8 +401,8 @@ class MCSampler:
                 ket,
                 counts,
                 eps1=np.inf,
-                eps2=float(eps1),
-                seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
+                eps2=eps1,
+                seed=rng.integers(0, 2**32, dtype=np.uint64),
             )
             conn_bra = np.asarray(conn.bra, dtype=np.uint64)
             conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
@@ -468,7 +422,7 @@ class MCSampler:
                 candidate[active_order] = conn_bra[candidate_pos[active_order]]
 
             active = candidate_pos >= 0
-            # The degree in the auxiliary distribution cancels proposal asymmetry.
+            # Degree tilting cancels proposal asymmetry.
 
         if kernel_move.any():
             with timer("sample"):
@@ -492,24 +446,20 @@ class MCSampler:
         if proposed:
             logabs_candidate = np.empty(n_chain, dtype=rdtype)
             logabs_candidate[~active] = state.logabs[~active]
-
-            with timer("reduce"):
-                new = candidate_pos[active]
+            new = candidate_pos[active]
 
             with timer("forward", n=new.size):
                 value = batch.apply(
                     model.logabs,
                     params,
-                    np.ascontiguousarray(conn_bra[new]),
+                    conn_bra[new],
                 )
-                jax.block_until_ready(value)
                 new_logabs = precision.host(value, "calc", "real").reshape(-1)
 
             with timer("reduce"):
                 logabs_candidate[active] = new_logabs
 
             with timer("sample"):
-                # Fixed alpha uses sampler.alpha; auto alpha uses chain state.
                 alpha = rdtype(state.alpha if self.alpha is None else self.alpha)
                 log_accept = alpha * (logabs_candidate - state.logabs)
                 accept = active & (
@@ -520,15 +470,8 @@ class MCSampler:
                 next_state = replace(
                     state,
                     key=key,
-                    x=np.ascontiguousarray(
-                        np.where(accept.reshape((-1, 1, 1)), candidate, state.x)
-                    ),
-                    logabs=precision.cast(
-                        np.where(accept, logabs_candidate, state.logabs),
-                        "calc",
-                        "real",
-                        host=True,
-                    ),
+                    x=np.where(accept[:, None, None], candidate, state.x),
+                    logabs=np.where(accept, logabs_candidate, state.logabs),
                 )
 
         return (

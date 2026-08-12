@@ -7,23 +7,17 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
-#include <utility>
 #include <vector>
 
-#include <libdet/rhf/screen.hpp>
-#include <libdet/rhf/det.hpp>
+#include <libdet/screen.hpp>
+#include <libdet/det.hpp>
 
 #include <omp.h>
 
-namespace libdet::rhf {
-
-[[nodiscard]] inline bool keep_h(double h, double eps) noexcept {
-    const double value = std::abs(h);
-    return value > 0.0 && value >= eps;
-}
+namespace libdet {
 
 template <class Visit>
-inline void visit_external_state(
+inline void visit_external(
     const Integral& ints,
     const ScreenTable* screen,
     DetRef ket,
@@ -31,14 +25,19 @@ inline void visit_external_state(
     double eps,
     Visit&& visit
 ) {
+    element.load(ints, ket);
     const DetOcc& occ = element.occ;
+    const auto keep = [eps](double h) {
+        const double value = std::abs(h);
+        return value > 0.0 && value >= eps;
+    };
 
     for (int i : occ.occ_a) {
         for (int a : occ.vir_a) {
             const double h =
                 sign_single(occ.pref_a, i, a)
                 * element.single_alpha(i, a);
-            if (keep_h(h, eps)) visit(alpha1(i, a), h);
+            if (keep(h)) visit(alpha1(i, a), h);
         }
     }
 
@@ -47,7 +46,7 @@ inline void visit_external_state(
             const double h =
                 sign_single(occ.pref_b, i, a)
                 * element.single_beta(i, a);
-            if (keep_h(h, eps)) visit(beta1(i, a), h);
+            if (keep(h)) visit(beta1(i, a), h);
         }
     }
 
@@ -66,7 +65,7 @@ inline void visit_external_state(
                         const double h =
                             sign_double(occ.pref_a, i, j, a, b)
                             * double_same(ints, i, j, a, b);
-                        if (keep_h(h, eps)) visit(alpha2(i, j, a, b), h);
+                        if (keep(h)) visit(alpha2(i, j, a, b), h);
                     }
                 }
             }
@@ -86,7 +85,7 @@ inline void visit_external_state(
                         const double h =
                             sign_double(occ.pref_b, i, j, a, b)
                             * double_same(ints, i, j, a, b);
-                        if (keep_h(h, eps)) visit(beta2(i, j, a, b), h);
+                        if (keep(h)) visit(beta2(i, j, a, b), h);
                     }
                 }
             }
@@ -102,7 +101,7 @@ inline void visit_external_state(
                             sign_a
                             * sign_single(occ.pref_b, ib, b)
                             * double_mixed(ints, ia, ib, a, b);
-                        if (keep_h(h, eps)) visit(mixed2(ia, ib, a, b), h);
+                        if (keep(h)) visit(mixed2(ia, ib, a, b), h);
                     }
                 }
             }
@@ -124,7 +123,7 @@ inline void visit_external_state(
 
                 const double h =
                     sign_double(occ.pref_a, i, j, c.a, c.b) * c.h;
-                if (keep_h(h, eps)) visit(alpha2(i, j, c.a, c.b), h);
+                if (keep(h)) visit(alpha2(i, j, c.a, c.b), h);
             }
         }
     }
@@ -142,7 +141,7 @@ inline void visit_external_state(
 
                 const double h =
                     sign_double(occ.pref_b, i, j, c.a, c.b) * c.h;
-                if (keep_h(h, eps)) visit(beta2(i, j, c.a, c.b), h);
+                if (keep(h)) visit(beta2(i, j, c.a, c.b), h);
             }
         }
     }
@@ -158,39 +157,67 @@ inline void visit_external_state(
                     sign_single(occ.pref_a, ia, c.a)
                     * sign_single(occ.pref_b, ib, c.b)
                     * c.h;
-                if (keep_h(h, eps)) visit(mixed2(ia, ib, c.a, c.b), h);
+                if (keep(h)) visit(mixed2(ia, ib, c.a, c.b), h);
             }
         }
     }
 }
 
-template <class Visit>
-inline void visit_external(
-    const Integral& ints,
-    const ScreenTable* screen,
-    DetRef ket,
-    ElementScratch& element,
-    double eps,
-    Visit&& visit
-) {
-    element.load(ints, ket);
-    visit_external_state(
-        ints,
-        screen,
-        ket,
-        element,
-        eps,
-        std::forward<Visit>(visit)
-    );
+inline void copy_det(std::vector<u64>& words, std::size_t idet, DetRef det) {
+    const std::size_t stride = det_size(det.nword());
+    u64* dst = words.data() + idet * stride;
+    std::copy(det.alpha().begin(), det.alpha().end(), dst);
+    std::copy(det.beta().begin(), det.beta().end(), dst + det.nword());
 }
 
-} // namespace libdet::rhf
+[[nodiscard]] inline Conns assemble_conn(
+    DetBatchView kets,
+    std::span<const std::vector<Conn>> items,
+    std::span<const double> diag,
+    std::span<const double> degree,
+    std::size_t n_streams
+) {
+    Conns out;
+    out.nword = kets.nword;
+    out.n_kets = kets.n_dets;
+    out.n_streams = n_streams;
+    out.diag.assign(diag.begin(), diag.end());
+    out.degree.assign(degree.begin(), degree.end());
+    out.ptr.resize(items.size() + 1u, 0);
 
-#include <libdet/rhf/sample.hpp>
+    std::size_t n_term = 0;
+    for (std::size_t row = 0; row < items.size(); ++row) {
+        out.ptr[row] = to_i64(n_term);
+        n_term += items[row].size();
+    }
+    out.ptr[items.size()] = to_i64(n_term);
+    out.h.resize(n_term);
 
-namespace libdet::rhf {
+    const std::size_t stride = det_size(kets.nword);
+    copy_batch(out.bra, kets);
+    out.bra.resize((kets.n_dets + n_term) * stride);
 
+#pragma omp parallel
+    {
+        DetScratch scratch(kets.nword);
 
+#pragma omp for schedule(guided)
+        for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
+            const std::size_t row = static_cast<std::size_t>(rr);
+            const DetRef ket = kets[row % kets.n_dets];
+            const std::vector<Conn>& item = items[row];
+
+            for (std::size_t k = 0; k < item.size(); ++k) {
+                const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
+                const Conn& term = item[k];
+                copy_det(out.bra, kets.n_dets + slot, apply(ket, term.excitation, scratch));
+                out.h[slot] = term.h;
+            }
+        }
+    }
+
+    return out;
+}
 
 inline std::vector<u64> Hamiltonian::expand(
     DetBatchView kets,
@@ -208,7 +235,7 @@ inline std::vector<u64> Hamiltonian::expand(
     check_dets(base, "expand(exclude)");
 
     const double scale_max = scale.empty() ? 1.0 : max_abs(scale);
-    auto screen_table_ptr = screen_table(screen_table_cutoff(eps, scale_max));
+    auto screen_ptr = screen_table(screen_cutoff(eps, scale_max));
     const DetIndex exclude_index(base);
 
     const int nthread = std::max(1, omp_get_max_threads());
@@ -233,7 +260,7 @@ inline std::vector<u64> Hamiltonian::expand(
 
             visit_external(
                 ints_,
-                screen_table_ptr.get(),
+                screen_ptr.get(),
                 kets[iket],
                 element,
                 h_eps,
@@ -248,14 +275,14 @@ inline std::vector<u64> Hamiltonian::expand(
 
     std::size_t total = 0;
     for (auto& part : local) {
-        sort_unique_dets(part, nword_);
+        sort_unique(part, nword_);
         total += part.size();
     }
 
     std::vector<u64> words;
     words.reserve(total);
     for (auto& part : local) words.insert(words.end(), part.begin(), part.end());
-    sort_unique_dets(words, nword_);
+    sort_unique(words, nword_);
     return words;
 }
 
@@ -275,7 +302,7 @@ inline Projection Hamiltonian::project(
     check_dets(base, "project(exclude)");
 
     const double scale_max = max_abs(scale);
-    auto screen_table_ptr = screen_table(screen_table_cutoff(eps, scale_max));
+    auto screen_ptr = screen_table(screen_cutoff(eps, scale_max));
     const DetIndex exclude_index(base);
 
     struct Bin {
@@ -343,7 +370,7 @@ inline Projection Hamiltonian::project(
 
             visit_external(
                 ints_,
-                screen_table_ptr.get(),
+                screen_ptr.get(),
                 ket,
                 element,
                 h_eps,
@@ -411,20 +438,17 @@ inline Projection Hamiltonian::project(
     return out;
 }
 
-inline std::shared_ptr<const Conns> Hamiltonian::make_conns(
+inline std::shared_ptr<const ConnSet> Hamiltonian::make_conns(
     DetRef ket,
     double eps,
-    const ScreenTable* screen_table_ptr,
+    const ScreenTable* screen_ptr,
     ElementScratch& element
 ) const {
-    auto conns = std::make_shared<Conns>();
+    auto conns = std::make_shared<ConnSet>();
     conns->cutoff = eps;
-    element.load(ints_, ket);
-    conns->diag = element.diag();
-
-    visit_external_state(
+    visit_external(
         ints_,
-        screen_table_ptr,
+        screen_ptr,
         ket,
         element,
         eps,
@@ -432,14 +456,15 @@ inline std::shared_ptr<const Conns> Hamiltonian::make_conns(
             conns->add(excitation, h);
         }
     );
+    conns->diag = element.diag();
     conns->finish();
     return conns;
 }
 
-inline std::vector<std::shared_ptr<const Conns>>
+inline std::vector<std::shared_ptr<const ConnSet>>
 Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
-    auto screen_table_ptr = screen_table(eps);
-    std::vector<std::shared_ptr<const Conns>> out(kets.n_dets);
+    auto screen_ptr = screen_table(eps);
+    std::vector<std::shared_ptr<const ConnSet>> out(kets.n_dets);
 
     if (eps <= 0.0) {
 #pragma omp parallel
@@ -448,7 +473,7 @@ Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
 #pragma omp for schedule(guided)
             for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
                 const std::size_t iket = static_cast<std::size_t>(ii);
-                out[iket] = make_conns(kets[iket], eps, screen_table_ptr.get(), element);
+                out[iket] = make_conns(kets[iket], eps, screen_ptr.get(), element);
             }
         }
         return out;
@@ -458,7 +483,7 @@ Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
     misses.reserve(kets.n_dets);
 
     {
-        std::lock_guard<std::mutex> lock(conn_cache_mutex_);
+        std::lock_guard<std::mutex> lock(conn_mutex_);
         for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
             out[iket] = conn_cache_.find(kets[iket], eps);
             if (!out[iket]) misses.push_back(iket);
@@ -473,18 +498,18 @@ Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(misses.size()); ++ii) {
             const std::size_t iket = misses[static_cast<std::size_t>(ii)];
-            out[iket] = make_conns(kets[iket], eps, screen_table_ptr.get(), element);
+            out[iket] = make_conns(kets[iket], eps, screen_ptr.get(), element);
         }
     }
 
     {
-        std::lock_guard<std::mutex> lock(conn_cache_mutex_);
+        std::lock_guard<std::mutex> lock(conn_mutex_);
         for (std::size_t iket : misses) conn_cache_.insert(kets[iket], out[iket]);
     }
     return out;
 }
 
-inline ::libdet::Conns Hamiltonian::conn(
+inline Conns Hamiltonian::conn(
     DetBatchView kets,
     double eps
 ) const {
@@ -492,27 +517,27 @@ inline ::libdet::Conns Hamiltonian::conn(
     check_eps(eps);
 
     const auto all = cached_conns(kets, eps);
-    std::vector<detail::Item> items(kets.n_dets);
+    std::vector<std::vector<Conn>> items(kets.n_dets);
     std::vector<double> diag(kets.n_dets, 0.0);
     std::vector<double> degree(kets.n_dets, 0.0);
 
 #pragma omp parallel for schedule(guided)
     for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
         const std::size_t iket = static_cast<std::size_t>(ii);
-        const Conns& ket_conn = *all[iket];
+        const ConnSet& ket_conn = *all[iket];
         const ConnSpan win = ket_conn.span(std::numeric_limits<double>::infinity(), eps);
-        detail::Item& item = items[iket];
-        item.term.reserve(win.end - win.begin);
+        std::vector<Conn>& item = items[iket];
+        item.reserve(win.end - win.begin);
         diag[iket] = ket_conn.diag;
         degree[iket] = win.degree;
 
         for (std::size_t k = win.begin; k < win.end; ++k) {
             const Conn& term = ket_conn.terms[k];
-            item.term.push_back(detail::Term{term.excitation, term.h});
+            item.push_back(term);
         }
     }
 
-    return detail::assemble_conn(kets, items, diag, degree, 1u);
+    return assemble_conn(kets, items, diag, degree, 1u);
 }
 
-} // namespace libdet::rhf
+} // namespace libdet

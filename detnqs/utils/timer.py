@@ -8,18 +8,18 @@ from time import perf_counter
 
 @dataclass(slots=True)
 class Timer:
-    """Accumulate named wall-clock blocks and work counts."""
+    """Accumulate named work counts and optional wall-clock times."""
 
-    enabled: bool = True
+    timing: bool = True
     times: dict[str, float] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
 
     @contextmanager
     def __call__(self, name: str, *, n: int = 0) -> Iterator[None]:
-        """Time one named block; call block_until_ready inside JAX blocks."""
+        """Measure one block; counts remain active when timing is disabled."""
         if n:
-            self.counts[name] = self.counts.get(name, 0) + int(n)
-        if not self.enabled:
+            self.counts[name] = self.counts.get(name, 0) + n
+        if not self.timing:
             yield
             return
         start = perf_counter()

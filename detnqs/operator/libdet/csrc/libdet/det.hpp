@@ -13,21 +13,14 @@
 #include <ankerl/unordered_dense.h>
 
 #include <libdet/bit.hpp>
-#include <libdet/hash.hpp>
 
-namespace libdet::rhf {
+namespace libdet {
 
 [[nodiscard]] inline constexpr std::size_t det_size(u32 nword) noexcept {
     return 2u * static_cast<std::size_t>(nword);
 }
 
-/*
- * A determinant is stored as two packed spin bit strings:
- *
- *   alpha words, then beta words.
- *
- * DetRef is a non-owning view. It does not manage lifetime.
- */
+// Non-owning view of packed alpha words followed by beta words.
 class DetRef {
 public:
     constexpr DetRef() noexcept = default;
@@ -292,14 +285,8 @@ struct DetHash {
     return h;
 }
 
-/*
- * Sort packed determinants lexicographically and remove duplicates.
- *
- * This is intentionally simple and deterministic. High-throughput connection
- * construction should avoid feeding this routine one determinant per
- * connection; it is best used on already compact determinant pools.
- */
-inline void sort_unique_dets(std::vector<u64>& packed, u32 nword) {
+// Deterministic lexicographic deduplication for compact pools.
+inline void sort_unique(std::vector<u64>& packed, u32 nword) {
     const std::size_t stride = det_size(nword);
     if (stride == 0 || packed.empty()) return;
 
@@ -340,12 +327,7 @@ inline void sort_unique_dets(std::vector<u64>& packed, u32 nword) {
     return bits::parity_between(prefix, i, a) ? -1.0 : 1.0;
 }
 
-/*
- * Fermionic sign for two same-spin replacements i,j -> a,b.
- *
- * The crossing correction accounts for the fact that two single-excitation
- * strings may interleave on the orbital line.
- */
+// Same-spin double sign includes crossing excitations.
 [[nodiscard]] inline double sign_double(
     std::span<const u64> occ,
     int i,
@@ -414,19 +396,6 @@ struct SpinDiff {
 };
 
 struct DetOcc {
-    explicit DetOcc(int norb = 0) {
-        resize(norb);
-    }
-
-    void resize(int norb) {
-        occ_a.clear();
-        occ_b.clear();
-        vir_a.clear();
-        vir_b.clear();
-        pref_a.assign(static_cast<std::size_t>(norb + 1), 0);
-        pref_b.assign(static_cast<std::size_t>(norb + 1), 0);
-    }
-
     std::vector<int> occ_a;
     std::vector<int> occ_b;
     std::vector<int> vir_a;
@@ -630,13 +599,12 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
 }
 
 
-// Read-only lookup for an existing determinant batch.
 class DetIndex {
 public:
     explicit DetIndex(DetBatchView dets) : dets_(dets) {
         index_.reserve(dets.n_dets);
         for (std::size_t i = 0; i < dets.n_dets; ++i) {
-            insert(static_cast<i32>(i));
+            index_[det_fingerprint(dets_[i])].push_back(static_cast<i32>(i));
         }
     }
 
@@ -656,20 +624,18 @@ public:
 private:
     DetBatchView dets_;
     ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
-
-    void insert(i32 idx) {
-        index_[det_fingerprint(dets_[static_cast<std::size_t>(idx)])].push_back(idx);
-    }
 };
 
-// Owning determinant pool with stable integer indices.
 class DetPool {
 public:
     explicit DetPool(u32 nword = 0) : nword_(nword) {}
 
     explicit DetPool(DetBatchView dets) : nword_(dets.nword) {
         copy_batch(words_, dets);
-        build_index();
+        index_.reserve(size());
+        for (std::size_t i = 0; i < size(); ++i) {
+            index_[det_fingerprint(get(i))].push_back(static_cast<i32>(i));
+        }
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -688,7 +654,7 @@ public:
         return words_;
     }
 
-    [[nodiscard]] i32 find_or_add(DetRef det) {
+    [[nodiscard]] i32 find_add(DetRef det) {
         const u64 fingerprint = det_fingerprint(det);
         const auto it = index_.find(fingerprint);
         if (it != index_.end()) {
@@ -709,24 +675,9 @@ private:
     u32 nword_ = 0;
     std::vector<u64> words_;
     ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
-
-    void build_index() {
-        index_.clear();
-        index_.reserve(size());
-        for (std::size_t i = 0; i < size(); ++i) {
-            index_[det_fingerprint(get(i))].push_back(static_cast<i32>(i));
-        }
-    }
 };
 
-/*
- * Determinant-driven search in a known determinant space.
- *
- * Given a bra and a known ket space, find connected kets in that space.
- *
- * Used by matrix, matvec, matmat, and project. This path does not generate
- * unrestricted external bras.
- */
+// Determinant-driven search within a known ket space.
 
 [[nodiscard]] inline u64 orb_fp(int p) noexcept {
     return mix64(0xd1b54a32d192ed03ULL ^ static_cast<u64>(p + 1));
@@ -759,7 +710,7 @@ public:
         return -1;
     }
 
-    [[nodiscard]] i32 find_or_add(std::span<const u64> words) {
+    [[nodiscard]] i32 find_add(std::span<const u64> words) {
         const i32 old = find(words);
         if (old >= 0) return old;
 
@@ -873,8 +824,8 @@ public:
 
         for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
             const DetRef ket = kets[iket];
-            alpha_id[iket] = alpha.find_or_add(ket.alpha());
-            beta_id[iket] = beta.find_or_add(ket.beta());
+            alpha_id[iket] = alpha.find_add(ket.alpha());
+            beta_id[iket] = beta.find_add(ket.beta());
         }
 
         build_mates();
@@ -896,7 +847,7 @@ public:
         return {beta_mate.data() + lo, hi - lo};
     }
 
-    [[nodiscard]] i32 find_with_alpha(i32 alpha_spin, i32 beta_spin) const noexcept {
+    [[nodiscard]] i32 find_alpha(i32 alpha_spin, i32 beta_spin) const noexcept {
         const auto mates = alpha_mates(alpha_spin);
 
         const auto it = std::lower_bound(
@@ -909,7 +860,7 @@ public:
         return it == mates.end() || it->spin != beta_spin ? -1 : it->ket;
     }
 
-    [[nodiscard]] i32 find_with_beta(i32 beta_spin, i32 alpha_spin) const noexcept {
+    [[nodiscard]] i32 find_beta(i32 beta_spin, i32 alpha_spin) const noexcept {
         const auto mates = beta_mates(beta_spin);
 
         const auto it = std::lower_bound(
@@ -1187,8 +1138,8 @@ inline void find_double(
     const i32 beta_id = kets.beta.find(det.beta());
     if (beta_id < 0) return -1;
 
-    return kets.find_with_alpha(alpha_id, beta_id);
+    return kets.find_alpha(alpha_id, beta_id);
 }
 
 
-} // namespace libdet::rhf
+} // namespace libdet

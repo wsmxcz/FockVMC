@@ -30,8 +30,6 @@ def segment_logsumexp(
     values = np.asarray(values)
     if not np.issubdtype(values.dtype, np.floating):
         values = values.astype(np.float64)
-    n = int(n)
-
     out = np.full(n, -np.inf, dtype=values.dtype)
     count = np.diff(ptr)
     active = np.flatnonzero(count > 0)

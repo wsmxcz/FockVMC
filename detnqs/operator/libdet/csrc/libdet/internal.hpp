@@ -4,23 +4,15 @@
 #include <cstddef>
 #include <span>
 #include <stdexcept>
-#include <utility>
 #include <vector>
 
-#include <libdet/rhf/element.hpp>
-#include <libdet/rhf/det.hpp>
+#include <libdet/integral.hpp>
 
 #include <omp.h>
 
-namespace libdet::rhf {
+namespace libdet {
 
-// Internal implementation header included by hamiltonian.hpp.
-template <class Emit>
-inline void emit_nonzero(double h, i32 iket, Emit&& emit) {
-    if (h != 0.0) emit(iket, h);
-}
-
-// Visit off-diagonal RHF terms from a bra into a known ket space.
+// Visit off-diagonal terms from a bra into a known ket space.
 template <class Emit>
 inline void visit_internal(
     const Integral& ints,
@@ -30,6 +22,9 @@ inline void visit_internal(
     VisitScratch& work,
     Emit&& emit
 ) {
+    const auto output = [&](double h, i32 iket) {
+        if (h != 0.0) emit(iket, h);
+    };
     work.ensure_seen(kets.alpha.size(), kets.beta.size());
 
     work.next_a();
@@ -81,20 +76,19 @@ inline void visit_internal(
 
     if (bra_beta >= 0) {
         for (const auto& ex : work.alpha_single) {
-            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
+            const i32 iket = kets.find_beta(bra_beta, ex.spin);
             if (iket >= 0) {
-                emit_nonzero(
+                output(
                     ex.sign * element.single_alpha(ex.i, ex.a),
-                    iket,
-                    emit
+                    iket
                 );
             }
         }
 
         for (const auto& ex : work.alpha_double) {
-            const i32 iket = kets.find_with_beta(bra_beta, ex.spin);
+            const i32 iket = kets.find_beta(bra_beta, ex.spin);
             if (iket >= 0) {
-                emit_nonzero(
+                output(
                     ex.sign
                         * double_same(
                             ints,
@@ -103,8 +97,7 @@ inline void visit_internal(
                             ex.a,
                             ex.b
                         ),
-                    iket,
-                    emit
+                    iket
                 );
             }
         }
@@ -112,20 +105,19 @@ inline void visit_internal(
 
     if (bra_alpha >= 0) {
         for (const auto& ex : work.beta_single) {
-            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
+            const i32 iket = kets.find_alpha(bra_alpha, ex.spin);
             if (iket >= 0) {
-                emit_nonzero(
+                output(
                     ex.sign * element.single_beta(ex.i, ex.a),
-                    iket,
-                    emit
+                    iket
                 );
             }
         }
 
         for (const auto& ex : work.beta_double) {
-            const i32 iket = kets.find_with_alpha(bra_alpha, ex.spin);
+            const i32 iket = kets.find_alpha(bra_alpha, ex.spin);
             if (iket >= 0) {
-                emit_nonzero(
+                output(
                     ex.sign
                         * double_same(
                             ints,
@@ -134,8 +126,7 @@ inline void visit_internal(
                             ex.a,
                             ex.b
                         ),
-                    iket,
-                    emit
+                    iket
                 );
             }
         }
@@ -168,7 +159,7 @@ inline void visit_internal(
                     ax.a,
                     work.cross_a[beta_id]
                 );
-            emit_nonzero(h, mate.ket, emit);
+            output(h, mate.ket);
         }
     }
 }
@@ -179,13 +170,13 @@ inline std::vector<double> Hamiltonian::diag(DetBatchView dets) const {
 
 #pragma omp parallel
     {
-        DetOcc occ(ints_.norb());
+        DetOcc occ;
 
 #pragma omp for schedule(guided)
         for (i64 ii = 0; ii < static_cast<i64>(dets.n_dets); ++ii) {
             const std::size_t idet = static_cast<std::size_t>(ii);
             fill_occ(dets[idet], ints_.norb(), occ);
-            out[idet] = ::libdet::rhf::diag(ints_, occ);
+            out[idet] = libdet::diag(ints_, occ);
         }
     }
 
@@ -205,7 +196,51 @@ inline Projection Hamiltonian::project(
     }
 
     check_eps(eps);
-    return project_internal(bras, kets, scale, eps);
+    const DetSpace ket_space(kets);
+
+    Projection out;
+    out.nword = nword_;
+    copy_batch(out.bra, bras);
+    out.hpsi.assign(bras.n_dets, 0.0);
+    out.diag.assign(bras.n_dets, 0.0);
+
+#pragma omp parallel
+    {
+        VisitScratch scratch;
+        ElementScratch element(ints_.norb());
+
+#pragma omp for schedule(guided)
+        for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
+            const std::size_t ibra = static_cast<std::size_t>(ii);
+            const DetRef bra = bras[ibra];
+            element.load(ints_, bra);
+            const double h_diag = element.diag();
+            double value = 0.0;
+            out.diag[ibra] = h_diag;
+
+            const i32 diag_idx = find_det(ket_space, bra);
+            if (diag_idx >= 0) {
+                const double term =
+                    h_diag * scale[static_cast<std::size_t>(diag_idx)];
+                if (std::abs(term) >= eps) value += term;
+            }
+
+            visit_internal(
+                ints_,
+                ket_space,
+                bra,
+                element,
+                scratch,
+                [&](i32 iket, double h) {
+                    const double term =
+                        h * scale[static_cast<std::size_t>(iket)];
+                    if (std::abs(term) >= eps) value += term;
+                }
+            );
+            out.hpsi[ibra] = value;
+        }
+    }
+    return out;
 }
 
 inline Matrix Hamiltonian::matrix(
@@ -234,14 +269,14 @@ inline Matrix Hamiltonian::matrix(
             const std::size_t ibra = static_cast<std::size_t>(ii);
             const DetRef bra = bras[ibra];
             element.load(ints_, bra);
-            const double h_bra_bra = element.diag();
+            const double h_diag = element.diag();
             std::size_t nnz =
-                find_det(ket_space, bra) >= 0 && h_bra_bra != 0.0 ? 1u : 0u;
+                find_det(ket_space, bra) >= 0 && h_diag != 0.0 ? 1u : 0u;
 
             visit_internal(ints_, ket_space, bra, element, scratch, [&](i32, double) {
                 ++nnz;
             });
-            hdiag[ibra] = h_bra_bra;
+            hdiag[ibra] = h_diag;
             out.indptr[ibra + 1u] = to_i64(nnz);
         }
 
@@ -388,57 +423,4 @@ inline std::vector<double> Hamiltonian::matmat(
     return out;
 }
 
-inline Projection Hamiltonian::project_internal(
-    DetBatchView bras,
-    DetBatchView kets,
-    std::span<const double> scale,
-    double eps
-) const {
-    const DetSpace ket_space(kets);
-
-    Projection out;
-    out.nword = nword_;
-    copy_batch(out.bra, bras);
-    out.hpsi.assign(bras.n_dets, 0.0);
-    out.diag.assign(bras.n_dets, 0.0);
-
-#pragma omp parallel
-    {
-        VisitScratch scratch;
-        ElementScratch element(ints_.norb());
-
-#pragma omp for schedule(guided)
-        for (i64 ii = 0; ii < static_cast<i64>(bras.n_dets); ++ii) {
-            const std::size_t ibra = static_cast<std::size_t>(ii);
-            const DetRef bra = bras[ibra];
-            element.load(ints_, bra);
-            const double h_bra_bra = element.diag();
-            double value = 0.0;
-            out.diag[ibra] = h_bra_bra;
-
-            const i32 diag_idx = find_det(ket_space, bra);
-            if (diag_idx >= 0) {
-                const double term =
-                    h_bra_bra * scale[static_cast<std::size_t>(diag_idx)];
-                if (std::abs(term) >= eps) value += term;
-            }
-
-            visit_internal(
-                ints_,
-                ket_space,
-                bra,
-                element,
-                scratch,
-                [&](i32 iket, double h) {
-                    const double term =
-                        h * scale[static_cast<std::size_t>(iket)];
-                    if (std::abs(term) >= eps) value += term;
-                }
-            );
-            out.hpsi[ibra] = value;
-        }
-    }
-    return out;
-}
-
-} // namespace libdet::rhf
+} // namespace libdet

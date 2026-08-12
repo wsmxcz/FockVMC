@@ -15,11 +15,7 @@ from ..utils import Timer, batch, precision, tree
 
 @dataclass(frozen=True, slots=True)
 class ExactState:
-    """Exact variational state on a full finite sector.
-
-    This state is a deterministic baseline. It evaluates the full projected
-    Hamiltonian exactly and does not support instantaneous local operators.
-    """
+    """Exact variational state on a full finite sector."""
 
     model: Model
     params: Any
@@ -41,64 +37,47 @@ class ExactState:
 
     @property
     def n_x(self) -> int:
-        return int(self.x.shape[0])
-
-    def expect(
-        self,
-        *,
-        obs: Any | None = None,
-        profile: bool = False,
-        data: bool = False,
-    ):
-        """Evaluate exact energy statistics on the complete sector."""
-        result = self._run(grad=False, geometry=False, profile=profile, data=data)
-        if data:
-            new_state, _, _, out, _, sample = result
-            return new_state, out, sample
-
-        new_state, _, _, out, _ = result
-        return new_state, out
-
-    def expect_and_grad(
-        self,
-        *,
-        geometry: bool = False,
-        obs: Any | None = None,
-        profile: bool = False,
-    ):
-        """Evaluate exact energy, gradient, and optional SR geometry."""
-        return self._run(grad=True, geometry=geometry, profile=profile, data=False)
+        return self.x.shape[0]
 
     def replace(self, **updates: Any) -> Self:
         return replace(self, **updates)
 
-    def _run(
+    def state_dict(self) -> dict[str, Any]:
+        """Return dynamic state for checkpointing."""
+        return {"params": self.params}
+
+    def load_state(self, data: dict[str, Any]) -> Self:
+        """Restore dynamic state from a checkpoint."""
+        return replace(self, params=data["params"])
+
+    def expect(
         self,
         *,
-        grad: bool,
-        geometry: bool,
-        profile: bool,
-        data: bool,
+        grad: bool = False,
+        geometry: bool = False,
+        obs: Any | None = None,
+        timer: Timer | None = None,
+        data: bool = False,
     ):
-        timer = Timer(enabled=profile)
+        """Evaluate the state and optional gradient or sample data."""
+        timer = Timer(timing=False) if timer is None else timer
         rdtype = precision.real("calc", host=True)
 
         with timer("forward", n=self.n_x):
             logpsi_jax = batch.apply(self.model.logpsi, self.params, self.x)
-            jax.block_until_ready(logpsi_jax)
             logpsi = tree.host(logpsi_jax)
 
         with timer("reduce"):
             psi = precision.cast(
-                np.asarray(to_psi(logpsi)).reshape(-1),
+                to_psi(logpsi),
                 "calc",
                 host=True,
-            )
+            ).reshape(-1)
             hpsi = precision.cast(
-                np.asarray(self.hmat.dot(psi)).reshape(-1),
+                self.hmat.dot(psi),
                 "calc",
                 host=True,
-            )
+            ).reshape(-1)
 
             norm = max(float(np.vdot(psi, psi).real), precision.tiny("calc"))
             energy = float((np.vdot(psi, hpsi) / norm).real)
@@ -110,7 +89,7 @@ class ExactState:
                 host=True,
             )
 
-            out = {
+            rec = {
                 "energy": energy,
                 "eloc_var": float((np.vdot(residual, residual) / norm).real),
                 "n_x": self.n_x,
@@ -140,7 +119,6 @@ class ExactState:
                     self.x,
                     precision.device(cot, "model", "real"),
                 )
-                jax.block_until_ready(gradient)
 
                 if geometry:
                     sqrt_w = np.sqrt(weight)
@@ -159,8 +137,13 @@ class ExactState:
                         ),
                     )
 
-        out.update(timer.stats())
+                if timer.timing:
+                    jax.block_until_ready(gradient)
+
+        rec.update(timer.stats())
 
         if data:
-            return self, energy, gradient, out, geom, sample
-        return self, energy, gradient, out, geom
+            return self, rec, sample
+        if grad:
+            return self, rec, gradient, geom
+        return self, rec

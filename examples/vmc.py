@@ -46,8 +46,8 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=128,
         n_chains=128,
-        burnin_steps=0,
-        discard_steps=0,
+        burn_in=0,
+        discard=0,
         proposal="ham",
         beta=0.5,
         alpha=None,
@@ -68,7 +68,7 @@ def main() -> None:
         key=jax.random.key(seed),
         eps1=0.0,
         eps2=0.0,
-        eloc_sample=0,
+        n_eloc=0,
     )
 
     optimizer = optax.chain(
@@ -78,11 +78,10 @@ def main() -> None:
     vmc = VMC.init(state, optimizer)
     obs = {"s2": S2(sector)}
     log = Logger(file=f"{name}.jsonl", every=10)
-
     vmc.run(
         5000,
         obs=obs,
-        logger=log,
+        log=log,
         profile=True,
         checkpoint=f"{name}_{{step:05d}}.npz",
         checkpoint_every=500,

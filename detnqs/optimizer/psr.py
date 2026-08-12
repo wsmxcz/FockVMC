@@ -7,26 +7,13 @@ import jax.numpy as jnp
 import optax
 from jax.flatten_util import ravel_pytree
 
-from ..utils import batch
-from ..utils import math
-from ..utils import precision
-from ..utils import tree
+from ..utils import batch, math, precision, tree
 from . import linalg
 from .base import Geometry
 
 
 class PSRState(NamedTuple):
-    """State for predictive sample-space SR.
-
-    The stored direction is the previous unscaled SR direction. PSR solves
-
-        p = mu direction_prev,
-        r = b - O p,
-        (O O^dagger + shift I) a = r,
-        direction = p + O^dagger a.
-
-    A downstream Optax transform supplies the learning rate.
-    """
+    """Previous unscaled PSR direction."""
 
     direction: Any
 
@@ -133,7 +120,6 @@ def _step(
     K = precision.cast(K, "sr")
     rhs = precision.cast(b_flat, "sr").astype(K.dtype)
 
-    # Subtract the predicted tangent response.
     _, Jp = batch.jvp(coord, theta, pred, x)
 
     def center(val: jax.Array) -> jax.Array:
@@ -147,9 +133,7 @@ def _step(
 
     a = linalg.solve_dense(K, rhs, shift)
 
-    # Apply O^dagger directly. A complex parameterization gives a complex
-    # sample-space solution even though coord and b are real; routing that
-    # solution through a real-output VJP would discard its imaginary part.
+    # A real-output VJP would discard the complex sample-space correction.
     corr = jax.tree.map(jnp.zeros_like, theta)
     for block, put in tree.blocks(theta, batch.config["param_chunk"]):
         O = tangent_block(block, put)

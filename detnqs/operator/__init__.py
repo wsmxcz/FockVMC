@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from .fermion import annihilate, create, number
 from .hamiltonian import Hamiltonian
 from .rdm import density_correlation, rdm1, rdm2

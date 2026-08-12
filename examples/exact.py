@@ -56,14 +56,14 @@ def main() -> None:
             "energy",
             "eloc_var",
             "ess_frac",
-            "essu_frac",
+            "unique_eff",
             "w_max",
             "acceptance_rate",
             "unique_frac",
             "n_forward",
         ),
     )
-    vmc.run(100, logger=log)
+    vmc.run(100, log=log)
 
 
 if __name__ == "__main__":

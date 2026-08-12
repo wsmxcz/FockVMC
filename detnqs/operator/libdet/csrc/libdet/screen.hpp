@@ -5,12 +5,11 @@
 #include <cstddef>
 #include <span>
 #include <stdexcept>
-#include <utility>
 #include <vector>
 
-#include <libdet/rhf/element.hpp>
+#include <libdet/integral.hpp>
 
-namespace libdet::rhf {
+namespace libdet {
 
 struct ScreenPair {
     int a = 0;
@@ -61,7 +60,10 @@ public:
         int j,
         double eps
     ) const noexcept {
-        return prefix(same_pairs(i, j), eps);
+        const std::size_t k = Integral::pair_index(i, j);
+        const std::size_t begin = same_off_[k];
+        const std::size_t end = same_off_[k + 1u];
+        return prefix({same_data_.data() + begin, end - begin}, eps);
     }
 
     [[nodiscard]] std::span<const ScreenPair> mixed_spin(
@@ -123,30 +125,12 @@ private:
     std::vector<ScreenPair> mixed_data_;
     std::vector<double> mixed_prefix_;
 
-    [[nodiscard]] std::span<const ScreenPair> same_pairs(
-        int i,
-        int j
-    ) const noexcept {
-        const std::size_t k = Integral::pair_index(i, j);
-        const std::size_t begin = same_off_[k];
-        const std::size_t end = same_off_[k + 1u];
-        return {same_data_.data() + begin, end - begin};
-    }
-
-    [[nodiscard]] bool keep(double h) const noexcept {
-        return std::abs(h) >= base_eps_;
-    }
-
-    [[nodiscard]] static double abs_h(const ScreenPair& pair) noexcept {
-        return std::abs(pair.h);
-    }
-
     [[nodiscard]] static bool before(
         const ScreenPair& lhs,
         const ScreenPair& rhs
     ) noexcept {
-        const double a = abs_h(lhs);
-        const double b = abs_h(rhs);
+        const double a = std::abs(lhs.h);
+        const double b = std::abs(rhs.h);
         if (a != b) return a > b;
         if (lhs.a != rhs.a) return lhs.a < rhs.a;
         if (lhs.b != rhs.b) return lhs.b < rhs.b;
@@ -162,7 +146,7 @@ private:
         std::size_t hi = pairs.size();
         while (lo < hi) {
             const std::size_t mid = lo + (hi - lo) / 2u;
-            if (abs_h(pairs[mid]) < eps) hi = mid;
+            if (std::abs(pairs[mid].h) < eps) hi = mid;
             else lo = mid + 1u;
         }
         return lo;
@@ -210,7 +194,7 @@ private:
                 for (int a = 0; a < norb_; ++a) {
                     for (int b = a + 1; b < norb_; ++b) {
                         const double h = double_same(ints, lo, hi, a, b);
-                        if (keep(h)) pairs.push_back({a, b, h});
+                        if (std::abs(h) >= base_eps_) pairs.push_back({a, b, h});
                     }
                 }
                 std::sort(pairs.begin(), pairs.end(), before);
@@ -246,7 +230,7 @@ private:
             for (int a = 0; a < norb_; ++a) {
                 for (int b = 0; b < norb_; ++b) {
                     const double h = double_mixed(ints, ia, ib, a, b);
-                    if (keep(h)) pairs.push_back({a, b, h});
+                    if (std::abs(h) >= base_eps_) pairs.push_back({a, b, h});
                 }
             }
             std::sort(pairs.begin(), pairs.end(), before);
@@ -271,4 +255,4 @@ private:
     }
 };
 
-} // namespace libdet::rhf
+} // namespace libdet

@@ -5,12 +5,7 @@ from numpy.typing import ArrayLike
 
 
 def slater_reference(alpha: ArrayLike, beta: ArrayLike) -> np.ndarray:
-    """Assemble occupied alpha/beta orbitals into a Slater reference.
-
-    The orbitals are expressed in the Hamiltonian basis with shapes
-    ``(norb, n_alpha)`` and ``(norb, n_beta)``. The result has shape
-    ``(n_alpha + n_beta, 2 * norb)``.
-    """
+    """Assemble occupied alpha/beta orbitals into a Slater reference."""
     alpha = np.asarray(alpha, dtype=np.float64, order="C")
     beta = np.asarray(beta, dtype=np.float64, order="C")
 

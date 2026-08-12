@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -8,8 +8,7 @@ from typing import Any, Self
 import jax
 import optax
 
-from .utils import Timer, checkpoint
-from .utils.logger import Logger
+from .utils import Timer, checkpoint as ckpt
 
 
 @dataclass(slots=True)
@@ -35,7 +34,7 @@ class VMC:
             state=state,
             optimizer=optimizer,
             opt_state=optimizer.init(state.params),
-            geometry=bool(geometry),
+            geometry=geometry,
         )
 
     def step(
@@ -45,34 +44,31 @@ class VMC:
         profile: bool = False,
     ) -> dict[str, float | int]:
         """Apply one update and return the pre-update scalar record."""
-        timer = Timer(enabled=profile)
-        with timer("total"):
-            state, _, grad, stats, geometry = self.state.expect_and_grad(
+        timer = Timer(timing=profile)
+        with timer("step"):
+            state, rec, grad, geom = self.state.expect(
+                grad=True,
                 geometry=self.geometry,
                 obs=obs,
-                profile=profile,
+                timer=timer,
             )
-            jax.block_until_ready(grad)
 
             with timer("optimizer"):
                 updates, self.opt_state = self.optimizer.update(
                     grad,
                     self.opt_state,
                     state.params,
-                    geometry=geometry,
+                    geometry=geom,
                 )
                 params = optax.apply_updates(state.params, updates)
-                jax.block_until_ready(params)
+                if timer.timing:
+                    jax.block_until_ready(params)
 
             self.state = state.replace(params=params)
 
-        rec = dict(stats)
-        rec["step"] = self.step_count + 1
-
-        if profile:
-            rec.update(timer.stats())
-
         self.step_count += 1
+        rec.update(timer.stats())
+        rec["step"] = self.step_count
         return rec
 
     def run(
@@ -80,19 +76,17 @@ class VMC:
         steps: int,
         *,
         obs: Mapping[str, Any] | None = None,
-        logger: Logger | None = None,
+        log: Callable[[Mapping[str, float | int]], None] | None = None,
         profile: bool = False,
         checkpoint: str | Path | None = None,
         checkpoint_every: int = 0,
     ) -> dict[str, float | int]:
         rec: dict[str, float | int] = {}
-        checkpoint_every = int(checkpoint_every)
-
-        for _ in range(int(steps)):
+        for _ in range(steps):
             rec = self.step(obs=obs, profile=profile)
 
-            if logger is not None:
-                logger.add(rec)
+            if log is not None:
+                log(rec)
 
             if (
                 checkpoint is not None
@@ -104,18 +98,18 @@ class VMC:
         return rec
 
     def save(self, file: str | Path) -> Path:
-        return checkpoint.save(
+        return ckpt.save(
             file,
             {
                 "step": self.step_count,
-                "state": self.state._checkpoint(),
+                "state": self.state.state_dict(),
                 "opt_state": self.opt_state,
             },
         )
 
     def load(self, file: str | Path) -> Self:
-        data = checkpoint.load(file)
-        self.state = self.state._restore(data["state"])
+        data = ckpt.load(file)
+        self.state = self.state.load_state(data["state"])
         self.opt_state = data["opt_state"]
         self.step_count = int(data["step"])
         return self

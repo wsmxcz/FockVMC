@@ -94,7 +94,6 @@ def spin_correlation(state: Any, x: Any, weight: Any) -> np.ndarray:
     out = np.zeros((norb, norb), dtype=np.complex128)
 
     ket_logpsi = batch.apply(state.model.logpsi, state.params, x)
-    jax.block_until_ready(ket_logpsi)
     ket_logpsi = tree.host(ket_logpsi)
 
     orbital = np.arange(norb, dtype=np.int64)
@@ -150,7 +149,6 @@ def spin_correlation(state: Any, x: Any, weight: Any) -> np.ndarray:
             raw,
             in_axes=(None, 0),
         )
-        jax.block_until_ready(bra_logpsi)
         bra_logpsi = tree.host(bra_logpsi)
         ratio = np.asarray(
             to_ratio(

@@ -29,7 +29,7 @@ def solve_matvec(
     shift: jax.Array,
     *,
     x0: jax.Array | None = None,
-    maxiter: int = 64,
+    max_iter: int = 64,
 ) -> jax.Array:
     """Solve `(A + shift I) x = rhs` by conjugate gradients."""
     rhs = jnp.asarray(rhs)
@@ -46,6 +46,6 @@ def solve_matvec(
         x0=x0,
         tol=tol,
         atol=0.0,
-        maxiter=int(maxiter),
+        maxiter=max_iter,
     )
     return sol

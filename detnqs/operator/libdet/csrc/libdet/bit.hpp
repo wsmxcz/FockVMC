@@ -37,7 +37,7 @@ using i64 = std::int64_t;
     return p;
 }
 
-[[nodiscard]] inline constexpr std::size_t word_pair_size(u32 nword) noexcept {
+[[nodiscard]] inline constexpr std::size_t state_size(u32 nword) noexcept {
     return 2u * static_cast<std::size_t>(nword);
 }
 
@@ -90,7 +90,7 @@ inline void clear(std::span<u64> x, int p) noexcept {
     return out;
 }
 
-[[nodiscard]] inline int popcount_between_word(
+[[nodiscard]] inline int count_word(
     u64 occ,
     int i,
     int a
@@ -114,7 +114,7 @@ inline void clear(std::span<u64> x, int p) noexcept {
     int i,
     int a
 ) noexcept {
-    if (occ.size() == 1) return popcount_between_word(occ[0], i, a);
+    if (occ.size() == 1) return count_word(occ[0], i, a);
     if (i == a) return 0;
 
     const int lo = std::min(i, a) + 1;
@@ -202,7 +202,7 @@ inline void fill_prefix(
 }
 
 template <class F>
-inline void each_set_word(u64 word, F&& visit) {
+inline void each_word(u64 word, F&& visit) {
     while (word != 0u) {
         const unsigned bit = std::countr_zero(word);
         visit(static_cast<int>(bit));
@@ -213,7 +213,7 @@ inline void each_set_word(u64 word, F&& visit) {
 template <class F>
 inline void each_set(std::span<const u64> words, F&& visit) {
     if (words.size() == 1) {
-        each_set_word(words[0], std::forward<F>(visit));
+        each_word(words[0], std::forward<F>(visit));
         return;
     }
 
@@ -286,5 +286,34 @@ inline void clear_list(
 }
 
 } // namespace bits
+
+[[nodiscard]] inline u64 mix64(u64 x) noexcept {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+[[nodiscard]] inline u64 hash_words(u64 seed, std::span<const u64> words) noexcept {
+    u64 h = mix64(seed ^ (0x9e3779b97f4a7c15ULL + static_cast<u64>(words.size())));
+    for (u64 x : words) h = mix64(h ^ mix64(x + 0x517cc1b727220a95ULL));
+    return h;
+}
+
+[[nodiscard]] inline u64 hash_pair(
+    u64 seed,
+    std::span<const u64> a,
+    std::span<const u64> b
+) noexcept {
+    u64 h = hash_words(seed ^ 0xa0761d6478bd642fULL, a);
+    return hash_words(h ^ 0xe7037ed1a0b428dbULL, b);
+}
+
+[[nodiscard]] inline std::size_t hash_size(std::size_t n) noexcept {
+    std::size_t out = 1;
+    const std::size_t target = n == 0 ? 1 : 2 * n;
+    while (out < target) out <<= 1u;
+    return out;
+}
 
 } // namespace libdet

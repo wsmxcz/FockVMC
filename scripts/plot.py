@@ -21,13 +21,11 @@ def main() -> None:
     runs = {
         "32768": next(Path.cwd().rglob("fe2s2.jsonl")),
         "8192": next(Path.cwd().rglob("fe2s2_eloc8192.jsonl")),
-        # "1024": next(Path.cwd().rglob("fe2s2_eps1e-3.jsonl")),
         "1e-4": next(Path.cwd().rglob("fe2s2_eps1e-4.jsonl")),
         "1e-5": next(Path.cwd().rglob("fe2s2_eps1e-5.jsonl")),
         "1e-6": next(Path.cwd().rglob("fe2s2_eps1e-6.jsonl")),
     }
     benchmark = -116.6056091  # Fe2S2
-    # benchmark = -327.248858  # Fe4S4
     figure, axes = plt.subplots(
         2,
         3,
@@ -49,7 +47,7 @@ def main() -> None:
             "acceptance_rate",
             "alpha",
             "s2",
-            "time_total",
+            "time_step",
         )
         data = {
             key: np.asarray([row.get(key, np.nan) for row in rows], dtype=float)
@@ -71,7 +69,6 @@ def main() -> None:
             print(f"  final energy: {finite[-1]:.6f}")
             print(f"  final error : {1e3 * abs(finite[-1] - benchmark):.3f} mEh")
 
-        # Energy
         axes[0].plot(step, energy, color=color, lw=0.6, alpha=0.18)
         axes[0].plot(
             step,
@@ -81,11 +78,9 @@ def main() -> None:
             label=label,
         )
 
-        # Energy error
         axes[1].plot(step, error, color=color, lw=0.6, alpha=0.18)
         axes[1].plot(step, error_smooth, color=color, lw=1.6)
 
-        # Local-energy variance
         axes[2].plot(
             step,
             data["eloc_var"],
@@ -100,7 +95,6 @@ def main() -> None:
             lw=1.6,
         )
 
-        # Acceptance and tempering
         axes[3].plot(
             step,
             smooth(data["acceptance_rate"]),
@@ -115,7 +109,6 @@ def main() -> None:
             ls="--",
         )
 
-        # Spin
         axes[4].plot(step, data["s2"], color=color, lw=0.6, alpha=0.18)
         axes[4].plot(
             step,
@@ -124,10 +117,9 @@ def main() -> None:
             lw=1.6,
         )
 
-        # Wall time
         axes[5].plot(
             step,
-            np.nancumsum(data["time_total"]) / 60.0,
+            np.nancumsum(data["time_step"]) / 60.0,
             color=color,
             lw=1.6,
         )

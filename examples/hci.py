@@ -145,7 +145,6 @@ def _select(
     )
 
     for it in range(max_cycle):
-        # Select new external configurations above the cutoff.
         screen_time = time.perf_counter()
         candidates = hamiltonian.expand(basis, eps, scale=coeff, exclude=basis)
         screen_time = time.perf_counter() - screen_time
@@ -170,7 +169,7 @@ def _select(
             mode=mode,
         )
 
-        log.add(
+        log(
             {
                 "step": it + 1,
                 "n_det": len(basis),

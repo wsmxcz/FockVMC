@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -21,7 +20,7 @@ class Logger:
         append: bool = False,
     ) -> None:
         self.file = None if file is None else Path(file)
-        self.every = max(1, int(every))
+        self.every = max(1, every)
         self.keys = (
             tuple(keys)
             if keys is not None
@@ -30,11 +29,12 @@ class Logger:
                 "energy",
                 "eloc_var",
                 "ess_frac",
+                "unique_eff",
                 "acceptance_rate",
                 "alpha",
             )
         )
-        self.verbose = bool(verbose)
+        self.verbose = verbose
 
         self._cols: tuple[str, ...] | None = None
 
@@ -43,27 +43,25 @@ class Logger:
             if not append:
                 self.file.write_text("", encoding="utf-8")
 
-    def add(self, record: Mapping[str, Any]) -> None:
+    def __call__(self, record: Mapping[str, float | int]) -> None:
         """Append one step record."""
-        rec = {key: np.asarray(value).item() for key, value in record.items()}
-        step = int(rec["step"])
+        step = record["step"]
 
         if self.file is not None:
-            with self.file.open("a", encoding="utf-8") as fh:
-                fh.write(
+            with self.file.open("a", encoding="utf-8") as stream:
+                stream.write(
                     json.dumps(
-                        rec,
+                        record,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
                     + "\n"
                 )
 
-        if self.verbose and step % self.every == 0:
-            self._print(rec)
+        if not self.verbose or step % self.every:
+            return
 
-    def _print(self, rec: Mapping[str, Any]) -> None:
-        cols = tuple(key for key in self.keys if key in rec)
+        cols = tuple(key for key in self.keys if key in record)
         if not cols:
             return
 
@@ -74,9 +72,9 @@ class Logger:
             elif key.startswith("time_"):
                 width = 9
             elif (
-                key in {"step", "outer", "acceptance_rate"}
+                key in {"step", "outer"}
                 or key.startswith("n_")
-                or key.endswith("_frac")
+                or key.endswith(("_frac", "_rate", "_eff"))
             ):
                 width = 8
             else:
@@ -85,27 +83,34 @@ class Logger:
 
         if self._cols != cols:
             self._cols = cols
-            print("  ".join(k.rjust(w) for k, w in zip(cols, widths, strict=True)))
+            header = (
+                key.rjust(width)
+                for key, width in zip(cols, widths, strict=True)
+            )
+            print("  ".join(header))
             print("  ".join("-" * w for w in widths))
 
-        cells = tuple(self._format(key, rec[key]) for key in cols)
-        print("  ".join(v.rjust(w) for v, w in zip(cells, widths, strict=True)))
+        cells = []
+        for key in cols:
+            x = float(record[key])
+            if not np.isfinite(x):
+                value = str(x)
+            elif key in {"step", "outer"} or key.startswith("n_"):
+                value = str(int(round(x)))
+            elif key.startswith("time_"):
+                value = f"{x:.3f}s"
+            elif key.endswith(("_frac", "_rate", "_eff")):
+                value = f"{100.0 * x:.3f}%"
+            elif key == "eloc_var" or key == "w_max" or key.endswith("_var"):
+                value = f"{x:.3e}"
+            elif key in {"alpha", "beta"}:
+                value = f"{x:.3f}"
+            else:
+                value = f"{x:.6f}"
+            cells.append(value)
 
-    @staticmethod
-    def _format(key: str, value: Any) -> str:
-        x = float(value)
-
-        if not np.isfinite(x):
-            return str(x)
-        if key in {"step", "outer"} or key.startswith("n_"):
-            return str(int(round(x)))
-        if key.startswith("time_"):
-            return f"{x:.3f}s"
-        if key == "acceptance_rate" or key.endswith("_frac"):
-            return f"{100.0 * x:.3f}%"
-        if key == "eloc_var" or key == "w_max" or key.endswith("_var"):
-            return f"{x:.3e}"
-        if key in {"alpha", "beta"}:
-            return f"{x:.3f}"
-
-        return f"{x:.6f}"
+        row = (
+            cell.rjust(width)
+            for cell, width in zip(cells, widths, strict=True)
+        )
+        print("  ".join(row))

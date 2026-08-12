@@ -31,7 +31,7 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=128,
         n_chains=128,
-        burnin_steps=4,
+        burn_in=4,
         proposal="ham",
         beta=0.5,
         alpha=None,
@@ -44,7 +44,7 @@ def main() -> None:
         key=jax.random.key(0),
         eps1=0.0,
         eps2=0.0,
-        eloc_sample=0,
+        n_eloc=0,
     )
 
     exact = ExactState.init(

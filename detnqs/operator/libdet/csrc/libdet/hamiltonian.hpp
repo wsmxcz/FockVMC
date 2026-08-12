@@ -11,12 +11,58 @@
 #include <string>
 #include <vector>
 
-#include <libdet/rhf/cache.hpp>
-#include <libdet/rhf/screen.hpp>
-#include <libdet/results.hpp>
+#include <libdet/cache.hpp>
+#include <libdet/screen.hpp>
 
-namespace libdet::rhf {
+namespace libdet {
 
+struct Matrix {
+    std::size_t n_bra = 0;
+    std::size_t n_ket = 0;
+    std::vector<i64> indptr;
+    std::vector<i32> indices;
+    std::vector<double> data;
+};
+
+struct Conns {
+    // bra = [kets, connection records]; record r is bra[n_kets + r].
+    u32 nword = 0;
+    std::size_t n_kets = 0;
+    std::size_t n_streams = 1;
+    std::vector<u64> bra;
+    std::vector<double> diag;
+    std::vector<i64> ptr;
+    std::vector<double> h;
+    std::vector<double> degree;
+};
+
+struct LocalConn {
+    // bra = [kets, strong records, weak records].
+    u32 nword = 0;
+    std::size_t n_kets = 0;
+    std::vector<u64> bra;
+    std::vector<double> diag;
+    std::vector<i64> strong_ptr;
+    std::vector<double> strong_h;
+    std::vector<double> strong_degree;
+    std::vector<i64> weak_ptr;
+    std::vector<double> weak_coeff;
+};
+
+struct Projection {
+    u32 nword = 0;
+    std::vector<u64> bra;
+    std::vector<double> hpsi;
+    std::vector<double> diag;
+};
+
+struct Projections {
+    u32 nword = 0;
+    std::size_t n_streams = 0;
+    std::vector<u64> bra;
+    std::vector<double> hpsi;
+    std::vector<double> diag;
+};
 
 class Hamiltonian {
 public:
@@ -52,12 +98,12 @@ public:
         const DetBatchView* exclude
     ) const;
 
-    [[nodiscard]] ::libdet::Conns conn(
+    [[nodiscard]] Conns conn(
         DetBatchView kets,
         double eps = 0.0
     ) const;
 
-    [[nodiscard]] ::libdet::LocalConn local_conn(
+    [[nodiscard]] LocalConn local_conn(
         DetBatchView kets,
         double eps1,
         double eps2,
@@ -65,7 +111,7 @@ public:
         u64 seed = 0
     ) const;
 
-    [[nodiscard]] ::libdet::Conns sample_conn(
+    [[nodiscard]] Conns sample_conn(
         DetBatchView kets,
         std::span<const i64> counts,
         std::size_t n_streams,
@@ -106,19 +152,18 @@ private:
 
     mutable std::mutex screen_mutex_;
     mutable std::shared_ptr<const ScreenTable> screen_table_;
-    mutable std::mutex conn_cache_mutex_;
+    mutable std::mutex conn_mutex_;
     mutable ConnCache conn_cache_;
-    mutable std::mutex space_cache_mutex_;
+    mutable std::mutex space_mutex_;
     mutable SpaceCache space_cache_;
 
-    void check_one(DetRef det, const char* where) const;
     void check_dets(DetBatchView dets, const char* where) const;
     static void check_eps(double eps);
-    static void check_sample_eps(double eps1, double eps2);
+    static void check_window(double eps1, double eps2);
 
     [[nodiscard]] std::shared_ptr<const ScreenTable> screen_table(double cutoff) const;
     [[nodiscard]] static double max_abs(std::span<const double> values) noexcept;
-    [[nodiscard]] static double screen_table_cutoff(
+    [[nodiscard]] static double screen_cutoff(
         double eps,
         double max_scale
     ) noexcept;
@@ -126,32 +171,27 @@ private:
         DetBatchView kets
     ) const;
 
-    [[nodiscard]] std::shared_ptr<const Conns> make_conns(
+    [[nodiscard]] std::shared_ptr<const ConnSet> make_conns(
         DetRef ket,
         double eps,
         const ScreenTable* screen,
         ElementScratch& element
     ) const;
 
-    [[nodiscard]] std::vector<std::shared_ptr<const Conns>> cached_conns(
+    [[nodiscard]] std::vector<std::shared_ptr<const ConnSet>> cached_conns(
         DetBatchView kets,
         double eps
     ) const;
 
-    [[nodiscard]] Projection project_internal(
-        DetBatchView bras,
-        DetBatchView kets,
-        std::span<const double> scale,
-        double eps
-    ) const;
 };
 
-} // namespace libdet::rhf
+} // namespace libdet
 
-#include <libdet/rhf/external.hpp>
-#include <libdet/rhf/internal.hpp>
+#include <libdet/external.hpp>
+#include <libdet/sample.hpp>
+#include <libdet/internal.hpp>
 
-namespace libdet::rhf {
+namespace libdet {
 
 inline Hamiltonian::Hamiltonian(
     std::span<const double> h1,
@@ -161,14 +201,6 @@ inline Hamiltonian::Hamiltonian(
 ) : ints_(norb, h1, eri, ecore),
     nword_(bits::words_for(norb)),
     conn_cache_(nword_) {}
-
-inline void Hamiltonian::check_one(DetRef det, const char* where) const {
-    if (det.nword() != nword_) {
-        throw std::invalid_argument(
-            std::string(where) + ": determinant nword mismatch"
-        );
-    }
-}
 
 inline void Hamiltonian::check_dets(
     DetBatchView dets,
@@ -186,7 +218,7 @@ inline void Hamiltonian::check_eps(double eps) {
     if (eps < 0.0) throw std::invalid_argument("eps must be nonnegative");
 }
 
-inline void Hamiltonian::check_sample_eps(double eps1, double eps2) {
+inline void Hamiltonian::check_window(double eps1, double eps2) {
     check_eps(eps1);
     check_eps(eps2);
     if (eps2 > eps1) {
@@ -214,7 +246,7 @@ inline double Hamiltonian::max_abs(
     return out;
 }
 
-inline double Hamiltonian::screen_table_cutoff(
+inline double Hamiltonian::screen_cutoff(
     double eps,
     double max_scale
 ) noexcept {
@@ -227,28 +259,32 @@ inline std::shared_ptr<const DetSpace> Hamiltonian::cached_space(
     DetBatchView kets
 ) const {
     {
-        std::lock_guard<std::mutex> lock(space_cache_mutex_);
+        std::lock_guard<std::mutex> lock(space_mutex_);
         if (auto space = space_cache_.find(kets)) return space;
     }
 
     auto fresh = std::make_shared<DetSpace>(kets);
-    std::lock_guard<std::mutex> lock(space_cache_mutex_);
+    std::lock_guard<std::mutex> lock(space_mutex_);
     if (auto space = space_cache_.find(kets)) return space;
     space_cache_.insert(kets, fresh);
     return fresh;
 }
 
 inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
-    check_one(bra, "hij(bra)");
-    check_one(ket, "hij(ket)");
+    if (bra.nword() != nword_) {
+        throw std::invalid_argument("hij(bra): determinant nword mismatch");
+    }
+    if (ket.nword() != nword_) {
+        throw std::invalid_argument("hij(ket): determinant nword mismatch");
+    }
 
     const DetExcitation ex = excitation(ket, bra);
     if (ex.degree > 2) return 0.0;
 
-    DetOcc occ(ints_.norb());
+    DetOcc occ;
     fill_occ(ket, ints_.norb(), occ);
 
-    if (ex.degree == 0) return ::libdet::rhf::diag(ints_, occ);
+    if (ex.degree == 0) return libdet::diag(ints_, occ);
 
     const Excitation& e = ex.excitation;
     switch (e.kind) {
@@ -266,4 +302,4 @@ inline double Hamiltonian::hij(DetRef bra, DetRef ket) const {
     return 0.0;
 }
 
-} // namespace libdet::rhf
+} // namespace libdet

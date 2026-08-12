@@ -7,11 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include <libdet/hash.hpp>
+#include <libdet/det.hpp>
 
-#include <libdet/rhf/det.hpp>
-
-namespace libdet::rhf {
+namespace libdet {
 
 struct ConnSpan {
     std::size_t begin = 0;
@@ -24,15 +22,11 @@ struct Conn {
     double h = 0.0;
 };
 
-struct Conns {
+struct ConnSet {
     double cutoff = 0.0;
     double diag = 0.0;
     std::vector<Conn> terms;
     std::vector<double> prefix_abs;
-
-    [[nodiscard]] std::size_t size() const noexcept {
-        return terms.size();
-    }
 
     void add(Excitation excitation, double value) {
         terms.push_back(Conn{excitation, value});
@@ -65,32 +59,22 @@ struct Conns {
         }
     }
 
-    [[nodiscard]] std::size_t count(double eps) const noexcept {
-        const auto it = std::partition_point(
-            terms.begin(),
-            terms.end(),
-            [eps](const Conn& term) {
-                return std::abs(term.h) >= eps;
-            }
-        );
-
-        return static_cast<std::size_t>(it - terms.begin());
-    }
-
-    [[nodiscard]] double abs_sum(
-        std::size_t begin,
-        std::size_t end
-    ) const noexcept {
-        if (begin >= end || end >= prefix_abs.size()) return 0.0;
-        return prefix_abs[end] - prefix_abs[begin];
-    }
-
     [[nodiscard]] ConnSpan span(double eps1, double eps2) const noexcept {
+        const auto count = [&](double eps) {
+            const auto it = std::partition_point(
+                terms.begin(),
+                terms.end(),
+                [eps](const Conn& term) {
+                    return std::abs(term.h) >= eps;
+                }
+            );
+            return static_cast<std::size_t>(it - terms.begin());
+        };
         const std::size_t begin = count(eps1);
         const std::size_t end = count(eps2);
 
         if (end <= begin) return ConnSpan{begin, begin, 0.0};
-        return ConnSpan{begin, end, abs_sum(begin, end)};
+        return ConnSpan{begin, end, prefix_abs[end] - prefix_abs[begin]};
     }
 };
 
@@ -109,12 +93,11 @@ public:
           words_(capacity * det_size(nword), 0u),
           entries_(capacity) {}
 
-    [[nodiscard]] std::shared_ptr<const Conns> find(DetRef ket, double eps) {
-        if (eps <= 0.0) return {};
+    [[nodiscard]] std::shared_ptr<const ConnSet> find(DetRef ket, double eps) {
+        if (eps <= 0.0 || nword_ == 0 || ket.nword() != nword_) return {};
 
         const u64 fingerprint = det_fingerprint(ket);
-        const std::size_t begin = set_begin(ket, fingerprint);
-        if (begin >= entries_.size()) return {};
+        const std::size_t begin = set_begin(fingerprint);
 
         for (std::size_t k = 0; k < way; ++k) {
             const std::size_t slot = begin + k;
@@ -132,7 +115,7 @@ public:
         return {};
     }
 
-    void insert(DetRef ket, std::shared_ptr<const Conns> conns) {
+    void insert(DetRef ket, std::shared_ptr<const ConnSet> conns) {
         if (
             nword_ == 0
             || ket.nword() != nword_
@@ -143,8 +126,7 @@ public:
         }
 
         const u64 fingerprint = det_fingerprint(ket);
-        const std::size_t begin = set_begin(ket, fingerprint);
-        if (begin >= entries_.size()) return;
+        const std::size_t begin = set_begin(fingerprint);
 
         std::size_t slot = begin;
         bool found = false;
@@ -172,7 +154,17 @@ public:
                 break;
             }
 
-            if (victim_less(entry, entries_[slot])) {
+            const Entry& victim = entries_[slot];
+            if (
+                !entry.conns
+                || (
+                    victim.conns
+                    && (
+                        entry.hit < victim.hit
+                        || (entry.hit == victim.hit && entry.stamp < victim.stamp)
+                    )
+                )
+            ) {
                 slot = item;
             }
         }
@@ -187,12 +179,13 @@ public:
         entry.conns = std::move(conns);
         entry.fingerprint = fingerprint;
         entry.stamp = ++clock_;
-        entry.hit = found ? bump(entry.hit) : 1u;
+        if (!found) entry.hit = 1u;
+        else if (entry.hit < 3u) ++entry.hit;
     }
 
 private:
     struct Entry {
-        std::shared_ptr<const Conns> conns;
+        std::shared_ptr<const ConnSet> conns;
         u64 fingerprint = 0;
         u64 stamp = 0;
         unsigned char hit = 0;
@@ -209,21 +202,6 @@ private:
         return DetRef(ptr, ptr + nword_, nword_);
     }
 
-    [[nodiscard]] std::size_t set_begin(
-        DetRef ket,
-        u64 fingerprint
-    ) const noexcept {
-        if (
-            nword_ == 0
-            || ket.nword() != nword_
-            || entries_.empty()
-        ) {
-            return entries_.size();
-        }
-
-        return set_begin(fingerprint);
-    }
-
     [[nodiscard]] static std::size_t set_begin(u64 fingerprint) noexcept {
         return (
             static_cast<std::size_t>(mix64(fingerprint))
@@ -231,23 +209,9 @@ private:
         ) * way;
     }
 
-    [[nodiscard]] static unsigned char bump(unsigned char hit) noexcept {
-        return hit < 3u ? static_cast<unsigned char>(hit + 1u) : hit;
-    }
-
     void touch(Entry& entry) noexcept {
         entry.stamp = ++clock_;
-        entry.hit = bump(entry.hit);
-    }
-
-    [[nodiscard]] static bool victim_less(
-        const Entry& lhs,
-        const Entry& rhs
-    ) noexcept {
-        if (!rhs.conns) return false;
-        if (!lhs.conns) return true;
-        if (lhs.hit != rhs.hit) return lhs.hit < rhs.hit;
-        return lhs.stamp < rhs.stamp;
+        if (entry.hit < 3u) ++entry.hit;
     }
 };
 
@@ -298,4 +262,4 @@ private:
     }
 };
 
-} // namespace libdet::rhf
+} // namespace libdet

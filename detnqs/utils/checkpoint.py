@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import pickle
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +11,11 @@ import numpy as np
 
 
 def save(file: str | Path, tree: Any) -> Path:
-    """Save a numerical tree."""
+    """Atomically save a numerical tree to the exact path."""
     path = Path(file)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     leaves, treedef = jax.tree_util.tree_flatten(jax.device_get(tree))
-
     is_key = np.asarray(
         [
             hasattr(leaf, "dtype")
@@ -27,12 +28,19 @@ def save(file: str | Path, tree: Any) -> Path:
         "treedef": np.frombuffer(pickle.dumps(treedef), dtype=np.uint8),
         "is_key": is_key,
     }
-
     for i, leaf in enumerate(leaves):
         value = jax.random.key_data(leaf) if is_key[i] else leaf
         arrays[f"leaf_{i}"] = np.asarray(value)
 
-    np.savez(path, **arrays)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+        delete=False,
+    ) as stream:
+        temp = stream.name
+        np.savez(stream, **arrays)
+    os.replace(temp, path)
+
     return path
 
 

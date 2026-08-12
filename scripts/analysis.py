@@ -55,8 +55,8 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=4096,
         n_chains=chains.shape[0],
-        burnin_steps=0,
-        discard_steps=0,
+        burn_in=0,
+        discard=0,
         proposal="ham",
         beta=0.5,
         alpha=float(np.asarray(saved_sampler["alpha"])),
@@ -79,7 +79,7 @@ def main() -> None:
         chains=chains,
         eps1=0.0,
         eps2=0.0,
-        eloc_sample=0,
+        n_eloc=0,
     )
 
     state, stats, data = state.expect(data=True)

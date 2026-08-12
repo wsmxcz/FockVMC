@@ -31,13 +31,10 @@ def configure(
         "backward_chunk": backward_chunk,
         "param_chunk": param_chunk,
     }.items():
-        if value is not None:
-            value = int(value)
-            if value <= 0:
-                raise ValueError(f"{key} must be positive or None")
+        if value is not None and value <= 0:
+            raise ValueError(f"{key} must be positive or None")
         config[key] = value
 
-    bucket_min = int(bucket_min)
     if bucket_min <= 0:
         raise ValueError("bucket_min must be positive")
 
@@ -50,12 +47,10 @@ def chunk(
     size: int | None = None,
 ) -> Iterator[slice]:
     """Partition items by their estimated downstream work."""
-    n = int(n)
-    expansion = int(expansion)
     if n < 0 or expansion < 0:
         raise ValueError("n and expansion must be nonnegative")
 
-    size = config["forward_chunk"] if size is None else int(size)
+    size = config["forward_chunk"] if size is None else size
     if size is not None and size <= 0:
         raise ValueError("size must be positive or None")
     if n == 0:
@@ -75,7 +70,7 @@ def apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     if size is None:
         return run(theta, x)
 
-    n = int(jax.tree.leaves(x)[0].shape[0])
+    n = jax.tree.leaves(x)[0].shape[0]
     out = []
     slices = (slice(0, 0),) if n == 0 else chunk(n, size=size)
     for slc in slices:
@@ -106,7 +101,7 @@ def jvp(
     if size is None:
         return _jvp(fun, theta, tangent, x)
 
-    n = int(jax.tree.leaves(x)[0].shape[0])
+    n = jax.tree.leaves(x)[0].shape[0]
     vals = []
     tangents = []
     slices = (slice(0, 0),) if n == 0 else chunk(n, size=size)
@@ -143,7 +138,7 @@ def vjp(
     if size is None:
         return jax.tree.map(jnp.conj, _vjp(fun, theta, x, cotangent))
 
-    n = int(jax.tree.leaves(x)[0].shape[0])
+    n = jax.tree.leaves(x)[0].shape[0]
     grad = jax.tree.map(jnp.zeros_like, theta)
     slices = (slice(0, 0),) if n == 0 else chunk(n, size=size)
     for slc in slices:
@@ -176,9 +171,9 @@ def bucket(
 ) -> Any:
     """Run a coupled leading-axis kernel on one padded power-of-two bucket."""
     static_argnums = (
-        (int(static_argnums),)
+        (static_argnums,)
         if not isinstance(static_argnums, tuple)
-        else tuple(int(i) for i in static_argnums)
+        else static_argnums
     )
     in_axes = (in_axes,) * len(args) if not isinstance(in_axes, tuple) else in_axes
 
@@ -189,21 +184,21 @@ def bucket(
     for i, (arg, axis) in enumerate(zip(args, in_axes, strict=True)):
         if i in static_argnums or axis is None:
             continue
-        n = int(jax.tree.leaves(arg)[0].shape[int(axis)])
+        n = jax.tree.leaves(arg)[0].shape[axis]
         break
 
     run = _jit(fun, static_argnums)
     if n is None:
         return run(*args)
 
-    size = max(n, int(config["bucket_min"]))
+    size = max(n, config["bucket_min"])
     size = 1 << (size - 1).bit_length()
 
     padded = tuple(
         arg
         if i in static_argnums or axis is None
         else jax.tree.map(
-            lambda a, axis=int(axis): jnp.pad(
+            lambda a, axis=axis: jnp.pad(
                 jnp.asarray(a),
                 [
                     (0, size - a.shape[axis]) if j == axis % a.ndim else (0, 0)
@@ -225,7 +220,7 @@ def bucket(
             y
             if axis is None
             else jax.tree.map(
-                lambda a, axis=int(axis): a[
+                lambda a, axis=axis: a[
                     (slice(None),) * (axis % a.ndim) + (slice(0, n),)
                 ],
                 y,
@@ -233,7 +228,7 @@ def bucket(
             for y, axis in zip(out, out_axes, strict=True)
         )
 
-    axis = int(out_axes)
+    axis = out_axes
     return jax.tree.map(
         lambda a: a[(slice(None),) * (axis % a.ndim) + (slice(0, n),)],
         out,

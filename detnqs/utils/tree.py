@@ -14,16 +14,7 @@ def host(tree: Any) -> Any:
 
 
 def blocks(tree: Any, size: int | None = None, *aligned: Any):
-    """Yield flattened leaf blocks and a local tree updater.
-
-    aligned PyTrees must have the same structure and leaf shapes as tree.
-    Each yielded item is
-
-        block, put, *aligned_blocks
-
-    where put(new_block) returns the full primary tree with the current block
-    replaced by new_block.
-    """
+    """Yield ``(block, put, *aligned_blocks)`` over flattened leaves."""
     leaves, spec = tree_util.tree_flatten(tree)
     aligned_leaves = []
 
@@ -34,7 +25,6 @@ def blocks(tree: Any, size: int | None = None, *aligned: Any):
         aligned_leaves.append(other_leaves)
 
     if size is not None:
-        size = int(size)
         if size <= 0:
             raise ValueError("size must be positive or None")
 

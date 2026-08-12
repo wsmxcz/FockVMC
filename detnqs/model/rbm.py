@@ -12,18 +12,7 @@ from .base import Model
 
 
 class RBM(Model):
-    """Complex RBM on spin-orbital occupation bitstrings.
-
-    Input:
-        x: uint64[N, 2, nword].
-
-    Output:
-        complex log-amplitude with shape (N,).
-
-    Occupation encoding:
-        alpha and beta occupations are concatenated into a spin-orbital vector
-        and mapped from {0, 1} to {-1, +1}.
-    """
+    """Complex RBM on spin-orbital occupation bitstrings."""
 
     norb: int
     alpha: int = 1
@@ -33,8 +22,8 @@ class RBM(Model):
     def __call__(self, x: jax.Array) -> jax.Array:
         dtype = precision.complex("model") if self.dtype is None else self.dtype
 
-        n_sorb = 2 * int(self.norb)
-        n_hidden = int(self.alpha) * n_sorb
+        n_sorb = 2 * self.norb
+        n_hidden = self.alpha * n_sorb
 
         orb = jnp.arange(self.norb, dtype=jnp.uint32)
         word = (orb >> jnp.uint32(6)).astype(jnp.int32)
@@ -47,9 +36,9 @@ class RBM(Model):
         beta_occ = (beta_words >> shift) & jnp.uint64(1)
 
         occ = jnp.concatenate([alpha_occ, beta_occ], axis=-1)
-        x = 2 * occ.astype(dtype) - jnp.asarray(1, dtype=dtype)
+        x = 2 * occ.astype(dtype) - 1
 
-        init_std = 1.0e-2 / math.sqrt(float(n_sorb))
+        init_std = 1.0e-2 / math.sqrt(n_sorb)
 
         kernel = self.param(
             "kernel",
@@ -74,9 +63,10 @@ class RBM(Model):
 
         # Stable complex log(cosh(z)).
         s = jnp.where(jnp.real(z) >= 0, z, -z)
-        log2 = jnp.asarray(math.log(2.0), dtype=dtype)
-
-        hidden = jnp.sum(s + jnp.log1p(jnp.exp(-2 * s)) - log2, axis=-1)
+        hidden = jnp.sum(
+            s + jnp.log1p(jnp.exp(-2 * s)) - math.log(2.0),
+            axis=-1,
+        )
         visible = x @ visible_bias
 
         return (visible + hidden).reshape((x.shape[0],))

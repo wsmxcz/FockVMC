@@ -1,86 +1,45 @@
-from pathlib import Path
-
-import jax
+import jax.numpy as jnp
 import numpy as np
-import optax
-from jax.flatten_util import ravel_pytree
 
-from detnqs import ExactState, Hamiltonian, psr, sr
-from detnqs.model import RBM
+from detnqs import psr, sr
+from detnqs.optimizer.base import Geometry
 from detnqs.utils import batch
 
 
-FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
-
-
-def test_optimizers() -> None:
+def test_sr() -> None:
     batch.configure(
-        forward_chunk=32,
-        backward_chunk=32,
+        forward_chunk=None,
+        backward_chunk=None,
         param_chunk=None,
         bucket_min=4,
     )
-    hamiltonian = Hamiltonian.load(FCIDUMP)
-    state = ExactState.init(
-        model=RBM(norb=hamiltonian.sector.norb, alpha=1),
-        hamiltonian=hamiltonian,
-        key=jax.random.key(0),
+    params = {"w": jnp.array([0.2, -0.4])}
+    x = jnp.array(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [-1.0, 0.5]]
     )
-    _, _, grad, _, geometry = state.expect_and_grad(geometry=True)
+    weight = jnp.array([0.1, 0.2, 0.3, 0.4])
+    b = jnp.array([0.3, -0.5, 0.2, 0.4])
 
-    parameter_sr = sr(mode="dense", shift=1.0e-2)
-    sample_sr = psr(mu=0.0, shift=1.0e-2)
+    def coord(theta, sample):
+        return sample @ theta["w"]
 
-    update_sr, _ = parameter_sr.update(
-        grad,
-        parameter_sr.init(state.params),
-        state.params,
-        geometry=geometry,
-    )
-    update_psr, _ = sample_sr.update(
-        grad,
-        sample_sr.init(state.params),
-        state.params,
-        geometry=geometry,
-    )
+    centered = (x - weight @ x) * jnp.sqrt(weight)[:, None]
+    grad = {"w": centered.T @ b}
+    geometry = Geometry(params=params, coord=coord, x=x, weight=weight, b=b)
 
-    flat_sr, _ = ravel_pytree(update_sr)
-    flat_psr, _ = ravel_pytree(update_psr)
-    assert np.isfinite(flat_sr).all()
-    assert np.isfinite(flat_psr).all()
-    np.testing.assert_allclose(
-        flat_psr,
-        flat_sr,
-        rtol=2e-3,
-        atol=2e-4,
-    )
+    updates = []
+    for optimizer in (
+        sr(mode="dense", shift=0.1),
+        sr(mode="matvec", shift=0.1, max_iter=32),
+        psr(mu=0.0, shift=0.1),
+    ):
+        update, _ = optimizer.update(
+            grad,
+            optimizer.init(params),
+            params,
+            geometry=geometry,
+        )
+        updates.append(update["w"])
 
-    optimizer = optax.chain(sample_sr, optax.scale_by_learning_rate(1.0e-2))
-    scaled, _ = optimizer.update(
-        grad,
-        optimizer.init(state.params),
-        state.params,
-        geometry=geometry,
-    )
-    flat_scaled, _ = ravel_pytree(scaled)
-    np.testing.assert_allclose(flat_scaled, -1.0e-2 * flat_psr)
-
-    params = optax.apply_updates(state.params, scaled)
-    assert jax.tree.structure(params) == jax.tree.structure(state.params)
-
-    predictive = psr(mu=0.5, shift=1.0e-2)
-    predictive_state = predictive.init(state.params)
-    _, predictive_state = predictive.update(
-        grad,
-        predictive_state,
-        state.params,
-        geometry=geometry,
-    )
-    second_update, _ = predictive.update(
-        grad,
-        predictive_state,
-        state.params,
-        geometry=geometry,
-    )
-    flat_second, _ = ravel_pytree(second_update)
-    assert np.isfinite(flat_second).all()
+    np.testing.assert_allclose(updates[1], updates[0], rtol=1e-8, atol=1e-10)
+    np.testing.assert_allclose(updates[2], updates[0], rtol=1e-8, atol=1e-10)

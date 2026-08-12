@@ -1,13 +1,4 @@
-"""Global dtype policy.
-
-Precision is a boundary policy. Kernels should cast inputs at their boundary
-and then run the mathematical calculation without scattered dtype decisions.
-
-Roles:
-    model: neural-network forward pass and autodiff.
-    calc: energies, probabilities, and host reductions.
-    sr: stochastic-reconfiguration matrices, RHS vectors, and solves.
-"""
+"""Global dtype policy for model, calculation, and SR boundaries."""
 
 from __future__ import annotations
 
@@ -47,7 +38,6 @@ def configure(
     """Set the global precision profile."""
     global _ROLES
 
-    profile = str(profile)
     if profile not in {"single", "double", "mixed"}:
         raise ValueError("profile must be 'single', 'double', or 'mixed'")
 
@@ -57,40 +47,31 @@ def configure(
         roles = {"model": profile, "calc": profile, "sr": profile}
     else:
         roles = {
-            "model": "single" if model is None else str(model),
-            "calc": "double" if calc is None else str(calc),
-            "sr": "double" if sr is None else str(sr),
+            "model": "single" if model is None else model,
+            "calc": "double" if calc is None else calc,
+            "sr": "double" if sr is None else sr,
         }
-        bad = [
-            name
-            for name, value in roles.items()
-            if value not in {"single", "double"}
-        ]
-        if bad:
+        if any(value not in {"single", "double"} for value in roles.values()):
             raise ValueError("role precision must be 'single' or 'double'")
 
     _ROLES = roles
-    jax.config.update("jax_enable_x64", True)
     jax.clear_caches()
-
-
-def _dtype(role: str, kind: str, *, host: bool = False) -> Any:
-    if role not in _ROLES:
-        raise ValueError("role must be 'model', 'calc', or 'sr'")
-    if kind not in {"real", "complex"}:
-        raise ValueError("kind must be 'real' or 'complex'")
-    jax_dtype, np_dtype = _DTYPES[_ROLES[role]][kind]
-    return np_dtype if host else jax_dtype
 
 
 def real(role: str = "calc", *, host: bool = False) -> Any:
     """Return the real dtype assigned to a role."""
-    return _dtype(role, "real", host=host)
+    if role not in _ROLES:
+        raise ValueError("role must be 'model', 'calc', or 'sr'")
+    jax_dtype, np_dtype = _DTYPES[_ROLES[role]]["real"]
+    return np_dtype if host else jax_dtype
 
 
 def complex(role: str = "calc", *, host: bool = False) -> Any:
     """Return the complex dtype assigned to a role."""
-    return _dtype(role, "complex", host=host)
+    if role not in _ROLES:
+        raise ValueError("role must be 'model', 'calc', or 'sr'")
+    jax_dtype, np_dtype = _DTYPES[_ROLES[role]]["complex"]
+    return np_dtype if host else jax_dtype
 
 
 def cast(
@@ -100,12 +81,7 @@ def cast(
     *,
     host: bool = False,
 ) -> Any:
-    """Cast floating leaves according to the precision policy.
-
-    With ``kind=None``, real and complex floating leaves are cast to the role
-    dtype while integer and boolean leaves are preserved. Passing
-    ``kind='real'`` or ``kind='complex'`` forces all leaves to that dtype.
-    """
+    """Cast floating leaves by role, preserving integers unless forced."""
     if kind not in {None, "real", "complex"}:
         raise ValueError("kind must be None, 'real', or 'complex'")
 
@@ -122,7 +98,12 @@ def cast(
         else:
             leaf_kind = kind
 
-        return arr.astype(_dtype(role, leaf_kind, host=host), copy=False)
+        dtype = (
+            real(role, host=host)
+            if leaf_kind == "real"
+            else complex(role, host=host)
+        )
+        return arr.astype(dtype, copy=False)
 
     return jax.tree.map(cast_leaf, x)
 

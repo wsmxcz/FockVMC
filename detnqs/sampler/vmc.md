@@ -1,72 +1,90 @@
 # Monte Carlo estimator
 
-`MCSampler` advances auxiliary chains. `MCState` turns their observations into
-Born-distribution estimates. Sampling may change coverage and variance, never
-the variational objective.
+`MCSampler` advances chains for an auxiliary distribution. `MCState` constructs
+a self-normalized importance estimator for the Born distribution. Sampling may
+change coverage and variance, never the variational objective.
 
-## Probability laws
+## Distributions and kernels
 
-For $\ell_\theta(x)=\log|\psi_\theta(x)|$, keep three laws distinct:
+For $\ell_\theta(x)=\log|\psi_\theta(x)|$, keep four objects distinct:
+
+$$
+p_\theta(x)=
+\frac{|\psi_\theta(x)|^2}{\sum_z|\psi_\theta(z)|^2}
+\quad\text{Born distribution},
+$$
 
 $$
 \rho_\theta(x)
-\quad\text{source distribution sampled by the chains},
+\quad\text{auxiliary distribution},
 $$
 
 $$
-\nu_\theta(y|x)
-\quad\text{observation kernel},
+K_\theta(y|x)
+\quad\text{Markov kernel},
 $$
 
 $$
-\pi_\theta(y)=
-\frac{|\psi_\theta(y)|^2}{\sum_z|\psi_\theta(z)|^2}
-\quad\text{variational target}.
+r_\theta(y)=\sum_x\rho_\theta(x)K_\theta(y|x)
+\quad\text{induced distribution}.
 $$
 
-The distinction between $\rho$, $\nu$, and $\pi$ is the central estimator
-contract.
+The distinction between $p$, $\rho$, $K$, and $r$ is the estimator contract.
 
-## Source chains
+## Auxiliary chains
 
-For the Hamiltonian proposal, define
+For cutoff $\varepsilon_1$, define
 
 $$
-b(x,y)=|H_{yx}|,
+b_{\varepsilon_1}(x,y)
+=|H_{yx}|\,\mathbf 1(|H_{yx}|\ge\varepsilon_1),
 \qquad
-d(x)=\sum_{y\ne x}b(x,y).
+d_{\varepsilon_1}(x)
+=\sum_{y\ne x}b_{\varepsilon_1}(x,y).
 $$
 
-A connected configuration is proposed with
+The Hamiltonian proposal distribution is
 
 $$
-q_H(y|x)=\frac{b(x,y)}{d(x)},
+q_{\varepsilon_1}(y|x)
+=\frac{b_{\varepsilon_1}(x,y)}{d_{\varepsilon_1}(x)}.
 $$
 
-and the stationary source law is
+The MH transition leaves the following auxiliary distribution invariant:
 
 $$
 \rho_{\theta,\alpha}(x)
 \propto s(x)e^{\alpha\ell_\theta(x)},
 \qquad
-s(x)=\begin{cases}d(x),&d(x)>0,\\1,&d(x)=0.\end{cases}
+s(x)=\begin{cases}
+d_{\varepsilon_1}(x),&d_{\varepsilon_1}(x)>0,\\
+1,&d_{\varepsilon_1}(x)=0.
+\end{cases}
 $$
 
-The degree factor cancels proposal asymmetry. The `single` proposal instead
-uses uniform single excitations and $s(x)=1$. `alpha=2` uses the Born amplitude
-exponent; smaller values temper the source.
+The degree factor cancels proposal asymmetry, giving acceptance probability
+
+$$
+A(x\to y)
+=\min\!\left(1,e^{\alpha[\ell_\theta(y)-\ell_\theta(x)]}\right).
+$$
+
+The MH chain must be ergodic and leave $\rho_{\theta,\alpha}$ invariant. The
+`single` proposal is a Born distribution baseline restricted to `alpha=2` and
+`beta=0`. For Hamiltonian proposals, smaller `alpha` tempers the auxiliary
+distribution.
 
 `ChainState` contains only persistent sampling state:
 
 ```text
 key       random key
-x         source configurations
+x         auxiliary configurations
 logabs    log|psi(x)| at the current parameters
-alpha     source tempering exponent
+alpha     auxiliary tempering exponent
 ```
 
 ```text
-thermal_steps    transitions whenever a sampler state is initialized
+burnin_steps     transitions whenever a sampler state is initialized
 discard_steps    transitions before observations are collected in each draw
 sweep_steps      transitions between successive collection rounds
 ```
@@ -75,37 +93,45 @@ Initial configurations are passed to `MCState.init`; the sampler does not
 choose an initialization policy. Burn-in occurs once, then estimator calls
 advance the persistent chains.
 
-## Observation and reweighting
+## Markov kernel and importance weights
 
-With blur probability $\beta$,
+The Markov kernel is
 
 $$
-\nu_\beta(y|x)
+K_\beta(y|x)
 =(1-\beta)\delta_{xy}
-+\beta\frac{b(x,y)}{d(x)}.
++\beta q_{\varepsilon_1}(y|x).
 $$
 
-The connected term is absent when $d(x)=0$.
+The proposal term is absent when $d_{\varepsilon_1}(x)=0$.
 
-The induced unnormalized observation density is
+Using the unnormalized form of the auxiliary distribution, the induced
+distribution is proportional to
 
 $$
 r_{\theta,\alpha,\beta}(y)
-=\sum_x s(x)e^{\alpha\ell_\theta(x)}\nu_\beta(y|x).
+\propto\sum_x s(x)e^{\alpha\ell_\theta(x)}K_\beta(y|x).
 $$
 
-Repeated observations are merged. If $M_y$ is their empirical mass, the Born
-weight is
+For an output $y_n$, define the unnormalized importance weight and normalized
+importance weight
 
 $$
-\widetilde w_y=
-M_y\frac{e^{2\ell_\theta(y)}}{r_{\theta,\alpha,\beta}(y)},
+\omega_{\theta,n}
+=\frac{e^{2\ell_\theta(y_n)}}{r_{\theta,\alpha,\beta}(y_n)},
 \qquad
-w_y=\frac{\widetilde w_y}{\sum_z\widetilde w_z}.
+w_n=\frac{\omega_{\theta,n}}{\sum_m\omega_{\theta,m}}.
 $$
 
-Energy, observables, gradients, and geometry all use the same normalized
-`weight`.
+The self-normalized importance estimator is
+
+$$
+\widehat\mu_f=\sum_n w_n f(y_n).
+$$
+
+Repeated outputs are merged by summing their empirical mass. Energy,
+observables, gradients, and geometry use the same normalized importance
+weights.
 
 ## Local energy
 
@@ -149,22 +175,24 @@ Every `MCState.expect` or `expect_and_grad` call follows one flow:
 
 ```text
 1. synchronize chain log amplitudes
-2. sample sources and observations
-3. merge repeated observations
+2. advance auxiliary chains and apply the Markov kernel
+3. merge repeated outputs
 4. generate Hamiltonian and observable connections
 5. evaluate the shared logpsi pool
 6. assemble local quantities
-7. reweight to the Born target
-8. reduce energy, gradient, statistics, and Geometry
+7. construct normalized importance weights
+8. evaluate self-normalized importance estimators and Geometry
 9. return the advanced chains and tempering state
 ```
 
 ## Stable development rules
 
-- A proposal change must define its source law and transition ratio together.
-- An observation kernel must provide the density needed for Born reweighting.
-- Sampling ends at observations; estimation and differentiation stay in
-  `MCState`.
-- New observables reuse the shared configuration pool and normalized weights.
-- `alpha` changes only the auxiliary source. `alpha=None` may adapt future
-  chains, but never changes the target of the current estimate.
+- A proposal distribution must define its auxiliary distribution and acceptance
+  probability together.
+- A Markov kernel must provide its induced distribution.
+- Sampling ends at Markov-kernel outputs; estimation and differentiation stay
+  in `MCState`.
+- New observables reuse the shared configuration pool and normalized importance
+  weights.
+- `alpha` changes only the auxiliary distribution. `alpha=None` may adapt future
+  chains, but never changes the Born distribution.

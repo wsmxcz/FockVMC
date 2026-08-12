@@ -43,7 +43,7 @@ class VMC:
         *,
         obs: Mapping[str, Any] | None = None,
         profile: bool = False,
-    ) -> dict[str, float]:
+    ) -> dict[str, float | int]:
         """Apply one update and return the pre-update scalar record."""
         timer = Timer(enabled=profile)
         with timer("total"):
@@ -67,7 +67,7 @@ class VMC:
             self.state = state.replace(params=params)
 
         rec = dict(stats)
-        rec["step"] = float(self.step_count + 1)
+        rec["step"] = self.step_count + 1
 
         if profile:
             rec.update(timer.stats())
@@ -84,8 +84,8 @@ class VMC:
         profile: bool = False,
         checkpoint: str | Path | None = None,
         checkpoint_every: int = 0,
-    ) -> dict[str, float]:
-        rec: dict[str, float] = {}
+    ) -> dict[str, float | int]:
+        rec: dict[str, float | int] = {}
         checkpoint_every = int(checkpoint_every)
 
         for _ in range(int(steps)):

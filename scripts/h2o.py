@@ -23,12 +23,12 @@ def main() -> None:
     )
     precision.configure("double")
 
-    root = Path(__file__).with_name("FCIDUMP") / "H2O_ccpvdz"
     points = ("1.0re", "1.5re", "2.0re", "2.5re", "3.0re")
 
     for point in points:
         name = f"H2O_ccpvdz_{point}"
-        hamiltonian = Hamiltonian.load(root / f"{name}.FCIDUMP")
+        fcidump = next(Path.cwd().rglob(f"{name}.FCIDUMP"))
+        hamiltonian = Hamiltonian.load(fcidump)
         sector = hamiltonian.sector
 
         orbitals = np.eye(sector.norb)
@@ -48,10 +48,10 @@ def main() -> None:
         sampler = MCSampler(
             n_samples=4096,
             n_chains=4096,
-            thermal_steps=4096,
+            burnin_steps=4096,
             discard_steps=16,
             proposal="ham",
-            blur=0.5,
+            beta=0.5,
             alpha=None,
         )
         chains = sample_slater(

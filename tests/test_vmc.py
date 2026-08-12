@@ -59,9 +59,9 @@ def test_states() -> None:
     sampler = MCSampler(
         n_samples=128,
         n_chains=32,
-        thermal_steps=4,
+        burnin_steps=4,
         proposal="ham",
-        blur=0.5,
+        beta=0.5,
         alpha=2.0,
     )
     mc = MCState.init(
@@ -97,7 +97,7 @@ def test_checkpoint(tmp_path: Path) -> None:
     )
     hamiltonian = Hamiltonian.load(FCIDUMP)
     model = RBM(norb=hamiltonian.sector.norb, alpha=1)
-    sampler = MCSampler(n_samples=64, n_chains=16, thermal_steps=2)
+    sampler = MCSampler(n_samples=64, n_chains=16, burnin_steps=2)
     state = MCState.init(
         model=model,
         hamiltonian=hamiltonian,
@@ -116,7 +116,7 @@ def test_checkpoint(tmp_path: Path) -> None:
     record = vmc.step()
     assert np.isfinite(record["energy"])
     assert set(record) == {
-        "accept",
+        "acceptance_rate",
         "alpha",
         "eloc_var",
         "energy",

@@ -183,7 +183,7 @@ def _select(
             },
         )
 
-    print(f"Total time: {time.perf_counter() - start:.2f}s")
+    print(f"Total time: {time.perf_counter() - start:.3f}s")
 
     return _HCIState(
         basis=basis,
@@ -299,12 +299,12 @@ def main() -> None:
     )
 
     print()
-    print(f"SCF          : {mf.e_tot:16.12f}")
-    print(f"HCI var      : {state.energy:16.12f}  Ndet: {len(state.basis)}")
-    print(f"PT2 det      : {det_pt2:16.12f}")
-    print(f"PT2 stoch    : {sample_pt2:16.12f} +/- {error:.12f}")
-    print(f"PT2 total    : {pt2:16.12f} +/- {error:.12f}")
-    print(f"HCI + PT2    : {state.energy + pt2:16.12f} +/- {error:.12f}")
+    print(f"SCF          : {mf.e_tot:.6f}")
+    print(f"HCI var      : {state.energy:.6f}  Ndet: {len(state.basis)}")
+    print(f"PT2 det      : {det_pt2:.6f}")
+    print(f"PT2 stoch    : {sample_pt2:.6f} +/- {error:.6e}")
+    print(f"PT2 total    : {pt2:.6f} +/- {error:.6e}")
+    print(f"HCI + PT2    : {state.energy + pt2:.6f} +/- {error:.6e}")
 
 
 if __name__ == "__main__":

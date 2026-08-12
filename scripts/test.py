@@ -23,17 +23,17 @@ def main() -> None:
         param_chunk=None,
         bucket_min=128,
     )
-    path = Path(__file__).with_name("FCIDUMP") / "H2.FCIDUMP"
-    hamiltonian = Hamiltonian.load(path)
+    fcidump = next(Path.cwd().rglob("H2.FCIDUMP"))
+    hamiltonian = Hamiltonian.load(fcidump)
     sector = hamiltonian.sector
     model = RBM(norb=sector.norb, alpha=1)
 
     sampler = MCSampler(
         n_samples=128,
         n_chains=128,
-        thermal_steps=4,
+        burnin_steps=4,
         proposal="ham",
-        blur=0.5,
+        beta=0.5,
         alpha=None,
     )
     state = MCState.init(
@@ -76,9 +76,9 @@ def main() -> None:
     exact_ground = float(
         np.linalg.eigvalsh(hamiltonian.matrix(sector.enumerate()).toarray())[0]
     )
-    print(f"exact ground : {exact_ground:.10f}")
-    print(f"exact model  : {exact_stats['energy']:.10f}")
-    print(f"MC model     : {mc_stats['energy']:.10f}")
+    print(f"exact ground : {exact_ground:.6f}")
+    print(f"exact model  : {exact_stats['energy']:.6f}")
+    print(f"MC model     : {mc_stats['energy']:.6f}")
     print("PSR step     : ok")
     print("checkpoint   : ok")
 

@@ -7,7 +7,7 @@ import numpy as np
 import optax
 
 from detnqs import Hamiltonian, MCState, VMC
-from detnqs.model import PBackflow, slater_reference
+from detnqs.model import GBackflow, slater_reference
 from detnqs.operator import S2
 from detnqs.optimizer import psr
 from detnqs.sampler import MCSampler, sample_slater
@@ -16,17 +16,17 @@ from detnqs.utils import Logger, batch, precision
 
 def main() -> None:
     batch.configure(
-        forward_chunk=32768,
-        backward_chunk=4096,
+        forward_chunk=1024,
+        backward_chunk=128,
         param_chunk=None,
-        bucket_min=4096,
+        bucket_min=128,
     )
-    precision.configure("double")
+    precision.configure("single")
 
-    name = "N2"
+    name = "H2"
     seed = 0
-    path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / f"{name}.FCIDUMP"
-    hamiltonian = Hamiltonian.load(path)
+    fcidump = next(Path.cwd().parent.rglob(f"{name}.FCIDUMP"), None)
+    hamiltonian = Hamiltonian.load(fcidump)
     sector = hamiltonian.sector
 
     orbitals = np.eye(sector.norb)
@@ -34,22 +34,22 @@ def main() -> None:
         orbitals[:, :sector.n_alpha],
         orbitals[:, :sector.n_beta],
     )
-    model = PBackflow(
+    model = GBackflow(
         norb=sector.norb,
         n_alpha=sector.n_alpha,
         n_beta=sector.n_beta,
-        hidden=(256,),
+        hidden=(16,),
         ref_mat=ref_mat,
         init_scale=1e-3,
     )
 
     sampler = MCSampler(
-        n_samples=4096,
-        n_chains=4096,
-        thermal_steps=256,
-        discard_steps=8,
+        n_samples=128,
+        n_chains=128,
+        burnin_steps=0,
+        discard_steps=0,
         proposal="ham",
-        blur=0.5,
+        beta=0.5,
         alpha=None,
     )
 
@@ -66,9 +66,9 @@ def main() -> None:
         sampler=sampler,
         chains=chains,
         key=jax.random.key(seed),
-        eps1=1.0e-3,
-        eps2=1.0e-6,
-        eloc_sample=1024,
+        eps1=0.0,
+        eps2=0.0,
+        eloc_sample=0,
     )
 
     optimizer = optax.chain(

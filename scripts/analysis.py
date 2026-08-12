@@ -55,10 +55,10 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=4096,
         n_chains=chains.shape[0],
-        thermal_steps=0,
+        burnin_steps=0,
         discard_steps=0,
         proposal="ham",
-        blur=0.5,
+        beta=0.5,
         alpha=float(np.asarray(saved_sampler["alpha"])),
     )
     sampler_state = sampler.init(
@@ -84,24 +84,16 @@ def main() -> None:
 
     state, stats, data = state.expect(data=True)
 
-    probability = data["weight"]
+    weight = data["weight"]
 
-    one_rdm = rdm1(
-        state,
-        data["x"],
-        probability,
-    )
+    one_rdm = rdm1(state, data["x"], weight)
     gamma = np.sum(one_rdm, axis=0)
     gamma = 0.5 * (gamma + np.conjugate(gamma.T))
     occupation = np.linalg.eigvalsh(gamma)[::-1]
 
-    density_corr = density_correlation(
-        sector,
-        data["x"],
-        probability,
-    )
+    density_corr = density_correlation(sector, data["x"], weight,)
 
-    spin = spin_correlation(state, data["x"], probability)
+    spin = spin_correlation(state, data["x"], weight)
     spin = np.real_if_close(spin)
     s2 = np.real_if_close(np.sum(spin)).item()
 
@@ -115,25 +107,25 @@ def main() -> None:
         file.write(f"samples = {sampler.n_samples}\n\n")
 
         file.write("[energy]\n")
-        file.write(f"value = {stats['energy']:.12e}\n")
-        file.write(f"variance = {stats['eloc_var']:.12e}\n\n")
+        file.write(f"value = {stats['energy']:.6f}\n")
+        file.write(f"variance = {stats['eloc_var']:.6e}\n\n")
 
         file.write("\n[natural_occupations]\n")
         file.write("orbital occupation\n")
         np.savetxt(
             file,
             np.column_stack((orbital, occupation)),
-            fmt=("%d", "%.12e"),
+            fmt=("%d", "%.6f"),
         )
 
         file.write("\n[density_correlation]\n")
-        np.savetxt(file, density_corr, fmt="%.12e")
+        np.savetxt(file, density_corr, fmt="%.6f")
 
         file.write("\n[spin_correlation]\n")
-        np.savetxt(file, spin, fmt="%.12e")
+        np.savetxt(file, spin, fmt="%.6f")
 
         file.write("\n[s2]\n")
-        file.write(f"{s2:.12e}\n")
+        file.write(f"{s2:.6f}\n")
 
 
 if __name__ == "__main__":

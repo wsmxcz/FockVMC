@@ -34,7 +34,7 @@ def save(file: str | Path, tree: Any) -> Path:
         else:
             arrays[f"leaf_{i}"] = np.asarray(leaf)
 
-    np.savez_compressed(path, **arrays)
+    np.savez(path, **arrays)
     return path
 
 

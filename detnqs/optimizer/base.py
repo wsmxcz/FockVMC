@@ -24,8 +24,7 @@ class Geometry:
             Sample axis used by the geometry.
 
         weight:
-            Non-negative sample weights. They may be normalized or
-            unnormalized; optimizers normalize them internally.
+            Non-negative weights. Optimizers normalize them internally.
 
         b:
             Sample-space right-hand side used by PSR.

@@ -28,7 +28,7 @@ model
 
 sampler
     ChainState, MCSampler
-    burn-in, proposals, Markov transitions, observation blur
+    burn-in, proposal distributions, MH transitions, Markov kernels
 
 vstate
     ExactState, SelectedState, MCState
@@ -123,7 +123,7 @@ chains = sector.random(n, seed)
 chains = sample_slater(sector, ref_mat, n=n, seed=seed)
 ```
 
-This choice changes burn-in, not the target distribution.
+This choice changes burn-in, not the Born distribution.
 
 ## Estimation and optimization
 
@@ -135,8 +135,8 @@ state, energy, grad, stats, geometry = state.expect_and_grad(geometry=True)
 ```
 
 `ExactState` uses the full sector, `SelectedState` a finite selected space, and
-`MCState` an importance-reweighted Monte Carlo estimate. Calls return the next
-state because chains and tempering may advance. Only `MCState` has a checkpoint
+`MCState` a self-normalized importance estimator. Calls return the next state
+because chains and tempering may advance. Only `MCState` has a checkpoint
 contract.
 
 SR and PSR consume `Geometry`; Optax supplies the learning rate:

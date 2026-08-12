@@ -53,6 +53,7 @@ documents/
 performance/
 runs/
 scans/
+data/
 *.ckpt
 *.csv
 *.h5

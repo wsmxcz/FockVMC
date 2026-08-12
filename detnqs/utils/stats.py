@@ -12,14 +12,14 @@ def weight(
     mass: NDArray[Any],
     mass2: NDArray[Any],
     logabs: NDArray[Any],
-    log_observation: NDArray[Any],
+    log_induced: NDArray[Any],
 ) -> tuple[NDArray[Any], dict[str, float]]:
-    """Normalize Born weights from an auxiliary law.
+    """Construct normalized importance weights.
 
     Unique-ket convention:
 
-        W_x = M_x exp(2 log|psi(x)| - log nu(x)),
-        w_x = W_x / sum_y W_y.
+        omega_x = M_x exp(2 log|psi(x)| - log r(x)),
+        w_x = omega_x / sum_y omega_y.
     """
     dtype = precision.real("calc", host=True)
     tiny = dtype(precision.tiny("calc"))
@@ -27,14 +27,14 @@ def weight(
     mass = precision.cast(np.asarray(mass).reshape(-1), "calc", "real", host=True)
     mass2 = precision.cast(np.asarray(mass2).reshape(-1), "calc", "real", host=True)
     logabs = precision.cast(np.asarray(logabs).reshape(-1), "calc", "real", host=True)
-    log_observation = precision.cast(
-        np.asarray(log_observation).reshape(-1),
+    log_induced = precision.cast(
+        np.asarray(log_induced).reshape(-1),
         "calc",
         "real",
         host=True,
     )
 
-    logw = dtype(2.0) * logabs - log_observation
+    logw = dtype(2.0) * logabs - log_induced
     valid = (
         np.isfinite(logw)
         & np.isfinite(mass)

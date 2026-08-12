@@ -17,17 +17,16 @@ class Logger:
         *,
         every: int = 1,
         keys: Iterable[str] | None = None,
-        verbose: int = 1,
+        verbose: bool = True,
         append: bool = False,
     ) -> None:
         self.file = None if file is None else Path(file)
         self.every = max(1, int(every))
-        self.keys = None if keys is None else tuple(str(k) for k in keys)
-        self.verbose = max(0, int(verbose))
+        self.keys = None if keys is None else tuple(keys)
+        self.verbose = bool(verbose)
 
         self._cols: tuple[str, ...] | None = None
-        self._widths: tuple[int, ...] | None = None
-        self._head = False
+        self._widths: tuple[int, ...] = ()
 
         if self.file is not None:
             self.file.parent.mkdir(parents=True, exist_ok=True)
@@ -36,7 +35,7 @@ class Logger:
 
     def add(self, record: Mapping[str, Any]) -> None:
         """Append one step record."""
-        rec = {str(k): self._json(v) for k, v in record.items()}
+        rec = {key: np.asarray(value).item() for key, value in record.items()}
         step = int(rec["step"])
 
         if self.file is not None:
@@ -45,7 +44,6 @@ class Logger:
                     json.dumps(
                         rec,
                         ensure_ascii=False,
-                        sort_keys=True,
                         separators=(",", ":"),
                     )
                     + "\n"
@@ -55,72 +53,42 @@ class Logger:
             self._print(rec)
 
     def _print(self, rec: Mapping[str, Any]) -> None:
-        cols = self._select(rec)
+        keys = (
+            self.keys
+            if self.keys is not None
+            else (
+                "step",
+                "energy",
+                "eloc_var",
+                "ess_frac",
+                "acceptance_rate",
+                "alpha",
+            )
+        )
+        cols = tuple(key for key in keys if key in rec)
         if not cols:
             return
 
         if self._cols != cols:
             self._cols = cols
-            self._widths = None
-            self._head = False
-
-        cells = tuple(self._format(k, rec[k]) for k in cols)
-        widths = []
-        for key, cell in zip(cols, cells, strict=True):
-            width = 8 if key == "step" or key.startswith("n_") else 13
-            width = 9 if key.startswith("time_") else width
-            width = 8 if key == "accept" or key.endswith("_frac") else width
-            width = 15 if key == "energy" else width
-            widths.append(max(len(key), width, len(cell)))
-        widths = tuple(widths)
-
-        self._widths = (
-            widths
-            if self._widths is None
-            else tuple(max(a, b) for a, b in zip(self._widths, widths, strict=True))
-        )
-        widths = self._widths
-
-        if not self._head:
+            widths = []
+            for key in cols:
+                discrete = key in {"step", "outer"} or key.startswith("n_")
+                width = 8 if discrete else 13
+                width = 9 if key.startswith("time_") else width
+                ratio = key == "acceptance_rate" or key.endswith("_frac")
+                width = 8 if ratio else width
+                width = 15 if key == "energy" else width
+                widths.append(max(len(key), width))
+            self._widths = tuple(widths)
+            widths = self._widths
             print("  ".join(k.rjust(w) for k, w in zip(cols, widths, strict=True)))
             print("  ".join("-" * w for w in widths))
-            self._head = True
+        else:
+            widths = self._widths
 
+        cells = tuple(self._format(key, rec[key]) for key in cols)
         print("  ".join(v.rjust(w) for v, w in zip(cells, widths, strict=True)))
-
-    def _select(self, rec: Mapping[str, Any]) -> tuple[str, ...]:
-        if self.keys is not None:
-            return tuple(k for k in self.keys if k in rec)
-
-        if self.verbose == 1:
-            return tuple(
-                k
-                for k in ("step", "energy", "eloc_var", "ess_frac", "accept", "alpha")
-                if k in rec
-            )
-
-        if self.verbose == 2:
-            return tuple(
-                k
-                for k in (
-                    "step",
-                    "energy",
-                    "eloc_var",
-                    "ess_frac",
-                    "essu_frac",
-                    "w_max",
-                    "accept",
-                    "unique_frac",
-                    "n_forward",
-                )
-                if k in rec
-            )
-
-        return tuple(
-            k
-            for k, v in rec.items()
-            if np.asarray(v).ndim == 0 and not np.iscomplexobj(np.asarray(v))
-        )
 
     @staticmethod
     def _format(key: str, value: Any) -> str:
@@ -133,37 +101,15 @@ class Logger:
 
         if not np.isfinite(x):
             return str(x)
-        if key == "step" or key.startswith("n_"):
+        if key in {"step", "outer"} or key.startswith("n_"):
             return str(int(round(x)))
         if key.startswith("time_"):
             return f"{x:.3f}s"
-        if key == "accept" or key.endswith("_frac"):
-            return f"{100.0 * x:.2f}%"
-        if key == "energy":
-            return f"{x:.8f}"
+        if key == "acceptance_rate" or key.endswith("_frac"):
+            return f"{100.0 * x:.3f}%"
+        if key == "eloc_var" or key == "w_max" or key.endswith("_var"):
+            return f"{x:.3e}"
+        if key in {"alpha", "beta"}:
+            return f"{x:.3f}"
 
         return f"{x:.6f}"
-
-    @staticmethod
-    def _json(value: Any) -> Any:
-        if isinstance(value, str | int | float | bool) or value is None:
-            return value
-
-        if isinstance(value, Mapping):
-            return {str(k): Logger._json(v) for k, v in value.items()}
-
-        if isinstance(value, list | tuple):
-            return [Logger._json(v) for v in value]
-
-        arr = np.asarray(value)
-
-        if arr.ndim == 0:
-            item = arr.item()
-            if isinstance(item, complex):
-                return {"real": float(item.real), "imag": float(item.imag)}
-            return item
-
-        if arr.size <= 16:
-            return arr.tolist()
-
-        return {"shape": list(arr.shape)}

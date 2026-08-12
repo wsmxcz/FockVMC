@@ -33,17 +33,17 @@ def rdm1(state: Any, x: Any, weight: Any) -> np.ndarray:
             ket = x[slc]
             mass = weight[slc]
             occ = (ket[:, spin, word] & bit) != 0
-            source, p = np.nonzero(occ)
-            np.add.at(out, (spin, p, p), mass[source])
+            iket, p = np.nonzero(occ)
+            np.add.at(out, (spin, p, p), mass[iket])
 
-            source, p, q = np.nonzero(
+            iket, p, q = np.nonzero(
                 occ[:, :, None] & ~occ[:, None, :]
             )
-            if source.size == 0:
+            if iket.size == 0:
                 continue
 
-            bra = ket[source].copy()
-            item = np.arange(source.size)
+            bra = ket[iket].copy()
+            item = np.arange(iket.size)
             pword = p >> 6
             qword = q >> 6
             pbit = np.left_shift(np.uint64(1), (p & 63).astype(np.uint64))
@@ -54,7 +54,7 @@ def rdm1(state: Any, x: Any, weight: Any) -> np.ndarray:
             prefix = np.pad(np.cumsum(occ, axis=1), ((0, 0), (1, 0)))
             left = np.minimum(p, q)
             right = np.maximum(p, q)
-            parity = (prefix[source, right] - prefix[source, left + 1]) & 1
+            parity = (prefix[iket, right] - prefix[iket, left + 1]) & 1
 
             raw, _, inverse = sector.unique(bra)
             bra_logpsi = batch.bucket(
@@ -68,11 +68,11 @@ def rdm1(state: Any, x: Any, weight: Any) -> np.ndarray:
             ratio = np.asarray(
                 to_ratio(
                     jax.tree.map(lambda a: a[inverse], bra_logpsi),
-                    jax.tree.map(lambda a: a[slc][source], ket_logpsi),
+                    jax.tree.map(lambda a: a[slc][iket], ket_logpsi),
                 )
             ).reshape(-1)
             value = 1.0 - 2.0 * parity
-            np.add.at(out, (spin, p, q), mass[source] * value * ratio)
+            np.add.at(out, (spin, p, q), mass[iket] * value * ratio)
 
     return np.real_if_close(out)
 
@@ -168,46 +168,46 @@ def rdm2(state: Any, x: Any, weight: Any) -> np.ndarray:
 
                     ps = p[pair]
                     qs = q[pair]
-                    source_p = spin * norb + ps
-                    source_q = tau * norb + qs
+                    ann_p = spin * norb + ps
+                    ann_q = tau * norb + qs
                     ir = spin * norb + r
                     is_ = tau * norb + s
 
                     bra = np.repeat(ket[None, :], r.size, axis=0)
                     sign = np.ones(r.size, dtype=np.float64)
                     item = np.arange(r.size)
-                    for target, add in (
-                        (source_p, False),
-                        (source_q, False),
+                    for sorb, add in (
+                        (ann_p, False),
+                        (ann_q, False),
                         (is_, True),
                         (ir, True),
                     ):
-                        target_spin = target // norb
-                        target_orbital = target - target_spin * norb
-                        target_word = target_orbital >> 6
-                        shift = (target_orbital & 63).astype(np.uint64)
+                        op_spin = sorb // norb
+                        op_orb = sorb - op_spin * norb
+                        op_word = op_orb >> 6
+                        shift = (op_orb & 63).astype(np.uint64)
                         parity = np.where(
-                            target_spin == 1,
+                            op_spin == 1,
                             np.bitwise_count(bra[:, 0]).sum(axis=1),
                             0,
                         )
                         for w in range(bra.shape[2]):
                             parity += np.where(
-                                target_word > w,
-                                np.bitwise_count(bra[item, target_spin, w]),
+                                op_word > w,
+                                np.bitwise_count(bra[item, op_spin, w]),
                                 0,
                             )
                         mask = np.left_shift(np.uint64(1), shift) - np.uint64(1)
                         parity += np.bitwise_count(
-                            bra[item, target_spin, target_word] & mask
+                            bra[item, op_spin, op_word] & mask
                         )
                         sign *= 1.0 - 2.0 * (parity & 1)
 
-                        target_bit = np.left_shift(np.uint64(1), shift)
+                        op_bit = np.left_shift(np.uint64(1), shift)
                         if add:
-                            bra[item, target_spin, target_word] |= target_bit
+                            bra[item, op_spin, op_word] |= op_bit
                         else:
-                            bra[item, target_spin, target_word] &= ~target_bit
+                            bra[item, op_spin, op_word] &= ~op_bit
 
                     diagonal = np.all(bra == ket, axis=(1, 2))
                     if np.any(diagonal):

@@ -21,8 +21,8 @@ def main() -> None:
     )
     precision.configure("single")
 
-    path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
-    hamiltonian = Hamiltonian.load(path)
+    fcidump = next(Path.cwd().rglob("H2.FCIDUMP"))
+    hamiltonian = Hamiltonian.load(fcidump)
     sector = hamiltonian.sector
 
     orbitals = np.eye(sector.norb)
@@ -51,8 +51,8 @@ def main() -> None:
     for outer in range(2):
         vmc.state = vmc.state.evolve(topk_selector(k=128), eps=1.0e-6)
         rec = vmc.run(50)
-        rec["outer"] = float(outer + 1)
-        rec["n_basis"] = float(vmc.state.n_basis)
+        rec["outer"] = outer + 1
+        rec["n_basis"] = vmc.state.n_basis
         log.add(rec)
 
 

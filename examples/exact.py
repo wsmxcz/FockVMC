@@ -21,8 +21,8 @@ def main() -> None:
     )
     precision.configure("single")
 
-    path = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
-    hamiltonian = Hamiltonian.load(path)
+    fcidump = next(Path.cwd().rglob("H2.FCIDUMP"))
+    hamiltonian = Hamiltonian.load(fcidump)
     sector = hamiltonian.sector
 
     orbitals = np.eye(sector.norb)
@@ -49,7 +49,20 @@ def main() -> None:
     )
     vmc = VMC.init(state, optimizer)
 
-    log = Logger(every=10, verbose=2)
+    log = Logger(
+        every=10,
+        keys=(
+            "step",
+            "energy",
+            "eloc_var",
+            "ess_frac",
+            "essu_frac",
+            "w_max",
+            "acceptance_rate",
+            "unique_frac",
+            "n_forward",
+        ),
+    )
     vmc.run(100, logger=log)
 
 

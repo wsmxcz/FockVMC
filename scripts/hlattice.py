@@ -209,10 +209,10 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=4096,
         n_chains=4096,
-        thermal_steps=4096,
+        burnin_steps=4096,
         discard_steps=16,
         proposal="ham",
-        blur=0.5,
+        beta=0.5,
         alpha=None,
     )
 

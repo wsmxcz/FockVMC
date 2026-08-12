@@ -6,7 +6,7 @@ They do not own sampling, local energies, or learning rates.
 ## Geometry
 
 Let $q_\theta(x)\in\mathbb R^d$ be the real differentiable model coordinate.
-For normalized Born weights $w_n$, define
+For normalized weights $w_n$, define
 
 $$
 J_n=\frac{\partial q_\theta(x_n)}{\partial\theta},
@@ -26,7 +26,7 @@ $$
 params    parameters at which the estimate was evaluated
 coord     q(params, x)
 x         estimator configurations
-weight    Born weights
+weight    normalized weights
 b         sample-space energy residual
 ```
 

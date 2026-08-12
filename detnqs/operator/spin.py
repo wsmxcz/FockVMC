@@ -62,11 +62,11 @@ class S2:
         np.cumsum(count, out=ptr[1:])
         prefix = np.pad(np.cumsum(single, axis=1), ((0, 0), (1, 0)))
 
-        source, p, q = np.nonzero(
+        iket, p, q = np.nonzero(
             aonly[:, :, None] & bonly[:, None, :]
         )
-        bra = ket[source].copy()
-        item = np.arange(source.size)
+        bra = ket[iket].copy()
+        item = np.arange(iket.size)
         wp = word[p]
         wq = word[q]
         bp = bit[p]
@@ -78,7 +78,7 @@ class S2:
 
         left = np.minimum(p, q)
         right = np.maximum(p, q)
-        parity = (prefix[source, right] - prefix[source, left + 1]) & 1
+        parity = (prefix[iket, right] - prefix[iket, left + 1]) & 1
         value = 2.0 * parity.astype(np.float64) - 1.0
 
         return diag, ptr, bra, value
@@ -119,15 +119,15 @@ def spin_correlation(state: Any, x: Any, weight: Any) -> np.ndarray:
             optimize=True,
         )
 
-        source, p, q = np.nonzero(
+        iket, p, q = np.nonzero(
             (alpha & ~beta)[:, :, None]
             & (beta & ~alpha)[:, None, :]
         )
-        if source.size == 0:
+        if iket.size == 0:
             continue
 
-        bra = ket[source].copy()
-        item = np.arange(source.size)
+        bra = ket[iket].copy()
+        item = np.arange(iket.size)
         wp = p >> 6
         wq = q >> 6
         bp = np.left_shift(np.uint64(1), (p & 63).astype(np.uint64))
@@ -140,7 +140,7 @@ def spin_correlation(state: Any, x: Any, weight: Any) -> np.ndarray:
         prefix = np.pad(np.cumsum(single, axis=1), ((0, 0), (1, 0)))
         left = np.minimum(p, q)
         right = np.maximum(p, q)
-        parity = (prefix[source, right] - prefix[source, left + 1]) & 1
+        parity = (prefix[iket, right] - prefix[iket, left + 1]) & 1
         value = parity.astype(np.float64) - 0.5
 
         raw, _, inverse = sector.unique(bra)
@@ -155,10 +155,10 @@ def spin_correlation(state: Any, x: Any, weight: Any) -> np.ndarray:
         ratio = np.asarray(
             to_ratio(
                 jax.tree.map(lambda a: a[inverse], bra_logpsi),
-                jax.tree.map(lambda a: a[slc][source], ket_logpsi),
+                jax.tree.map(lambda a: a[slc][iket], ket_logpsi),
             )
         ).reshape(-1)
-        transverse = mass[source] * value * ratio
+        transverse = mass[iket] * value * ratio
         np.add.at(out, (p, q), transverse)
         np.add.at(out, (q, p), transverse)
 

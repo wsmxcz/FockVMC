@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..hilbert import DetSector
 from ..utils import Timer, batch, precision
 
 
@@ -25,14 +24,15 @@ class ChainState:
 class MCSampler:
     """Metropolis sampler for Fock-space chains.
 
-    Hamiltonian proposals target the degree-tilted law
+    Hamiltonian proposals yield the degree-tilted auxiliary distribution
     ``rho_alpha(x) s(x)``, so no reverse ket degree is needed.
+    Single proposals are a Born distribution baseline with ``beta=0``.
     """
 
     n_samples: int = 1024
     n_chains: int = 1024
 
-    thermal_steps: int = 32
+    burnin_steps: int = 32
     discard_steps: int = 0
     sweep_steps: int = 1
     reset_chains: bool = False
@@ -40,45 +40,49 @@ class MCSampler:
     alpha: float | None = 1.0
     proposal: str = "ham"
 
-    blur: float = 0.5
+    beta: float = 0.5
 
     def __post_init__(self) -> None:
         n_samples = int(self.n_samples)
         n_chains = int(self.n_chains)
-        thermal_steps = int(self.thermal_steps)
+        burnin_steps = int(self.burnin_steps)
         discard_steps = int(self.discard_steps)
         sweep_steps = int(self.sweep_steps)
         proposal = str(self.proposal)
         reset_chains = bool(self.reset_chains)
-        blur = float(self.blur)
+        beta = float(self.beta)
 
         if n_samples <= 0:
             raise ValueError("n_samples must be positive")
         if n_chains <= 0:
             raise ValueError("n_chains must be positive")
-        if thermal_steps < 0 or discard_steps < 0:
-            raise ValueError("thermal_steps and discard_steps must be nonnegative")
+        if burnin_steps < 0 or discard_steps < 0:
+            raise ValueError("burnin_steps and discard_steps must be nonnegative")
         if sweep_steps <= 0:
             raise ValueError("sweep_steps must be positive")
         if proposal not in {"ham", "single"}:
             raise ValueError("proposal must be 'ham' or 'single'")
-        if not 0.0 <= blur <= 1.0:
-            raise ValueError("blur must satisfy 0 <= blur <= 1")
+        if not 0.0 <= beta <= 1.0:
+            raise ValueError("beta must satisfy 0 <= beta <= 1")
 
         alpha = None
         if self.alpha is not None:
             alpha = float(self.alpha)
             if not np.isfinite(alpha) or not 0.0 <= alpha <= 2.0:
                 raise ValueError("alpha must be None or satisfy 0 <= alpha <= 2")
+        if proposal == "single" and (alpha != 2.0 or beta != 0.0):
+            raise ValueError(
+                "proposal='single' requires alpha=2.0 and beta=0.0"
+            )
 
         object.__setattr__(self, "n_samples", n_samples)
         object.__setattr__(self, "n_chains", n_chains)
-        object.__setattr__(self, "thermal_steps", thermal_steps)
+        object.__setattr__(self, "burnin_steps", burnin_steps)
         object.__setattr__(self, "discard_steps", discard_steps)
         object.__setattr__(self, "sweep_steps", sweep_steps)
         object.__setattr__(self, "reset_chains", reset_chains)
         object.__setattr__(self, "proposal", proposal)
-        object.__setattr__(self, "blur", blur)
+        object.__setattr__(self, "beta", beta)
         object.__setattr__(self, "alpha", alpha)
 
     def init(
@@ -126,7 +130,7 @@ class MCSampler:
             alpha=float(np.clip(alpha0, 0.0, 2.0)),
         )
 
-        for _ in range(self.thermal_steps):
+        for _ in range(self.burnin_steps):
             state, _, _, _ = self._step(
                 params,
                 hamiltonian,
@@ -148,7 +152,7 @@ class MCSampler:
         eps1: float,
         profile: bool = False,
         timer: Timer | None = None,
-    ) -> tuple[ChainState, np.ndarray, np.ndarray, dict[str, float]]:
+    ) -> tuple[ChainState, np.ndarray, np.ndarray, dict[str, float | int]]:
         """Advance chains and return observed configurations.
 
         The caller owns logabs synchronization. The sampler only advances
@@ -220,9 +224,11 @@ class MCSampler:
                 proposed += info["proposed"]
                 n_conn += info["n_conn"]
 
-        stats = {"accept": float(accepted / proposed if proposed else 0.0)}
+        stats = {
+            "acceptance_rate": float(accepted / proposed if proposed else 0.0)
+        }
         if profile:
-            stats["n_conn"] = float(n_conn)
+            stats["n_conn"] = n_conn
 
         return state, observations, mass, stats
 
@@ -242,7 +248,7 @@ class MCSampler:
         rdtype = precision.real("calc", host=True)
         n_chain = int(state.x.shape[0])
         n_observe = int(n_observe)
-        beta = self.blur
+        beta = self.beta
 
         with timer("sample"):
             key, random_key = jax.random.split(state.key)
@@ -257,29 +263,167 @@ class MCSampler:
             observed = np.ascontiguousarray(state.x[pick])
             obs_mass = np.ones(n_observe, dtype=rdtype)
 
+        if self.proposal == "single":
+            sector = hamiltonian.sector
+            n_move_a = sector.n_alpha * (sector.norb - sector.n_alpha)
+            n_move_b = sector.n_beta * (sector.norb - sector.n_beta)
+            n_move = n_move_a + n_move_b
+
+            if n_move == 0:
+                return (
+                    replace(state, key=key),
+                    observed,
+                    obs_mass,
+                    {"accepted": 0, "proposed": 0, "n_conn": 0},
+                )
+
+            with timer("sample"):
+                item = np.arange(n_chain, dtype=np.int64)
+                move = rng.integers(n_move, size=n_chain, dtype=np.int64)
+                spin = (move >= n_move_a).astype(np.int64)
+                move_spin = move - spin * n_move_a
+
+                n_occ = np.where(spin == 0, sector.n_alpha, sector.n_beta)
+                n_vir = sector.norb - n_occ
+                occ_rank = move_spin // n_vir
+                vir_rank = move_spin % n_vir
+
+                words = state.x[item, spin]
+                valid = np.full(
+                    sector.nword,
+                    np.iinfo(np.uint64).max,
+                    dtype=np.uint64,
+                )
+                remainder = sector.norb & 63
+                if remainder:
+                    valid[-1] = (
+                        np.uint64(1) << np.uint64(remainder)
+                    ) - np.uint64(1)
+
+                vir_words = (~words) & valid
+                occ_prefix = np.cumulative_sum(
+                    np.bitwise_count(words),
+                    axis=1,
+                    dtype=np.int32,
+                    include_initial=True,
+                )
+                vir_prefix = np.cumulative_sum(
+                    np.bitwise_count(vir_words),
+                    axis=1,
+                    dtype=np.int32,
+                    include_initial=True,
+                )
+                occ_word = np.argmax(occ_prefix[:, 1:] > occ_rank[:, None], axis=1)
+                vir_word = np.argmax(vir_prefix[:, 1:] > vir_rank[:, None], axis=1)
+                occ_before = occ_prefix[item, occ_word]
+                vir_before = vir_prefix[item, vir_word]
+
+                selected = np.stack(
+                    (words[item, occ_word], vir_words[item, vir_word]),
+                    axis=1,
+                )
+                bits = np.unpackbits(
+                    selected.view(np.uint8),
+                    axis=1,
+                    bitorder="little",
+                ).reshape(n_chain, 2, 64)
+                bit_prefix = np.cumsum(bits, axis=2, dtype=np.int16)
+
+                occ_bit = np.argmax(
+                    bit_prefix[:, 0] == (occ_rank - occ_before)[:, None] + 1,
+                    axis=1,
+                ).astype(np.uint64)
+                vir_bit = np.argmax(
+                    bit_prefix[:, 1] == (vir_rank - vir_before)[:, None] + 1,
+                    axis=1,
+                ).astype(np.uint64)
+
+                candidate = state.x.copy()
+                candidate[item, spin, occ_word] ^= np.uint64(1) << occ_bit
+                candidate[item, spin, vir_word] ^= np.uint64(1) << vir_bit
+
+            with timer("unique"):
+                unique, first, inverse = sector.unique(
+                    np.concatenate((state.x, candidate), axis=0)
+                )
+
+            with timer("reduce"):
+                known = first < n_chain
+                unique_logabs = np.empty(unique.shape[0], dtype=rdtype)
+                unique_logabs[known] = state.logabs[first[known]]
+                unknown = ~known
+
+            if unknown.any():
+                with timer("forward"):
+                    value = batch.apply(
+                        model.logabs,
+                        params,
+                        np.ascontiguousarray(unique[unknown]),
+                    )
+                    jax.block_until_ready(value)
+                    unknown_logabs = precision.host(
+                        value,
+                        "calc",
+                        "real",
+                    ).reshape(-1)
+
+                with timer("reduce"):
+                    unique_logabs[unknown] = unknown_logabs
+
+            with timer("sample"):
+                candidate_logabs = unique_logabs[inverse[n_chain:]]
+                log_accept = rdtype(2.0) * (
+                    candidate_logabs - state.logabs
+                )
+                accept = np.log(rng.random(n_chain)) < np.minimum(
+                    rdtype(0.0),
+                    log_accept,
+                )
+                accepted = int(np.count_nonzero(accept))
+                reject = ~accept
+                candidate[reject] = state.x[reject]
+                candidate_logabs[reject] = state.logabs[reject]
+
+                next_state = replace(
+                    state,
+                    key=key,
+                    x=candidate,
+                    logabs=precision.cast(
+                        candidate_logabs,
+                        "calc",
+                        "real",
+                        host=True,
+                    ),
+                )
+
+            return (
+                next_state,
+                observed,
+                obs_mass,
+                {
+                    "accepted": accepted,
+                    "proposed": n_chain,
+                    "n_conn": 0,
+                },
+            )
+
         with timer("unique"):
-            ket, first, ket_index = hamiltonian.sector.unique(state.x)
+            ket, _, ket_index = hamiltonian.sector.unique(state.x)
             n_ket = int(ket.shape[0])
 
         with timer("reduce"):
-            ket_logabs = precision.cast(
-                state.logabs[np.asarray(first, dtype=np.int64)],
-                "calc",
-                "real",
-                host=True,
-            )
             obs_ket = ket_index[pick] if n_observe else np.empty(0, dtype=np.int64)
 
         with timer("sample"):
-            blur = (
+            kernel_move = (
                 rng.random(n_observe) < beta
                 if n_observe > 0 and beta > 0.0
                 else np.zeros(n_observe, dtype=bool)
             )
 
         with timer("reduce"):
-            blur_counts = np.bincount(
-                obs_ket[blur],
+            kernel_counts = np.bincount(
+                obs_ket[kernel_move],
                 minlength=n_ket,
             ).astype(np.int64)
 
@@ -287,146 +431,59 @@ class MCSampler:
         active = np.zeros(n_chain, dtype=bool)
         candidate_pos = np.full(n_chain, -1, dtype=np.int64)
 
-        conn_bra = None
-        conn_ptr = None
-        conn_degree = None
-        n_conn = 0
+        with timer("reduce"):
+            proposal_counts = np.bincount(
+                ket_index,
+                minlength=n_ket,
+            ).astype(np.int64)
+            counts = (
+                np.stack((proposal_counts, kernel_counts))
+                if kernel_move.any()
+                else proposal_counts
+            )
 
-        if self.proposal == "ham":
-            with timer("reduce"):
-                proposal_counts = np.bincount(
-                    ket_index,
-                    minlength=n_ket,
-                ).astype(np.int64)
-                counts = (
-                    np.stack((proposal_counts, blur_counts))
-                    if blur.any()
-                    else proposal_counts
-                )
+        with timer("conns"):
+            conn = hamiltonian.sample_conn(
+                ket,
+                counts,
+                eps1=np.inf,
+                eps2=float(eps1),
+                seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
+            )
+            conn_bra = np.asarray(conn.bra, dtype=np.uint64)
+            conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
+            n_conn = int(conn_ptr[-1])
 
-            with timer("conns"):
-                conn = hamiltonian.sample_conn(
-                    ket,
-                    counts,
-                    eps1=np.inf,
-                    eps2=float(eps1),
-                    seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
-                )
-                conn_bra = np.asarray(conn.bra, dtype=np.uint64)
-                conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
-                n_conn = int(conn_ptr[-1])
+        with timer("sample"):
+            proposal_ptr = conn_ptr[: n_ket + 1]
+            take = np.diff(proposal_ptr)
 
+            order = np.argsort(ket_index, kind="stable")
+            sorted_ket = ket_index[order]
+            active_order = order[take[sorted_ket] > 0]
+
+            records = np.arange(proposal_ptr[0], proposal_ptr[-1], dtype=np.int64)
+            if records.size:
+                candidate_pos[active_order] = n_ket + records
+                candidate[active_order] = conn_bra[candidate_pos[active_order]]
+
+            active = candidate_pos >= 0
+            # The degree in the auxiliary distribution cancels proposal asymmetry.
+
+        if kernel_move.any():
             with timer("sample"):
-                proposal_ptr = conn_ptr[: n_ket + 1]
-                take = np.diff(proposal_ptr)
+                kernel_ptr = conn_ptr[n_ket : 2 * n_ket + 1]
+                take = np.diff(kernel_ptr)
 
-                order = np.argsort(ket_index, kind="stable")
-                sorted_ket = ket_index[order]
-                active_order = order[take[sorted_ket] > 0]
+                kernel_pick = np.flatnonzero(kernel_move)
+                order = np.argsort(obs_ket[kernel_pick], kind="stable")
+                kernel_pick = kernel_pick[order]
+                sorted_ket = obs_ket[kernel_pick]
+                active_pick = kernel_pick[take[sorted_ket] > 0]
 
-                records = np.arange(proposal_ptr[0], proposal_ptr[-1], dtype=np.int64)
+                records = np.arange(kernel_ptr[0], kernel_ptr[-1], dtype=np.int64)
                 if records.size:
-                    candidate_pos[active_order] = n_ket + records
-                    candidate[active_order] = conn_bra[candidate_pos[active_order]]
-
-                active = candidate_pos >= 0
-                # Degree-tilted target cancels the heat-bath ket degree.
-
-        else:
-            with timer("sample"):
-                sector = hamiltonian.sector
-                if not isinstance(sector, DetSector):
-                    raise NotImplementedError(
-                        "proposal='single' is defined only for DetSector"
-                    )
-
-                n_move_a = sector.n_alpha * (sector.norb - sector.n_alpha)
-                n_move_b = sector.n_beta * (sector.norb - sector.n_beta)
-                n_move = n_move_a + n_move_b
-
-                if n_move > 0:
-                    orb = np.arange(sector.norb, dtype=np.int64)
-                    word = orb >> 6
-                    bit = (orb & 63).astype(np.uint64)
-                    occ = ((state.x[:, :, word] >> bit) & np.uint64(1)).astype(bool)
-
-                    move = rng.integers(n_move, size=n_chain, dtype=np.int64)
-                    spin = np.where(move < n_move_a, 0, 1).astype(np.int64)
-                    move_spin = np.where(spin == 0, move, move - n_move_a)
-
-                    n_occ = np.where(spin == 0, sector.n_alpha, sector.n_beta)
-                    n_vir = sector.norb - n_occ
-                    occ_rank = move_spin // n_vir
-                    vir_rank = move_spin % n_vir
-
-                    chain_occ = occ[np.arange(n_chain), spin]
-                    chain_vir = ~chain_occ
-                    occ_pos = np.cumsum(chain_occ, axis=1) - 1
-                    vir_pos = np.cumsum(chain_vir, axis=1) - 1
-
-                    occ_orb = np.argmax(
-                        chain_occ & (occ_pos == occ_rank[:, None]),
-                        axis=1,
-                    )
-                    vir_orb = np.argmax(
-                        chain_vir & (vir_pos == vir_rank[:, None]),
-                        axis=1,
-                    )
-                    item = np.arange(n_chain, dtype=np.int64)
-
-                    occ_word = occ_orb >> 6
-                    occ_bit = (occ_orb & 63).astype(np.uint64)
-                    vir_word = vir_orb >> 6
-                    vir_bit = (vir_orb & 63).astype(np.uint64)
-
-                    candidate[item, spin, occ_word] &= ~(np.uint64(1) << occ_bit)
-                    candidate[item, spin, vir_word] |= np.uint64(1) << vir_bit
-                    active[:] = True
-
-        if n_observe > 0 and beta > 0.0:
-            if self.proposal != "ham":
-                with timer("conns"):
-                    conn = hamiltonian.sample_conn(
-                        ket,
-                        blur_counts,
-                        eps1=np.inf,
-                        eps2=float(eps1),
-                        seed=int(rng.integers(0, 2**32, dtype=np.uint64)),
-                    )
-                    conn_bra = np.asarray(conn.bra, dtype=np.uint64)
-                    conn_ptr = np.asarray(conn.ptr, dtype=np.int64)
-                    conn_degree = precision.cast(
-                        np.asarray(conn.degree),
-                        "calc",
-                        "real",
-                        host=True,
-                    )
-                    n_conn += int(conn_ptr[-1])
-
-            with timer("sample"):
-                if blur.any():
-                    offset = n_ket if self.proposal == "ham" else 0
-                    blur_ptr = conn_ptr[offset : offset + n_ket + 1]
-                    take = np.diff(blur_ptr)
-
-                    blur_pick = np.flatnonzero(blur)
-                    order = np.argsort(obs_ket[blur_pick], kind="stable")
-                    blur_pick = blur_pick[order]
-                    sorted_ket = obs_ket[blur_pick]
-                    active_pick = blur_pick[take[sorted_ket] > 0]
-
-                    records = np.arange(blur_ptr[0], blur_ptr[-1], dtype=np.int64)
-                    if records.size:
-                        observed[active_pick] = conn_bra[n_ket + records]
-
-                if self.proposal != "ham":
-                    # Single-move chains need the blur degree as sample mass.
-                    obs_degree = conn_degree[obs_ket]
-                    obs_mass = np.where(
-                        obs_degree > 0.0,
-                        obs_degree,
-                        rdtype(1.0),
-                    )
+                    observed[active_pick] = conn_bra[n_ket + records]
 
         proposed = int(np.count_nonzero(active))
         accepted = 0
@@ -436,60 +493,20 @@ class MCSampler:
             logabs_candidate = np.empty(n_chain, dtype=rdtype)
             logabs_candidate[~active] = state.logabs[~active]
 
-            if self.proposal == "ham":
-                with timer("reduce"):
-                    new = candidate_pos[active]
+            with timer("reduce"):
+                new = candidate_pos[active]
 
-                with timer("forward"):
-                    value = batch.apply(
-                        model.logabs,
-                        params,
-                        np.ascontiguousarray(conn_bra[new]),
-                    )
-                    jax.block_until_ready(value)
-                    new_logabs = precision.host(value, "calc", "real").reshape(-1)
+            with timer("forward"):
+                value = batch.apply(
+                    model.logabs,
+                    params,
+                    np.ascontiguousarray(conn_bra[new]),
+                )
+                jax.block_until_ready(value)
+                new_logabs = precision.host(value, "calc", "real").reshape(-1)
 
-                with timer("reduce"):
-                    logabs_candidate[active] = new_logabs
-
-            else:
-                with timer("unique"):
-                    unique_candidate, _, inverse = hamiltonian.sector.unique(
-                        candidate[active]
-                    )
-                    _, first_all, lookup = hamiltonian.sector.unique(
-                        np.concatenate((ket, unique_candidate), axis=0)
-                    )
-
-                with timer("reduce"):
-                    first_candidate = first_all[lookup[n_ket:]]
-                    known = first_candidate < n_ket
-
-                    unique_logabs = np.empty(unique_candidate.shape[0], dtype=rdtype)
-                    if known.any():
-                        unique_logabs[known] = ket_logabs[first_candidate[known]]
-
-                    unknown = ~known
-
-                if unknown.any():
-                    with timer("forward"):
-                        value = batch.apply(
-                            model.logabs,
-                            params,
-                            np.ascontiguousarray(unique_candidate[unknown]),
-                        )
-                        jax.block_until_ready(value)
-                        unknown_logabs = precision.host(
-                            value,
-                            "calc",
-                            "real",
-                        ).reshape(-1)
-
-                    with timer("reduce"):
-                        unique_logabs[unknown] = unknown_logabs
-
-                with timer("reduce"):
-                    logabs_candidate[active] = unique_logabs[inverse]
+            with timer("reduce"):
+                logabs_candidate[active] = new_logabs
 
             with timer("sample"):
                 # Fixed alpha uses sampler.alpha; auto alpha uses chain state.

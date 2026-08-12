@@ -19,12 +19,12 @@ def smooth(y: np.ndarray, window: int = 11) -> np.ndarray:
 
 def main() -> None:
     runs = {
-        "32768": Path("fe2s2.jsonl"),
-        "8192": Path("fe2s2_eloc8192.jsonl"),
-        # "1024": Path("fe2s2_eps1e-3.jsonl"),
-        "1e-4": Path("fe2s2_eps1e-4.jsonl"),
-        "1e-5": Path("fe2s2_eps1e-5.jsonl"),
-        "1e-6": Path("fe2s2_eps1e-6.jsonl"),
+        "32768": next(Path.cwd().rglob("fe2s2.jsonl")),
+        "8192": next(Path.cwd().rglob("fe2s2_eloc8192.jsonl")),
+        # "1024": next(Path.cwd().rglob("fe2s2_eps1e-3.jsonl")),
+        "1e-4": next(Path.cwd().rglob("fe2s2_eps1e-4.jsonl")),
+        "1e-5": next(Path.cwd().rglob("fe2s2_eps1e-5.jsonl")),
+        "1e-6": next(Path.cwd().rglob("fe2s2_eps1e-6.jsonl")),
     }
     benchmark = -116.6056091  # Fe2S2
     # benchmark = -327.248858  # Fe4S4
@@ -43,7 +43,14 @@ def main() -> None:
         with path.open(encoding="utf-8") as stream:
             rows = [json.loads(line) for line in stream if line.strip()]
 
-        keys = ("energy", "eloc_var", "accept", "alpha", "s2", "time_total")
+        keys = (
+            "energy",
+            "eloc_var",
+            "acceptance_rate",
+            "alpha",
+            "s2",
+            "time_total",
+        )
         data = {
             key: np.asarray([row.get(key, np.nan) for row in rows], dtype=float)
             for key in keys
@@ -61,7 +68,7 @@ def main() -> None:
         finite = energy[np.isfinite(energy)]
         print(f"{label}: {path} ({len(rows)} records)")
         if finite.size:
-            print(f"  final energy: {finite[-1]:.8f}")
+            print(f"  final energy: {finite[-1]:.6f}")
             print(f"  final error : {1e3 * abs(finite[-1] - benchmark):.3f} mEh")
 
         # Energy
@@ -96,7 +103,7 @@ def main() -> None:
         # Acceptance and tempering
         axes[3].plot(
             step,
-            smooth(data["accept"]),
+            smooth(data["acceptance_rate"]),
             color=color,
             lw=1.5,
         )
@@ -140,7 +147,7 @@ def main() -> None:
         r"$E$ ($E_h$)",
         r"$|E-E_{\mathrm{ref}}|$ (m$E_h$)",
         r"$\mathrm{Var}(E_{\mathrm{L}})$",
-        "acceptance",
+        "acceptance rate",
         r"$\langle S^2\rangle$",
         "wall time (min)",
     )

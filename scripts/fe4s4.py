@@ -25,8 +25,8 @@ def main() -> None:
 
     name = "fe4s4"
     seed = 0
-    path = Path(__file__).with_name("FCIDUMP") / f"{name}.FCIDUMP"
-    hamiltonian = Hamiltonian.load(path)
+    fcidump = next(Path.cwd().rglob(f"{name}.FCIDUMP"))
+    hamiltonian = Hamiltonian.load(fcidump)
     sector = hamiltonian.sector
 
     fe1 = np.arange(2, 7)
@@ -56,10 +56,10 @@ def main() -> None:
     sampler = MCSampler(
         n_samples=4096,
         n_chains=4096,
-        thermal_steps=4096,
+        burnin_steps=4096,
         discard_steps=16,
         proposal="ham",
-        blur=0.5,
+        beta=0.5,
         alpha=None,
     )
     chains = sample_slater(

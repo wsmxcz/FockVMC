@@ -48,7 +48,7 @@ def chunk(
     expansion: int = 1,
     size: int | None = None,
 ) -> Iterator[slice]:
-    """Partition source items by their estimated downstream work."""
+    """Partition items by their estimated downstream work."""
     n = int(n)
     expansion = int(expansion)
     if n < 0 or expansion < 0:

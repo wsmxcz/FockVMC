@@ -166,13 +166,13 @@ class MCState:
         tiny = rdtype(precision.tiny("calc"))
         alpha = float(sampler_state.alpha)
 
-        target = weight * np.abs(residual)
-        norm_t = float(np.sum(target))
+        residual_mass = weight * np.abs(residual)
+        norm_r = float(np.sum(residual_mass))
         norm_m = float(np.sum(mass))
-        if norm_t <= float(tiny) or norm_m <= float(tiny):
+        if norm_r <= float(tiny) or norm_m <= float(tiny):
             return sampler_state
 
-        mu_s = float(np.dot(target, score) / norm_t)
+        mu_s = float(np.dot(residual_mass, score) / norm_r)
         nu_s = float(np.dot(mass, score) / norm_m)
         nu_q = float(np.dot(mass, score2) / norm_m)
         info = nu_q - nu_s * nu_s
@@ -237,14 +237,14 @@ class MCState:
         )
 
         with timer("unique"):
-            ket, _, observation_to_ket = self.hamiltonian.sector.unique(observations)
+            ket, _, obs_ket = self.hamiltonian.sector.unique(observations)
             n_ket = int(ket.shape[0])
 
         with timer("reduce"):
             raw_mass = precision.cast(observation_mass, "calc", "real", host=True)
-            mass = np.bincount(observation_to_ket, weights=raw_mass, minlength=n_ket)
+            mass = np.bincount(obs_ket, weights=raw_mass, minlength=n_ket)
             mass2 = np.bincount(
-                observation_to_ket,
+                obs_ket,
                 weights=raw_mass * raw_mass,
                 minlength=n_ket,
             )
@@ -319,7 +319,7 @@ class MCState:
             strong_count = np.diff(conn.strong_ptr)
             strong_row = np.flatnonzero(strong_count)
             strong_start = conn.strong_ptr[strong_row]
-            strong_source = np.repeat(
+            strong_ket = np.repeat(
                 np.arange(n_ket, dtype=np.int32),
                 strong_count,
             )
@@ -328,9 +328,9 @@ class MCState:
             auto = self.sampler.alpha is None
             alpha_used = sampler_state.alpha if auto else self.sampler.alpha
             alpha = rdtype(alpha_used)
-            beta = rdtype(self.sampler.blur)
-            tilted = self.sampler.proposal == "ham" or beta > 0.0
-            source_logamp = alpha * ket_logabs
+            beta = rdtype(self.sampler.beta)
+            tilted = self.sampler.proposal == "ham"
+            aux_logamp = alpha * ket_logabs
 
             eloc = np.array(conn.diag, dtype=eloc_dtype, copy=True)
             if n_strong:
@@ -342,7 +342,7 @@ class MCState:
                     to_ratio(
                         strong_logpsi,
                         jax.tree.map(
-                            lambda a: a[strong_source],
+                            lambda a: a[strong_ket],
                             ket_logpsi,
                         ),
                     ),
@@ -354,7 +354,7 @@ class MCState:
                 )
 
             if not tilted:
-                log_observation = source_logamp
+                log_induced = aux_logamp
                 if auto:
                     score = ket_logabs
                     score2 = ket_logabs * ket_logabs
@@ -368,7 +368,7 @@ class MCState:
                 active = stay > 0.0
                 log_stay[active] = (
                     np.log(np.maximum(stay[active], tiny))
-                    + source_logamp[active]
+                    + aux_logamp[active]
                 )
 
                 if beta > 0.0 and n_strong:
@@ -379,21 +379,21 @@ class MCState:
                     terms = alpha * strong_logabs + np.log(
                         np.maximum(np.abs(strong_h), tiny)
                     )
-                    log_blur = np.log(beta) + math.segment_logsumexp(
+                    log_move = np.log(beta) + math.segment_logsumexp(
                         conn.strong_ptr,
                         terms,
                         n_ket,
                     )
-                    log_observation = np.logaddexp(log_stay, log_blur)
+                    log_induced = np.logaddexp(log_stay, log_move)
                 else:
-                    log_observation = log_stay
+                    log_induced = log_stay
 
                 if auto:
                     # S=d_alpha log r_alpha is the latent log-amplitude moment.
-                    finite = np.isfinite(log_stay) & np.isfinite(log_observation)
+                    finite = np.isfinite(log_stay) & np.isfinite(log_induced)
                     stay_weight = np.zeros(n_ket, dtype=rdtype)
                     stay_weight[finite] = np.exp(
-                        log_stay[finite] - log_observation[finite]
+                        log_stay[finite] - log_induced[finite]
                     )
                     score = stay_weight * ket_logabs
                     score2 = score * ket_logabs
@@ -402,7 +402,7 @@ class MCState:
                         term_log = (
                             np.log(beta)
                             + terms
-                            - log_observation[strong_source]
+                            - log_induced[strong_ket]
                         )
                         finite = np.isfinite(term_log)
                         conn_weight = np.zeros_like(term_log, dtype=rdtype)
@@ -420,7 +420,7 @@ class MCState:
                 weak_count = np.diff(conn.weak_ptr)
                 weak_row = np.flatnonzero(weak_count)
                 weak_start = conn.weak_ptr[weak_row]
-                weak_source = np.repeat(
+                weak_ket = np.repeat(
                     np.arange(n_ket, dtype=np.int32),
                     weak_count,
                 )
@@ -431,7 +431,7 @@ class MCState:
                             bra_logpsi,
                         ),
                         jax.tree.map(
-                            lambda a: a[weak_source],
+                            lambda a: a[weak_ket],
                             ket_logpsi,
                         ),
                     ),
@@ -442,12 +442,12 @@ class MCState:
                     weak_start,
                 )
 
-            # Reweight the observed auxiliary law back to the Born target pi.
+            # Construct normalized importance weights for the Born distribution.
             weight, weight_stats = stats.weight(
                 mass,
                 mass2,
                 ket_logabs,
-                log_observation,
+                log_induced,
             )
             energy, energy_stats = stats.eloc(weight, eloc)
             residual = eloc - energy
@@ -475,7 +475,7 @@ class MCState:
                     o_count = np.diff(o_ptr)
                     o_row = np.flatnonzero(o_count)
                     o_start = o_ptr[o_row]
-                    o_source = np.repeat(
+                    o_ket = np.repeat(
                         np.arange(n_ket, dtype=np.int32),
                         o_count,
                     )
@@ -483,7 +483,7 @@ class MCState:
                         to_ratio(
                             jax.tree.map(lambda a: a[o_slice], bra_logpsi),
                             jax.tree.map(
-                                lambda a: a[o_source],
+                                lambda a: a[o_ket],
                                 ket_logpsi,
                             ),
                         ),
@@ -541,14 +541,16 @@ class MCState:
             **weight_stats,
             **obs_stats,
             "alpha": float(alpha_used),
-            "accept": float(sample_stats.get("accept", 0.0)),
-            "n_forward": float(n_forward),
+            "acceptance_rate": float(
+                sample_stats.get("acceptance_rate", 0.0)
+            ),
+            "n_forward": n_forward,
             "unique_frac": float(n_ket) / max(1.0, float(n_sample)),
         }
         if profile:
             out.update(timer.stats())
             if "n_conn" in sample_stats:
-                out["n_conn"] = float(sample_stats["n_conn"])
+                out["n_conn"] = int(sample_stats["n_conn"])
 
         if data:
             return (

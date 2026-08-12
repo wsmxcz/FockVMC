@@ -3,8 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from detnqs.hilbert import DetSector
-from detnqs.model import (
+from fvmc.hilbert import DetSector
+from fvmc.model import (
     Backflow,
     GBackflow,
     PBackflow,

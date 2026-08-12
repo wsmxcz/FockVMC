@@ -1,6 +1,6 @@
 # Design and conventions
 
-DetNQS keeps the VMC algorithm visible through a small set of objects. Each
+FockVMC keeps the VMC algorithm visible through a small set of objects. Each
 layer owns one mathematical responsibility and depends only on upstream layers.
 
 ## Architecture

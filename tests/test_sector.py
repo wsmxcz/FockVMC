@@ -1,7 +1,7 @@
 import numpy as np
 
-from detnqs.hilbert import DetSector
-from detnqs.operator import number
+from fvmc.hilbert import DetSector
+from fvmc.operator import number
 
 
 def test_packed() -> None:

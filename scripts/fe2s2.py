@@ -6,12 +6,12 @@ import jax
 import numpy as np
 import optax
 
-from detnqs import Hamiltonian, MCState, VMC
-from detnqs.model import PBackflow, slater_reference
-from detnqs.operator import S2
-from detnqs.optimizer import psr
-from detnqs.sampler import MCSampler, sample_slater
-from detnqs.utils import Logger, batch, precision
+from fvmc import Hamiltonian, MCState, VMC
+from fvmc.model import PBackflow, slater_reference
+from fvmc.operator import S2
+from fvmc.optimizer import psr
+from fvmc.sampler import MCSampler, sample_slater
+from fvmc.utils import Logger, batch, precision
 
 
 def main() -> None:

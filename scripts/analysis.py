@@ -7,11 +7,11 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from detnqs import Hamiltonian, MCState
-from detnqs.model import PBackflow
-from detnqs.operator import density_correlation, rdm1, spin_correlation
-from detnqs.sampler import MCSampler
-from detnqs.utils import batch, checkpoint, precision
+from fvmc import Hamiltonian, MCState
+from fvmc.model import PBackflow
+from fvmc.operator import density_correlation, rdm1, spin_correlation
+from fvmc.sampler import MCSampler
+from fvmc.utils import batch, checkpoint, precision
 
 
 def main() -> None:

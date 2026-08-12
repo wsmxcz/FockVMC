@@ -6,10 +6,10 @@ import jax
 import numpy as np
 import optax
 
-from detnqs import Hamiltonian, SelectedState, VMC
-from detnqs.model import Backflow, slater_reference
-from detnqs.utils import Logger, batch, precision
-from detnqs.vstate import topk_selector
+from fvmc import Hamiltonian, SelectedState, VMC
+from fvmc.model import Backflow, slater_reference
+from fvmc.utils import Logger, batch, precision
+from fvmc.vstate import topk_selector
 
 
 def main() -> None:

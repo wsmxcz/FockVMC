@@ -6,9 +6,9 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "detnqs"
+name = "fvmc"
 version = "0.3.0"
-description = "DetNQS: An Efficient Framework for Neural Network Quantum States in Quantum Chemistry"
+description = "A compact, high-performance framework for Fock-space variational Monte Carlo"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -39,7 +39,7 @@ cmake.version = ">=3.20"
 cmake.build-type = "Release"
 
 wheel.packages = [
-  "detnqs",
+  "fvmc",
 ]
 
 [tool.pytest.ini_options]

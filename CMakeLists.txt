@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(detnqs LANGUAGES CXX)
+project(fvmc LANGUAGES CXX)
 
-option(DETNQS_BUILD_PYTHON "Build the nanobind Python extension" ON)
-option(DETNQS_BUILD_CPP_TESTS "Build C++ libdet tests" OFF)
+option(FVMC_BUILD_PYTHON "Build the nanobind Python extension" ON)
+option(FVMC_BUILD_CPP_TESTS "Build C++ libdet tests" OFF)
 
 find_package(OpenMP REQUIRED)
 find_package(unordered_dense CONFIG QUIET)
@@ -25,32 +25,32 @@ add_library(libdet_common INTERFACE)
 
 target_compile_features(libdet_common INTERFACE cxx_std_20)
 target_include_directories(libdet_common INTERFACE
-  ${CMAKE_CURRENT_SOURCE_DIR}/detnqs/operator/libdet/csrc
+  ${CMAKE_CURRENT_SOURCE_DIR}/fvmc/operator/libdet/csrc
 )
 target_link_libraries(libdet_common INTERFACE
   OpenMP::OpenMP_CXX
   unordered_dense::unordered_dense
 )
 
-if(DETNQS_BUILD_PYTHON)
+if(FVMC_BUILD_PYTHON)
   find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
   find_package(nanobind CONFIG REQUIRED)
 
   nanobind_add_module(
     libdet
     MODULE
-    ${CMAKE_CURRENT_SOURCE_DIR}/detnqs/operator/libdet/module.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fvmc/operator/libdet/module.cpp
   )
   target_link_libraries(libdet PRIVATE libdet_common)
 
   install(
     TARGETS libdet
-    LIBRARY DESTINATION detnqs/operator
-    RUNTIME DESTINATION detnqs/operator
+    LIBRARY DESTINATION fvmc/operator
+    RUNTIME DESTINATION fvmc/operator
   )
 endif()
 
-if(DETNQS_BUILD_CPP_TESTS)
+if(FVMC_BUILD_CPP_TESTS)
   enable_testing()
 
   add_executable(test_libdet tests/cpp/test_libdet.cpp)

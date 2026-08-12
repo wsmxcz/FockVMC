@@ -5,11 +5,11 @@ import numpy as np
 import optax
 import pytest
 
-from detnqs import ExactState, Hamiltonian, MCState, SelectedState, VMC
-from detnqs.model import RBM
-from detnqs.operator import number
-from detnqs.sampler import MCSampler
-from detnqs.utils import batch
+from fvmc import ExactState, Hamiltonian, MCState, SelectedState, VMC
+from fvmc.model import RBM
+from fvmc.operator import number
+from fvmc.sampler import MCSampler
+from fvmc.utils import Logger, batch
 
 
 FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
@@ -144,7 +144,11 @@ def test_driver(tmp_path: Path) -> None:
         n_eloc=0,
     )
     vmc = VMC.init(state, optax.adam(1.0e-3), geometry=False)
-    vmc.step()
+    vmc.run(
+        1,
+        log=Logger(tmp_path / "vmc.jsonl", verbose=False),
+        profile=True,
+    )
 
     saved = vmc.state.state_dict()
     saved_opt = vmc.opt_state

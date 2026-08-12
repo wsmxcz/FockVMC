@@ -1,9 +1,9 @@
 import jax.numpy as jnp
 import numpy as np
 
-from detnqs import psr, sr
-from detnqs.optimizer.base import Geometry
-from detnqs.utils import batch
+from fvmc import psr, sr
+from fvmc.optimizer.base import Geometry
+from fvmc.utils import batch
 
 
 def test_sr() -> None:

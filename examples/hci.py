@@ -7,9 +7,9 @@ import numpy as np
 from scipy.sparse.linalg import LinearOperator, eigsh
 from pyscf import ao2mo, gto, scf
 
-from detnqs import Hamiltonian
-from detnqs.hilbert import DetSector
-from detnqs.utils import Logger
+from fvmc import Hamiltonian
+from fvmc.hilbert import DetSector
+from fvmc.utils import Logger
 
 
 @dataclass(slots=True)

@@ -1,4 +1,4 @@
-"""Quick end-to-end check for DetNQS."""
+"""Quick end-to-end check for FockVMC."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import jax
 import numpy as np
 import optax
 
-from detnqs import ExactState, Hamiltonian, MCState, VMC, psr
-from detnqs.model import RBM
-from detnqs.sampler import MCSampler
-from detnqs.utils import batch, precision
+from fvmc import ExactState, Hamiltonian, MCState, VMC, psr
+from fvmc.model import RBM
+from fvmc.sampler import MCSampler
+from fvmc.utils import batch, precision
 
 
 def main() -> None:

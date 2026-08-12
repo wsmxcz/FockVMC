@@ -7,13 +7,13 @@ import numpy as np
 import optax
 from pyscf import ao2mo, gto, lo, scf
 
-from detnqs import Hamiltonian, MCState, VMC
-from detnqs.hilbert import DetSector
-from detnqs.model import PBackflow, slater_reference
-from detnqs.operator import S2
-from detnqs.optimizer import psr
-from detnqs.sampler import MCSampler, sample_slater
-from detnqs.utils import Logger, batch, precision
+from fvmc import Hamiltonian, MCState, VMC
+from fvmc.hilbert import DetSector
+from fvmc.model import PBackflow, slater_reference
+from fvmc.operator import S2
+from fvmc.optimizer import psr
+from fvmc.sampler import MCSampler, sample_slater
+from fvmc.utils import Logger, batch, precision
 
 
 @dataclass(frozen=True, slots=True)

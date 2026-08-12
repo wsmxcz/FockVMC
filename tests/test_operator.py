@@ -1,8 +1,8 @@
 import numpy as np
 
-from detnqs import Hamiltonian
-from detnqs.hilbert import DetSector
-from detnqs.operator import annihilate, create, number
+from fvmc import Hamiltonian
+from fvmc.hilbert import DetSector
+from fvmc.operator import annihilate, create, number
 
 
 def test_hamiltonian() -> None:

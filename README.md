@@ -1,14 +1,14 @@
-# DetNQS
+# FockVMC
 
-DetNQS is a compact research codebase for Fock-space variational Monte Carlo.
+FockVMC is a compact research codebase for Fock-space variational Monte Carlo.
 
 ## Install and run
 
 Python 3.12+ and a C++20 compiler are required.
 
 ```bash
-git clone https://github.com/wsmxcz/DetNQS_dev.git
-cd DetNQS_dev
+git clone https://github.com/wsmxcz/FockVMC.git
+cd FockVMC
 pip install -e .
 ```
 
@@ -37,15 +37,15 @@ Optimizers include parameter-space SR and PSR; `psr(mu=0)` is sample-space SR.
 
 ## Documentation
 
-- [Design and conventions](detnqs/README.md)
-- [Monte Carlo estimator](detnqs/sampler/vmc.md)
-- [SR and PSR](detnqs/optimizer/sr.md)
-- [libdet](detnqs/operator/libdet/README.md)
+- [Design and conventions](fvmc/README.md)
+- [Monte Carlo estimator](fvmc/sampler/vmc.md)
+- [SR and PSR](fvmc/optimizer/sr.md)
+- [libdet](fvmc/operator/libdet/README.md)
 
 ## Citation
 
 ```bibtex
-@article{che2026detnqs,
+@article{che2026fvmc,
   title = {A Deterministic Framework for Neural Network Quantum States in Quantum Chemistry},
   author = {Che, Zheng},
   journal = {Journal of Chemical Theory and Computation},

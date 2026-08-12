@@ -18,7 +18,7 @@ class Timer:
     def __call__(self, name: str, *, n: int = 0) -> Iterator[None]:
         """Measure one block; counts remain active when timing is disabled."""
         if n:
-            self.counts[name] = self.counts.get(name, 0) + n
+            self.counts[name] = self.counts.get(name, 0) + int(n)
         if not self.timing:
             yield
             return

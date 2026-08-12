@@ -213,7 +213,7 @@ class MCState:
             with timer("unique"):
                 unique, _, inv = self.hamiltonian.sector.unique(sampler_state.x)
 
-            with timer("forward"):
+            with timer("forward", n=unique.shape[0]):
                 value = batch.apply(self.model.logabs, self.params, unique)
                 jax.block_until_ready(value)
                 logabs = precision.host(value, "calc", "real").reshape(-1)
@@ -231,7 +231,6 @@ class MCState:
                 self.model,
                 sampler_state,
                 eps1=float(self.eps1),
-                profile=profile,
                 timer=timer,
             )
         )
@@ -289,9 +288,8 @@ class MCState:
                 if len(bra_parts) == 1
                 else np.concatenate(bra_parts)
             )
-            n_forward = bra.shape[0]
 
-        with timer("forward"):
+        with timer("forward", n=bra.shape[0]):
             bra_logpsi = batch.apply(self.model.logpsi, self.params, bra)
             jax.block_until_ready(bra_logpsi)
             bra_logpsi = tree.host(bra_logpsi)
@@ -544,13 +542,11 @@ class MCState:
             "acceptance_rate": float(
                 sample_stats.get("acceptance_rate", 0.0)
             ),
-            "n_forward": n_forward,
             "unique_frac": float(n_ket) / max(1.0, float(n_sample)),
         }
-        if profile:
-            out.update(timer.stats())
-            if "n_conn" in sample_stats:
-                out["n_conn"] = int(sample_stats["n_conn"])
+        out.update(timer.stats())
+        if profile and "n_conn" in sample_stats:
+            out["n_conn"] = int(sample_stats["n_conn"])
 
         if data:
             return (

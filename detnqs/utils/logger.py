@@ -22,11 +22,21 @@ class Logger:
     ) -> None:
         self.file = None if file is None else Path(file)
         self.every = max(1, int(every))
-        self.keys = None if keys is None else tuple(keys)
+        self.keys = (
+            tuple(keys)
+            if keys is not None
+            else (
+                "step",
+                "energy",
+                "eloc_var",
+                "ess_frac",
+                "acceptance_rate",
+                "alpha",
+            )
+        )
         self.verbose = bool(verbose)
 
         self._cols: tuple[str, ...] | None = None
-        self._widths: tuple[int, ...] = ()
 
         if self.file is not None:
             self.file.parent.mkdir(parents=True, exist_ok=True)
@@ -53,51 +63,37 @@ class Logger:
             self._print(rec)
 
     def _print(self, rec: Mapping[str, Any]) -> None:
-        keys = (
-            self.keys
-            if self.keys is not None
-            else (
-                "step",
-                "energy",
-                "eloc_var",
-                "ess_frac",
-                "acceptance_rate",
-                "alpha",
-            )
-        )
-        cols = tuple(key for key in keys if key in rec)
+        cols = tuple(key for key in self.keys if key in rec)
         if not cols:
             return
 
+        widths = []
+        for key in cols:
+            if key == "energy":
+                width = 15
+            elif key.startswith("time_"):
+                width = 9
+            elif (
+                key in {"step", "outer", "acceptance_rate"}
+                or key.startswith("n_")
+                or key.endswith("_frac")
+            ):
+                width = 8
+            else:
+                width = 13
+            widths.append(max(len(key), width))
+
         if self._cols != cols:
             self._cols = cols
-            widths = []
-            for key in cols:
-                discrete = key in {"step", "outer"} or key.startswith("n_")
-                width = 8 if discrete else 13
-                width = 9 if key.startswith("time_") else width
-                ratio = key == "acceptance_rate" or key.endswith("_frac")
-                width = 8 if ratio else width
-                width = 15 if key == "energy" else width
-                widths.append(max(len(key), width))
-            self._widths = tuple(widths)
-            widths = self._widths
             print("  ".join(k.rjust(w) for k, w in zip(cols, widths, strict=True)))
             print("  ".join("-" * w for w in widths))
-        else:
-            widths = self._widths
 
         cells = tuple(self._format(key, rec[key]) for key in cols)
         print("  ".join(v.rjust(w) for v, w in zip(cells, widths, strict=True)))
 
     @staticmethod
     def _format(key: str, value: Any) -> str:
-        arr = np.asarray(value)
-
-        if arr.ndim != 0 or np.iscomplexobj(arr):
-            return str(value)
-
-        x = float(arr)
+        x = float(value)
 
         if not np.isfinite(x):
             return str(x)

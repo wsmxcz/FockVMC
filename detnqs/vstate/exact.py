@@ -83,7 +83,7 @@ class ExactState:
         timer = Timer(enabled=profile)
         rdtype = precision.real("calc", host=True)
 
-        with timer("forward"):
+        with timer("forward", n=self.n_x):
             logpsi_jax = batch.apply(self.model.logpsi, self.params, self.x)
             jax.block_until_ready(logpsi_jax)
             logpsi = tree.host(logpsi_jax)
@@ -114,7 +114,6 @@ class ExactState:
                 "energy": energy,
                 "eloc_var": float((np.vdot(residual, residual) / norm).real),
                 "n_x": self.n_x,
-                "n_forward": self.n_x,
             }
 
             if data:
@@ -160,8 +159,7 @@ class ExactState:
                         ),
                     )
 
-        if profile:
-            out.update(timer.stats())
+        out.update(timer.stats())
 
         if data:
             return self, energy, gradient, out, geom, sample

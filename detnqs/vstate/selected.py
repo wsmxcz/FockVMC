@@ -143,7 +143,7 @@ class SelectedState:
         rdtype = precision.real("calc", host=True)
         n_basis = self.n_basis
 
-        with timer("forward"):
+        with timer("forward", n=n_basis):
             logpsi_jax = batch.apply(self.model.logpsi, self.params, self.basis)
             jax.block_until_ready(logpsi_jax)
             logpsi = tree.host(logpsi_jax)
@@ -174,7 +174,6 @@ class SelectedState:
                 "energy": energy,
                 "eloc_var": float((np.vdot(residual, residual) / norm).real),
                 "n_basis": n_basis,
-                "n_forward": n_basis,
             }
 
             if data:
@@ -220,8 +219,7 @@ class SelectedState:
                         ),
                     )
 
-        if profile:
-            out.update(timer.stats())
+        out.update(timer.stats())
 
         if data:
             return self, energy, gradient, out, geom, sample

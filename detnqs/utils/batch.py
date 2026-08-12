@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from functools import lru_cache
 from typing import Any
 
 import jax
@@ -69,7 +70,7 @@ def chunk(
 
 def apply(fun: Callable[[Any, Any], Any], theta: Any, x: Any) -> Any:
     """Evaluate `fun(theta, x)` over the leading axis."""
-    run = jax.jit(fun)
+    run = _jit(fun, ())
     size = config["forward_chunk"]
     if size is None:
         return run(theta, x)
@@ -101,12 +102,9 @@ def jvp(
     x: Any,
 ) -> tuple[Any, Any]:
     """Evaluate `fun(theta, x)` and its parameter JVP."""
-    run = jax.jit(
-        lambda p, t, y: jax.jvp(lambda q: fun(q, y), (p,), (t,))
-    )
     size = config["backward_chunk"]
     if size is None:
-        return run(theta, tangent, x)
+        return _jvp(fun, theta, tangent, x)
 
     n = int(jax.tree.leaves(x)[0].shape[0])
     vals = []
@@ -121,7 +119,7 @@ def jvp(
             ),
             x,
         )
-        val, tan = run(theta, tangent, xb)
+        val, tan = _jvp(fun, theta, tangent, xb)
         vals.append(jax.tree.map(lambda a: a[:n_chunk], val))
         tangents.append(jax.tree.map(lambda a: a[:n_chunk], tan))
 
@@ -141,12 +139,9 @@ def vjp(
     cotangent: Any,
 ) -> Any:
     """Evaluate `sum_i J_i^dagger cotangent_i`."""
-    run = jax.jit(
-        lambda p, y, c: jax.vjp(lambda q: fun(q, y), p)[1](c)[0]
-    )
     size = config["backward_chunk"]
     if size is None:
-        return jax.tree.map(jnp.conj, run(theta, x, cotangent))
+        return jax.tree.map(jnp.conj, _vjp(fun, theta, x, cotangent))
 
     n = int(jax.tree.leaves(x)[0].shape[0])
     grad = jax.tree.map(jnp.zeros_like, theta)
@@ -167,7 +162,7 @@ def vjp(
             ),
             cotangent,
         )
-        grad = jax.tree.map(jnp.add, grad, run(theta, xb, cb))
+        grad = jax.tree.map(jnp.add, grad, _vjp(fun, theta, xb, cb))
 
     return jax.tree.map(jnp.conj, grad)
 
@@ -197,7 +192,7 @@ def bucket(
         n = int(jax.tree.leaves(arg)[0].shape[int(axis)])
         break
 
-    run = jax.jit(fun, static_argnums=static_argnums)
+    run = _jit(fun, static_argnums)
     if n is None:
         return run(*args)
 
@@ -243,3 +238,18 @@ def bucket(
         lambda a: a[(slice(None),) * (axis % a.ndim) + (slice(0, n),)],
         out,
     )
+
+
+@lru_cache
+def _jit(fun: Callable[..., Any], static_argnums: tuple[int, ...]):
+    return jax.jit(fun, static_argnums=static_argnums)
+
+
+@jax.jit(static_argnums=0)
+def _jvp(fun: Callable[[Any, Any], Any], theta: Any, tangent: Any, x: Any):
+    return jax.jvp(lambda p: fun(p, x), (theta,), (tangent,))
+
+
+@jax.jit(static_argnums=0)
+def _vjp(fun: Callable[[Any, Any], Any], theta: Any, x: Any, cotangent: Any):
+    return jax.vjp(lambda p: fun(p, x), theta)[1](cotangent)[0]

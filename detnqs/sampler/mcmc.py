@@ -110,7 +110,7 @@ class MCSampler:
         with timer("unique"):
             unique, _, inv = hamiltonian.sector.unique(x)
 
-        with timer("forward"):
+        with timer("forward", n=unique.shape[0]):
             value = batch.apply(model.logabs, params, unique)
             jax.block_until_ready(value)
             unique_logabs = precision.host(value, "calc", "real").reshape(-1)
@@ -354,7 +354,7 @@ class MCSampler:
                 unknown = ~known
 
             if unknown.any():
-                with timer("forward"):
+                with timer("forward", n=np.count_nonzero(unknown)):
                     value = batch.apply(
                         model.logabs,
                         params,
@@ -496,7 +496,7 @@ class MCSampler:
             with timer("reduce"):
                 new = candidate_pos[active]
 
-            with timer("forward"):
+            with timer("forward", n=new.size):
                 value = batch.apply(
                     model.logabs,
                     params,

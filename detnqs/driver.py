@@ -94,10 +94,12 @@ class VMC:
             if logger is not None:
                 logger.add(rec)
 
-            if checkpoint is not None and checkpoint_every > 0:
-                step = int(rec["step"])
-                if step % checkpoint_every == 0:
-                    self.save(str(checkpoint).format(step=step))
+            if (
+                checkpoint is not None
+                and checkpoint_every > 0
+                and self.step_count % checkpoint_every == 0
+            ):
+                self.save(str(checkpoint).format(step=self.step_count))
 
         return rec
 

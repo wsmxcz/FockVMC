@@ -29,10 +29,8 @@ def save(file: str | Path, tree: Any) -> Path:
     }
 
     for i, leaf in enumerate(leaves):
-        if is_key[i]:
-            arrays[f"leaf_{i}"] = np.asarray(jax.random.key_data(leaf))
-        else:
-            arrays[f"leaf_{i}"] = np.asarray(leaf)
+        value = jax.random.key_data(leaf) if is_key[i] else leaf
+        arrays[f"leaf_{i}"] = np.asarray(value)
 
     np.savez(path, **arrays)
     return path

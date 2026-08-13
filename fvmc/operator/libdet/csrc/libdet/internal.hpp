@@ -164,7 +164,7 @@ inline void visit_internal(
     }
 }
 
-inline std::vector<double> Hamiltonian::diag(DetBatchView dets) const {
+inline std::vector<double> Hamiltonian::diag(DetBatch dets) const {
     check_dets(dets, "diag");
     std::vector<double> out(dets.n_dets, 0.0);
 
@@ -184,8 +184,8 @@ inline std::vector<double> Hamiltonian::diag(DetBatchView dets) const {
 }
 
 inline Projection Hamiltonian::project(
-    DetBatchView bras,
-    DetBatchView kets,
+    DetBatch bras,
+    DetBatch kets,
     std::span<const double> scale,
     double eps
 ) const {
@@ -244,8 +244,8 @@ inline Projection Hamiltonian::project(
 }
 
 inline Matrix Hamiltonian::matrix(
-    DetBatchView bras,
-    DetBatchView kets
+    DetBatch bras,
+    DetBatch kets
 ) const {
     check_dets(bras, "matrix(bras)");
     check_dets(kets, "matrix(kets)");
@@ -323,8 +323,8 @@ inline Matrix Hamiltonian::matrix(
 }
 
 inline std::vector<double> Hamiltonian::matvec(
-    DetBatchView bras,
-    DetBatchView kets,
+    DetBatch bras,
+    DetBatch kets,
     std::span<const double> x
 ) const {
     check_dets(bras, "matvec(bras)");
@@ -370,8 +370,8 @@ inline std::vector<double> Hamiltonian::matvec(
 }
 
 inline std::vector<double> Hamiltonian::matmat(
-    DetBatchView bras,
-    DetBatchView kets,
+    DetBatch bras,
+    DetBatch kets,
     std::span<const double> x,
     std::size_t nrhs
 ) const {

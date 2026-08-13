@@ -44,7 +44,7 @@ using I64Array = nb::ndarray<
     nb::device::cpu
 >;
 
-[[nodiscard]] libdet::DetBatchView states(const StateArray& x) noexcept {
+[[nodiscard]] libdet::DetBatch states(const StateArray& x) noexcept {
     return {
         x.data(),
         static_cast<std::size_t>(x.shape(0)),
@@ -80,12 +80,12 @@ struct OptionalStates {
         }
     }
 
-    [[nodiscard]] const libdet::DetBatchView* ptr() const noexcept {
+    [[nodiscard]] const libdet::DetBatch* ptr() const noexcept {
         return view ? &*view : nullptr;
     }
 
     std::optional<StateArray> array;
-    std::optional<libdet::DetBatchView> view;
+    std::optional<libdet::DetBatch> view;
 };
 
 [[nodiscard]] std::span<const libdet::i64> counts(
@@ -366,15 +366,15 @@ NB_MODULE(libdet, m) {
             const StateArray& kets,
             double eps1,
             double eps2,
-            libdet::i64 n_draw,
+            libdet::i64 n_sample,
             std::uint64_t seed
         ) {
             const auto kv = states(kets);
-            const std::vector<libdet::i64> counts(kv.n_dets, n_draw);
+            const std::vector<libdet::i64> counts(kv.n_dets, n_sample);
             return no_gil([&] {
                 return ham.local_conn(kv, eps1, eps2, counts, seed);
             });
-        }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "n_draw"_a, "seed"_a = std::uint64_t{0})
+        }, "kets"_a.noconvert(), "eps1"_a, "eps2"_a, "n_sample"_a, "seed"_a = std::uint64_t{0})
 
         .def("sample_project", [](
             const libdet::Hamiltonian& ham,

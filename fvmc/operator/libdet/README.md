@@ -94,8 +94,9 @@ strong           |H_bk| >= eps1
 weak             eps2 <= |H_bk| < eps1
 ```
 
-A zero cutoff requests complete direct enumeration. Weak coefficients directly
-form an unbiased retained-window sum.
+A zero cutoff requests complete direct enumeration. Each ket receives the
+requested number of valid weak draws; their coefficients form an unbiased
+retained-window sum.
 
 `local_conn` requires `eps2 > 0` and positive counts when `eps2 < eps1`.
 

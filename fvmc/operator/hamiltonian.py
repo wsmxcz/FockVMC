@@ -184,16 +184,16 @@ class Hamiltonian:
         kets: ArrayLike,
         eps1: float,
         eps2: float,
-        n_draw: int,
+        n_sample: int,
         *,
         seed: int = 0,
     ) -> libdet.LocalConn:
-        """Return exact strong terms and sampled weak coefficients."""
+        """Return exact strong terms and ``n_sample`` valid weak draws per ket."""
         return self._raw.local_conn(
             np.ascontiguousarray(kets, dtype=np.uint64),
             eps1,
             eps2,
-            n_draw,
+            n_sample,
             seed=seed,
         )
 

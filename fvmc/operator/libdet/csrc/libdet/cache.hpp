@@ -156,13 +156,10 @@ public:
 
             const Entry& victim = entries_[slot];
             if (
-                !entry.conns
+                entry.hit < victim.hit
                 || (
-                    victim.conns
-                    && (
-                        entry.hit < victim.hit
-                        || (entry.hit == victim.hit && entry.stamp < victim.stamp)
-                    )
+                    entry.hit == victim.hit
+                    && entry.stamp < victim.stamp
                 )
             ) {
                 slot = item;
@@ -218,7 +215,7 @@ private:
 class SpaceCache {
 public:
     [[nodiscard]] std::shared_ptr<const DetSpace> find(
-        DetBatchView kets
+        DetBatch kets
     ) const {
         const std::size_t size = kets.n_dets * det_size(kets.nword);
 
@@ -236,7 +233,7 @@ public:
     }
 
     void insert(
-        DetBatchView kets,
+        DetBatch kets,
         std::shared_ptr<const DetSpace> space
     ) {
         nword_ = kets.nword;
@@ -251,7 +248,7 @@ private:
     std::vector<u64> words_;
     std::shared_ptr<const DetSpace> space_;
 
-    [[nodiscard]] static u64 fingerprint(DetBatchView kets) noexcept {
+    [[nodiscard]] static u64 fingerprint(DetBatch kets) noexcept {
         const std::size_t size = kets.n_dets * det_size(kets.nword);
         const u64 seed = mix64(
             static_cast<u64>(kets.n_dets)

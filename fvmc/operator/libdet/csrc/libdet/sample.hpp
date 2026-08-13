@@ -154,7 +154,7 @@ namespace libdet {
 }
 
 inline Conns Hamiltonian::sample_conn(
-    DetBatchView kets,
+    DetBatch kets,
     std::span<const i64> counts,
     std::size_t n_streams,
     double eps1,
@@ -268,46 +268,66 @@ inline Conns Hamiltonian::sample_conn(
         }
     }
 
-    std::vector<std::vector<Conn>> items(n_streams * kets.n_dets);
-#pragma omp parallel for schedule(guided)
-    for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
-        const std::size_t row = static_cast<std::size_t>(rr);
-        const std::size_t iket = row % kets.n_dets;
-        const auto& row_hits = hits[row];
-        std::vector<Conn>& item = items[row];
-        std::size_t n_term = 0;
-        for (const auto& hit : row_hits) n_term += static_cast<std::size_t>(hit.count);
-        item.reserve(n_term);
+    Conns out;
+    out.nword = nword_;
+    out.n_kets = kets.n_dets;
+    out.n_streams = n_streams;
+    out.diag = std::move(ket_diag);
+    out.degree = std::move(ket_degree);
+    out.ptr.resize(hits.size() + 1u, 0);
 
-        for (const auto& hit : row_hits) {
-            Excitation excitation;
-            double h = 0.0;
-            if (use_cache) {
-                const Conn& term = all[iket]->terms[hit.conn];
-                excitation = term.excitation;
-                h = term.h;
-            } else {
-                const Candidate& term = direct[iket][hit.conn];
-                excitation = term.excitation;
-                h = term.h;
-            }
-            for (i64 n = 0; n < hit.count; ++n) {
-                item.push_back(Conn{excitation, h});
+    std::size_t n_term = 0;
+    for (std::size_t row = 0; row < hits.size(); ++row) {
+        out.ptr[row] = to_i64(n_term);
+        for (const sample::Hit& hit : hits[row]) {
+            n_term += static_cast<std::size_t>(hit.count);
+        }
+    }
+    out.ptr.back() = to_i64(n_term);
+    out.h.resize(n_term);
+
+    const std::size_t stride = det_size(nword_);
+    copy_batch(out.bra, kets);
+    out.bra.resize((kets.n_dets + n_term) * stride);
+
+#pragma omp parallel
+    {
+        DetScratch scratch(nword_);
+
+#pragma omp for schedule(guided)
+        for (i64 rr = 0; rr < static_cast<i64>(hits.size()); ++rr) {
+            const std::size_t row = static_cast<std::size_t>(rr);
+            const std::size_t iket = row % kets.n_dets;
+            const DetRef ket = kets[iket];
+            std::size_t pos = static_cast<std::size_t>(out.ptr[row]);
+
+            for (const sample::Hit& hit : hits[row]) {
+                Excitation excitation;
+                double h = 0.0;
+                if (use_cache) {
+                    const Conn& term = all[iket]->terms[hit.conn];
+                    excitation = term.excitation;
+                    h = term.h;
+                } else {
+                    const Candidate& term = direct[iket][hit.conn];
+                    excitation = term.excitation;
+                    h = term.h;
+                }
+
+                const DetRef bra = apply(ket, excitation, scratch);
+                for (i64 n = 0; n < hit.count; ++n) {
+                    copy_det(out.bra, kets.n_dets + pos, bra);
+                    out.h[pos++] = h;
+                }
             }
         }
     }
 
-    return assemble_conn(
-        kets,
-        items,
-        ket_diag,
-        ket_degree,
-        n_streams
-    );
+    return out;
 }
 
 inline LocalConn Hamiltonian::local_conn(
-    DetBatchView kets,
+    DetBatch kets,
     double eps1,
     double eps2,
     std::span<const i64> counts,
@@ -348,7 +368,7 @@ inline LocalConn Hamiltonian::local_conn(
         ExcitationKind kind;
         int i;
         int j;
-        ScreenWindow window;
+        std::span<const ScreenPair> pairs;
     };
 
     struct Item {
@@ -386,7 +406,7 @@ inline LocalConn Hamiltonian::local_conn(
         const auto screen_ptr = screen_table(eps2);
 #pragma omp parallel
         {
-            ElementScratch element(ints_.norb());
+            DetOcc occ;
             std::vector<Conn> singles;
             std::vector<double> single_prefix;
             std::vector<DoubleBlock> doubles;
@@ -395,7 +415,7 @@ inline LocalConn Hamiltonian::local_conn(
 #pragma omp for schedule(guided)
             for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
                 const std::size_t iket = static_cast<std::size_t>(ii);
-                const i64 n_draw = counts[iket];
+                const i64 n_sample = counts[iket];
 
                 Item& item = items[iket];
                 singles.clear();
@@ -404,19 +424,21 @@ inline LocalConn Hamiltonian::local_conn(
                 double_prefix.assign(1u, 0.0);
 
                 const DetRef ket = kets[iket];
-                element.load(ints_, ket);
-                const DetOcc& occ = element.occ;
+                fill_occ(ket, ints_.norb(), occ);
+                const auto alpha_bits = ket.alpha();
+                const auto beta_bits = ket.beta();
 
                 for (int spin = 0; spin < 2; ++spin) {
                     const auto& occupied = spin == 0 ? occ.occ_a : occ.occ_b;
                     const auto& virtuals = spin == 0 ? occ.vir_a : occ.vir_b;
                     const auto& sign_prefix = spin == 0 ? occ.pref_a : occ.pref_b;
+                    const auto spin_bits = spin == 0 ? alpha_bits : beta_bits;
 
                     for (int i : occupied) {
                         for (int a : virtuals) {
                             const double value = spin == 0
-                                ? element.single_alpha(i, a)
-                                : element.single_beta(i, a);
+                                ? single_alpha(ints_, occ, i, a)
+                                : single_beta(ints_, occ, i, a);
                             const double h = sign_single(sign_prefix, i, a) * value;
                             const double abs_h = std::abs(h);
                             if (abs_h >= eps2 && abs_h < eps1) {
@@ -436,11 +458,19 @@ inline LocalConn Hamiltonian::local_conn(
                         const int i = occupied[x];
                         for (std::size_t y = x + 1u; y < occupied.size(); ++y) {
                             const int j = occupied[y];
-                            const ScreenWindow window =
+                            const auto pairs =
                                 screen_ptr->same_window(i, j, eps1, eps2);
-                            const double weight = window.weight();
+                            double weight = 0.0;
+                            for (const ScreenPair& pair : pairs) {
+                                if (
+                                    !bits::test(spin_bits, pair.a)
+                                    && !bits::test(spin_bits, pair.b)
+                                ) {
+                                    weight += std::abs(pair.h);
+                                }
+                            }
                             if (!(weight > 0.0)) continue;
-                            doubles.push_back({kind, i, j, window});
+                            doubles.push_back({kind, i, j, pairs});
                             double_prefix.push_back(double_prefix.back() + weight);
                         }
                     }
@@ -448,11 +478,19 @@ inline LocalConn Hamiltonian::local_conn(
 
                 for (int i : occ.occ_a) {
                     for (int j : occ.occ_b) {
-                        const ScreenWindow window =
+                        const auto pairs =
                             screen_ptr->mixed_window(i, j, eps1, eps2);
-                        const double weight = window.weight();
+                        double weight = 0.0;
+                        for (const ScreenPair& pair : pairs) {
+                            if (
+                                !bits::test(alpha_bits, pair.a)
+                                && !bits::test(beta_bits, pair.b)
+                            ) {
+                                weight += std::abs(pair.h);
+                            }
+                        }
                         if (!(weight > 0.0)) continue;
-                        doubles.push_back({ExcitationKind::mixed2, i, j, window});
+                        doubles.push_back({ExcitationKind::mixed2, i, j, pairs});
                         double_prefix.push_back(double_prefix.back() + weight);
                     }
                 }
@@ -464,13 +502,17 @@ inline LocalConn Hamiltonian::local_conn(
                 }
 
                 sample::Rng rng(sample_seed(seed, kets[iket], 0, 0));
-                item.weak.reserve(static_cast<std::size_t>(n_draw));
-                const double scale = proposal_norm / static_cast<double>(n_draw);
+                const double scale =
+                    proposal_norm / static_cast<double>(n_sample);
                 std::size_t single_pos = 0;
                 std::size_t double_pos = 0;
+                std::size_t pair_block = doubles.size();
+                std::size_t pair_pos = 0;
+                double pair_cdf = 0.0;
+                const ScreenPair* pair_current = nullptr;
 
                 // Stratified targets are ordered.
-                for (i64 draw = 0; draw < n_draw; ++draw) {
+                for (i64 draw = 0; draw < n_sample; ++draw) {
                     double target = (
                         static_cast<double>(draw) + rng.uniform01()
                     ) * scale;
@@ -496,17 +538,47 @@ inline LocalConn Hamiltonian::local_conn(
                             ++double_pos;
                         }
                         const DoubleBlock& block = doubles[double_pos];
-                        const ScreenPair& pair = block.window.draw(
-                            target - double_prefix[double_pos]
-                        );
+                        if (pair_block != double_pos) {
+                            pair_block = double_pos;
+                            pair_pos = 0;
+                            pair_cdf = 0.0;
+                            pair_current = nullptr;
+                        }
+
+                        const double pair_target =
+                            target - double_prefix[double_pos];
+                        const ScreenPair* selected =
+                            pair_target < pair_cdf ? pair_current : nullptr;
+                        const bool mixed =
+                            block.kind == ExcitationKind::mixed2;
+                        const auto spin_bits =
+                            block.kind == ExcitationKind::alpha2
+                                ? alpha_bits
+                                : beta_bits;
+
+                        while (
+                            selected == nullptr
+                            && pair_pos < block.pairs.size()
+                        ) {
+                            const ScreenPair& candidate =
+                                block.pairs[pair_pos++];
+                            const bool valid = mixed
+                                ? !bits::test(alpha_bits, candidate.a)
+                                    && !bits::test(beta_bits, candidate.b)
+                                : !bits::test(spin_bits, candidate.a)
+                                    && !bits::test(spin_bits, candidate.b);
+                            if (!valid) continue;
+
+                            pair_cdf += std::abs(candidate.h);
+                            pair_current = &candidate;
+                            if (pair_target < pair_cdf) selected = &candidate;
+                        }
+
+                        // Keep the final valid pair at the floating-point edge.
+                        if (selected == nullptr) selected = pair_current;
+                        const ScreenPair& pair = *selected;
 
                         if (block.kind == ExcitationKind::mixed2) {
-                            if (
-                                bits::test(ket.alpha(), pair.a)
-                                || bits::test(ket.beta(), pair.b)
-                            ) {
-                                continue;
-                            }
                             excitation = mixed2(block.i, block.j, pair.a, pair.b);
                             h =
                                 sign_single(occ.pref_a, block.i, pair.a)
@@ -515,14 +587,6 @@ inline LocalConn Hamiltonian::local_conn(
                         } else {
                             const bool alpha =
                                 block.kind == ExcitationKind::alpha2;
-                            const auto spin_bits =
-                                alpha ? ket.alpha() : ket.beta();
-                            if (
-                                bits::test(spin_bits, pair.a)
-                                || bits::test(spin_bits, pair.b)
-                            ) {
-                                continue;
-                            }
                             const auto& sign_prefix =
                                 alpha ? occ.pref_a : occ.pref_b;
                             excitation = alpha
@@ -621,13 +685,13 @@ inline LocalConn Hamiltonian::local_conn(
 }
 
 inline Projections Hamiltonian::sample_project(
-    DetBatchView kets,
+    DetBatch kets,
     std::span<const double> scale,
     std::span<const i64> counts,
     std::size_t n_streams,
     double eps1,
     double eps2,
-    const DetBatchView* exclude,
+    const DetBatch* exclude,
     u64 seed
 ) const {
     check_dets(kets, "sample_project(kets)");
@@ -654,7 +718,7 @@ inline Projections Hamiltonian::sample_project(
         }
     }
 
-    const DetBatchView base = exclude == nullptr ? kets : *exclude;
+    const DetBatch base = exclude == nullptr ? kets : *exclude;
     check_dets(base, "sample_project(exclude)");
     const DetIndex exclude_index(base);
 
@@ -856,7 +920,7 @@ inline Projections Hamiltonian::sample_project(
     }
 
     if (start.back() > 0) {
-        const DetBatchView bras{out.bra.data(), start.back(), nword_};
+        const DetBatch bras{out.bra.data(), start.back(), nword_};
         out.diag = diag(bras);
     }
     return out;

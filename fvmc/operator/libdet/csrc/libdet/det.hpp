@@ -189,7 +189,7 @@ inline DetRef apply(
     return scratch.view();
 }
 
-struct DetBatchView {
+struct DetBatch {
     const u64* data = nullptr;
     std::size_t n_dets = 0;
     u32 nword = 0;
@@ -216,7 +216,7 @@ inline void append_det(std::vector<u64>& out, DetRef det) {
     out.insert(out.end(), det.beta().begin(), det.beta().end());
 }
 
-inline void copy_batch(std::vector<u64>& words, DetBatchView dets) {
+inline void copy_batch(std::vector<u64>& words, DetBatch dets) {
     words.resize(dets.n_dets * det_size(dets.nword));
     if (!words.empty()) std::copy_n(dets.data, words.size(), words.data());
 }
@@ -249,25 +249,6 @@ struct DetLess {
         }
 
         return false;
-    }
-};
-
-struct DetHash {
-    [[nodiscard]] std::size_t operator()(DetRef det) const noexcept {
-        if (det.nword() == 1) {
-            const u64 h =
-                det.alpha()[0]
-                ^ mix64(det.beta()[0] + 0x517cc1b727220a95ULL);
-
-            return static_cast<std::size_t>(mix64(h));
-        }
-
-        u64 h = 0x9e3779b97f4a7c15ULL ^ static_cast<u64>(det.nword());
-
-        for (u64 x : det.alpha()) h = mix64(h ^ x);
-        for (u64 x : det.beta()) h = mix64(h ^ (x + 0x517cc1b727220a95ULL));
-
-        return static_cast<std::size_t>(h);
     }
 };
 
@@ -601,7 +582,7 @@ inline void fill_occ(DetRef det, int norb, DetOcc& work) {
 
 class DetIndex {
 public:
-    explicit DetIndex(DetBatchView dets) : dets_(dets) {
+    explicit DetIndex(DetBatch dets) : dets_(dets) {
         index_.reserve(dets.n_dets);
         for (std::size_t i = 0; i < dets.n_dets; ++i) {
             index_[det_fingerprint(dets_[i])].push_back(static_cast<i32>(i));
@@ -622,58 +603,7 @@ public:
     }
 
 private:
-    DetBatchView dets_;
-    ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
-};
-
-class DetPool {
-public:
-    explicit DetPool(u32 nword = 0) : nword_(nword) {}
-
-    explicit DetPool(DetBatchView dets) : nword_(dets.nword) {
-        copy_batch(words_, dets);
-        index_.reserve(size());
-        for (std::size_t i = 0; i < size(); ++i) {
-            index_[det_fingerprint(get(i))].push_back(static_cast<i32>(i));
-        }
-    }
-
-    [[nodiscard]] std::size_t size() const noexcept {
-        return nword_ == 0 ? 0u : words_.size() / det_size(nword_);
-    }
-
-    [[nodiscard]] DetRef get(std::size_t idx) const noexcept {
-        return det_at(words_, nword_, idx);
-    }
-
-    [[nodiscard]] std::vector<u64>& words() noexcept {
-        return words_;
-    }
-
-    [[nodiscard]] const std::vector<u64>& words() const noexcept {
-        return words_;
-    }
-
-    [[nodiscard]] i32 find_add(DetRef det) {
-        const u64 fingerprint = det_fingerprint(det);
-        const auto it = index_.find(fingerprint);
-        if (it != index_.end()) {
-            for (i32 idx : it->second) {
-                if (det_equal(get(static_cast<std::size_t>(idx)), det)) {
-                    return idx;
-                }
-            }
-        }
-
-        const i32 fresh = to_i32(size());
-        append_det(words_, det);
-        index_[fingerprint].push_back(fresh);
-        return fresh;
-    }
-
-private:
-    u32 nword_ = 0;
-    std::vector<u64> words_;
+    DetBatch dets_;
     ankerl::unordered_dense::map<u64, std::vector<i32>> index_;
 };
 
@@ -813,7 +743,7 @@ struct SpinMate {
 
 class DetSpace {
 public:
-    explicit DetSpace(DetBatchView kets)
+    explicit DetSpace(DetBatch kets)
         : nword(kets.nword),
           alpha(nword, 0x0f1234ab5678cdefULL),
           beta(nword, 0x1a2b3c4d5e6f7081ULL) {

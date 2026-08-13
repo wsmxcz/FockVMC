@@ -170,60 +170,11 @@ inline void copy_det(std::vector<u64>& words, std::size_t idet, DetRef det) {
     std::copy(det.beta().begin(), det.beta().end(), dst + det.nword());
 }
 
-[[nodiscard]] inline Conns assemble_conn(
-    DetBatchView kets,
-    std::span<const std::vector<Conn>> items,
-    std::span<const double> diag,
-    std::span<const double> degree,
-    std::size_t n_streams
-) {
-    Conns out;
-    out.nword = kets.nword;
-    out.n_kets = kets.n_dets;
-    out.n_streams = n_streams;
-    out.diag.assign(diag.begin(), diag.end());
-    out.degree.assign(degree.begin(), degree.end());
-    out.ptr.resize(items.size() + 1u, 0);
-
-    std::size_t n_term = 0;
-    for (std::size_t row = 0; row < items.size(); ++row) {
-        out.ptr[row] = to_i64(n_term);
-        n_term += items[row].size();
-    }
-    out.ptr[items.size()] = to_i64(n_term);
-    out.h.resize(n_term);
-
-    const std::size_t stride = det_size(kets.nword);
-    copy_batch(out.bra, kets);
-    out.bra.resize((kets.n_dets + n_term) * stride);
-
-#pragma omp parallel
-    {
-        DetScratch scratch(kets.nword);
-
-#pragma omp for schedule(guided)
-        for (i64 rr = 0; rr < static_cast<i64>(items.size()); ++rr) {
-            const std::size_t row = static_cast<std::size_t>(rr);
-            const DetRef ket = kets[row % kets.n_dets];
-            const std::vector<Conn>& item = items[row];
-
-            for (std::size_t k = 0; k < item.size(); ++k) {
-                const std::size_t slot = static_cast<std::size_t>(out.ptr[row]) + k;
-                const Conn& term = item[k];
-                copy_det(out.bra, kets.n_dets + slot, apply(ket, term.excitation, scratch));
-                out.h[slot] = term.h;
-            }
-        }
-    }
-
-    return out;
-}
-
 inline std::vector<u64> Hamiltonian::expand(
-    DetBatchView kets,
+    DetBatch kets,
     double eps,
     std::span<const double> scale,
-    const DetBatchView* exclude
+    const DetBatch* exclude
 ) const {
     check_dets(kets, "expand(kets)");
     check_eps(eps);
@@ -231,7 +182,7 @@ inline std::vector<u64> Hamiltonian::expand(
         throw std::invalid_argument("expand: scale size must match kets");
     }
 
-    const DetBatchView base = exclude == nullptr ? kets : *exclude;
+    const DetBatch base = exclude == nullptr ? kets : *exclude;
     check_dets(base, "expand(exclude)");
 
     const double scale_max = scale.empty() ? 1.0 : max_abs(scale);
@@ -287,10 +238,10 @@ inline std::vector<u64> Hamiltonian::expand(
 }
 
 inline Projection Hamiltonian::project(
-    DetBatchView kets,
+    DetBatch kets,
     std::span<const double> scale,
     double eps,
-    const DetBatchView* exclude
+    const DetBatch* exclude
 ) const {
     check_dets(kets, "project(kets)");
     if (scale.size() != kets.n_dets) {
@@ -298,7 +249,7 @@ inline Projection Hamiltonian::project(
     }
 
     check_eps(eps);
-    const DetBatchView base = exclude == nullptr ? kets : *exclude;
+    const DetBatch base = exclude == nullptr ? kets : *exclude;
     check_dets(base, "project(exclude)");
 
     const double scale_max = max_abs(scale);
@@ -432,7 +383,7 @@ inline Projection Hamiltonian::project(
     }
 
     if (start.back() > 0) {
-        const DetBatchView bras{out.bra.data(), start.back(), nword_};
+        const DetBatch bras{out.bra.data(), start.back(), nword_};
         out.diag = diag(bras);
     }
     return out;
@@ -462,7 +413,7 @@ inline std::shared_ptr<const ConnSet> Hamiltonian::make_conns(
 }
 
 inline std::vector<std::shared_ptr<const ConnSet>>
-Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
+Hamiltonian::cached_conns(DetBatch kets, double eps) const {
     auto screen_ptr = screen_table(eps);
     std::vector<std::shared_ptr<const ConnSet>> out(kets.n_dets);
 
@@ -510,34 +461,73 @@ Hamiltonian::cached_conns(DetBatchView kets, double eps) const {
 }
 
 inline Conns Hamiltonian::conn(
-    DetBatchView kets,
+    DetBatch kets,
     double eps
 ) const {
     check_dets(kets, "conn(kets)");
     check_eps(eps);
 
     const auto all = cached_conns(kets, eps);
-    std::vector<std::vector<Conn>> items(kets.n_dets);
-    std::vector<double> diag(kets.n_dets, 0.0);
-    std::vector<double> degree(kets.n_dets, 0.0);
+    std::vector<ConnSpan> spans(kets.n_dets);
+
+    Conns out;
+    out.nword = nword_;
+    out.n_kets = kets.n_dets;
+    out.n_streams = 1u;
+    out.diag.resize(kets.n_dets);
+    out.degree.resize(kets.n_dets);
+    out.ptr.resize(kets.n_dets + 1u, 0);
 
 #pragma omp parallel for schedule(guided)
     for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
         const std::size_t iket = static_cast<std::size_t>(ii);
-        const ConnSet& ket_conn = *all[iket];
-        const ConnSpan win = ket_conn.span(std::numeric_limits<double>::infinity(), eps);
-        std::vector<Conn>& item = items[iket];
-        item.reserve(win.end - win.begin);
-        diag[iket] = ket_conn.diag;
-        degree[iket] = win.degree;
+        const ConnSet& conns = *all[iket];
+        spans[iket] = conns.span(
+            std::numeric_limits<double>::infinity(),
+            eps
+        );
+        out.diag[iket] = conns.diag;
+        out.degree[iket] = spans[iket].degree;
+    }
 
-        for (std::size_t k = win.begin; k < win.end; ++k) {
-            const Conn& term = ket_conn.terms[k];
-            item.push_back(term);
+    std::size_t n_term = 0;
+    for (std::size_t iket = 0; iket < kets.n_dets; ++iket) {
+        out.ptr[iket] = to_i64(n_term);
+        n_term += spans[iket].end - spans[iket].begin;
+    }
+    out.ptr.back() = to_i64(n_term);
+    out.h.resize(n_term);
+
+    const std::size_t stride = det_size(nword_);
+    copy_batch(out.bra, kets);
+    out.bra.resize((kets.n_dets + n_term) * stride);
+
+#pragma omp parallel
+    {
+        DetScratch scratch(nword_);
+
+#pragma omp for schedule(guided)
+        for (i64 ii = 0; ii < static_cast<i64>(kets.n_dets); ++ii) {
+            const std::size_t iket = static_cast<std::size_t>(ii);
+            const DetRef ket = kets[iket];
+            const ConnSpan span = spans[iket];
+
+            for (std::size_t k = span.begin; k < span.end; ++k) {
+                const std::size_t slot =
+                    static_cast<std::size_t>(out.ptr[iket])
+                    + k - span.begin;
+                const Conn& term = all[iket]->terms[k];
+                copy_det(
+                    out.bra,
+                    kets.n_dets + slot,
+                    apply(ket, term.excitation, scratch)
+                );
+                out.h[slot] = term.h;
+            }
         }
     }
 
-    return assemble_conn(kets, items, diag, degree, 1u);
+    return out;
 }
 
 } // namespace libdet

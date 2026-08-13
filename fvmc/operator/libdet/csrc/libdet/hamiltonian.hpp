@@ -75,36 +75,36 @@ public:
     );
 
     [[nodiscard]] double hij(DetRef bra, DetRef ket) const;
-    [[nodiscard]] std::vector<double> diag(DetBatchView dets) const;
+    [[nodiscard]] std::vector<double> diag(DetBatch dets) const;
 
     [[nodiscard]] std::vector<u64> expand(
-        DetBatchView kets,
+        DetBatch kets,
         double eps,
         std::span<const double> scale = {},
-        const DetBatchView* exclude = nullptr
+        const DetBatch* exclude = nullptr
     ) const;
 
     [[nodiscard]] Projection project(
-        DetBatchView bras,
-        DetBatchView kets,
+        DetBatch bras,
+        DetBatch kets,
         std::span<const double> scale,
         double eps = 0.0
     ) const;
 
     [[nodiscard]] Projection project(
-        DetBatchView kets,
+        DetBatch kets,
         std::span<const double> scale,
         double eps,
-        const DetBatchView* exclude
+        const DetBatch* exclude
     ) const;
 
     [[nodiscard]] Conns conn(
-        DetBatchView kets,
+        DetBatch kets,
         double eps = 0.0
     ) const;
 
     [[nodiscard]] LocalConn local_conn(
-        DetBatchView kets,
+        DetBatch kets,
         double eps1,
         double eps2,
         std::span<const i64> counts,
@@ -112,7 +112,7 @@ public:
     ) const;
 
     [[nodiscard]] Conns sample_conn(
-        DetBatchView kets,
+        DetBatch kets,
         std::span<const i64> counts,
         std::size_t n_streams,
         double eps1,
@@ -121,27 +121,27 @@ public:
     ) const;
 
     [[nodiscard]] Projections sample_project(
-        DetBatchView kets,
+        DetBatch kets,
         std::span<const double> scale,
         std::span<const i64> counts,
         std::size_t n_streams,
         double eps1,
         double eps2,
-        const DetBatchView* exclude = nullptr,
+        const DetBatch* exclude = nullptr,
         u64 seed = 0
     ) const;
 
-    [[nodiscard]] Matrix matrix(DetBatchView bras, DetBatchView kets) const;
+    [[nodiscard]] Matrix matrix(DetBatch bras, DetBatch kets) const;
 
     [[nodiscard]] std::vector<double> matvec(
-        DetBatchView bras,
-        DetBatchView kets,
+        DetBatch bras,
+        DetBatch kets,
         std::span<const double> x
     ) const;
 
     [[nodiscard]] std::vector<double> matmat(
-        DetBatchView bras,
-        DetBatchView kets,
+        DetBatch bras,
+        DetBatch kets,
         std::span<const double> x,
         std::size_t nrhs
     ) const;
@@ -157,7 +157,7 @@ private:
     mutable std::mutex space_mutex_;
     mutable SpaceCache space_cache_;
 
-    void check_dets(DetBatchView dets, const char* where) const;
+    void check_dets(DetBatch dets, const char* where) const;
     static void check_eps(double eps);
     static void check_window(double eps1, double eps2);
 
@@ -168,7 +168,7 @@ private:
         double max_scale
     ) noexcept;
     [[nodiscard]] std::shared_ptr<const DetSpace> cached_space(
-        DetBatchView kets
+        DetBatch kets
     ) const;
 
     [[nodiscard]] std::shared_ptr<const ConnSet> make_conns(
@@ -179,7 +179,7 @@ private:
     ) const;
 
     [[nodiscard]] std::vector<std::shared_ptr<const ConnSet>> cached_conns(
-        DetBatchView kets,
+        DetBatch kets,
         double eps
     ) const;
 
@@ -203,7 +203,7 @@ inline Hamiltonian::Hamiltonian(
     conn_cache_(nword_) {}
 
 inline void Hamiltonian::check_dets(
-    DetBatchView dets,
+    DetBatch dets,
     const char* where
 ) const {
     if (dets.nword != nword_) {
@@ -256,7 +256,7 @@ inline double Hamiltonian::screen_cutoff(
 }
 
 inline std::shared_ptr<const DetSpace> Hamiltonian::cached_space(
-    DetBatchView kets
+    DetBatch kets
 ) const {
     {
         std::lock_guard<std::mutex> lock(space_mutex_);

@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <vector>
 
-using libdet::DetBatchView;
+using libdet::DetBatch;
 using libdet::DetRef;
 using libdet::Hamiltonian;
 using libdet::i64;
@@ -81,11 +81,11 @@ std::vector<u64> make_basis(int norb) {
     return out;
 }
 
-DetBatchView view(const std::vector<u64>& words) {
+DetBatch view(const std::vector<u64>& words) {
     return {words.data(), words.size() / 2u, 1u};
 }
 
-int find_state(DetBatchView states, DetRef target) {
+int find_state(DetBatch states, DetRef target) {
     for (std::size_t i = 0; i < states.n_dets; ++i) {
         const DetRef state = states[i];
         if (
@@ -100,7 +100,7 @@ int find_state(DetBatchView states, DetRef target) {
 
 std::vector<double> dense(
     const Hamiltonian& ham,
-    DetBatchView basis
+    DetBatch basis
 ) {
     const std::size_t n = basis.n_dets;
     std::vector<double> out(n * n, 0.0);
@@ -130,7 +130,7 @@ double sum_degree(
 
 void check_matrix(
     const Hamiltonian& ham,
-    DetBatchView basis,
+    DetBatch basis,
     const std::vector<double>& expected
 ) {
     const std::size_t n = basis.n_dets;
@@ -170,7 +170,7 @@ void check_matrix(
 
 void check_conn(
     const Hamiltonian& ham,
-    DetBatchView basis,
+    DetBatch basis,
     const std::vector<double>& matrix,
     double eps
 ) {
@@ -204,11 +204,11 @@ void check_conn(
 
 void check_project(
     const Hamiltonian& ham,
-    DetBatchView basis,
+    DetBatch basis,
     const std::vector<double>& matrix
 ) {
     const std::size_t n = basis.n_dets;
-    const DetBatchView kets{basis.data, 4u, basis.nword};
+    const DetBatch kets{basis.data, 4u, basis.nword};
     const std::vector<double> scale{0.4, -0.2, 0.7, 0.3};
     const auto fixed = ham.project(basis, kets, scale, 0.0);
 
@@ -245,7 +245,7 @@ void check_project(
 
 void check_sample(
     const Hamiltonian& ham,
-    DetBatchView basis,
+    DetBatch basis,
     const std::vector<double>& matrix,
     double eps1,
     double eps2

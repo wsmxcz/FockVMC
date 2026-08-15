@@ -7,10 +7,10 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from fvmc import Hamiltonian, MCState
+from fvmc import Hamiltonian, IRState
 from fvmc.model import PBackflow
 from fvmc.operator import density_correlation, rdm1, spin_correlation
-from fvmc.sampler import MCSampler
+from fvmc.sampler import ChainState, HamSampler
 from fvmc.utils import batch, checkpoint, precision
 
 
@@ -29,7 +29,7 @@ def main() -> None:
     precision.configure("double")
 
     saved_state = checkpoint.load(npz, key="state")
-    saved_sampler = saved_state["sampler_state"]
+    saved_chain = saved_state["chain"]
     params = saved_state["params"]
 
     hamiltonian = Hamiltonian.load(fcidump)
@@ -51,35 +51,28 @@ def main() -> None:
         hidden=hidden,
     )
 
-    chains = np.ascontiguousarray(saved_sampler["x"], dtype=np.uint64)
-    sampler = MCSampler(
+    chains = np.ascontiguousarray(saved_chain["x"], dtype=np.uint64)
+    sampler = HamSampler(
         n_samples=4096,
         n_chains=chains.shape[0],
-        burn_in=0,
-        discard=0,
-        proposal="ham",
-        beta=0.5,
-        alpha=float(np.asarray(saved_sampler["alpha"])),
+        thermal_steps=0,
+        eps1=1.0e-3,
     )
-    sampler_state = sampler.init(
-        params,
-        hamiltonian,
-        model,
-        key=jax.device_put(saved_sampler["key"]),
-        eps1=1e-3,
-        chains=chains,
-    )
-
-    state = MCState(
+    state = IRState(
         model=model,
         params=params,
         hamiltonian=hamiltonian,
         sampler=sampler,
-        sampler_state=sampler_state,
-        chains=chains,
-        eps1=0.0,
-        eps2=0.0,
-        n_eloc=0,
+        chain=ChainState(
+            key=jax.device_put(saved_chain["key"]),
+            x=chains,
+            logabs=np.asarray(saved_chain["logabs"]),
+        ),
+        alpha=None,
+        alpha_value=float(np.asarray(saved_state["alpha_value"])),
+        beta=0.5,
+        eps2=1.0e-12,
+        n_eloc=1024,
     )
 
     state, stats, data = state.expect(data=True)

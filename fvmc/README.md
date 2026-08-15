@@ -27,11 +27,11 @@ model
     parameterized log wavefunction
 
 sampler
-    ChainState, MCSampler
-    burn-in, proposal distributions, MH transitions, Markov kernels
+    ChainState, MCSampler, HamSampler
+    thermalization, determinant proposals, MH transitions
 
 vstate
-    ExactState, SelectedState, MCState
+    ExactState, SelectedState, MCState, IRState
     energy, observables, gradients, Geometry
 
 optimizer
@@ -123,7 +123,7 @@ chains = sector.random(n, seed)
 chains = sample_slater(sector, ref_mat, n=n, seed=seed)
 ```
 
-This choice changes burn-in, not the Born distribution.
+This choice changes thermalization, not the Born distribution.
 
 ## Estimation and optimization
 
@@ -131,13 +131,13 @@ The estimator interface is direct:
 
 ```python
 state, stats = state.expect()
-state, energy, grad, stats, geometry = state.expect_and_grad(geometry=True)
+state, stats, grad, geometry = state.expect(grad=True, geometry=True)
 ```
 
-`ExactState` uses the full sector, `SelectedState` a finite selected space, and
-`MCState` a self-normalized importance estimator. Calls return the next state
-because chains and tempering may advance. Only `MCState` has a checkpoint
-contract.
+`ExactState` uses the full sector, `SelectedState` a finite selected space,
+`MCState` symmetric determinant sampling, and `IRState` Hamiltonian importance
+resampling. Calls return the next state because chains and tempering may
+advance. Monte Carlo states include their chains in checkpoints.
 
 SR and PSR consume `Geometry`; Optax supplies the learning rate:
 

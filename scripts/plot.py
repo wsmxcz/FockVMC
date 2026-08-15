@@ -19,11 +19,11 @@ def smooth(y: np.ndarray, window: int = 11) -> np.ndarray:
 
 def main() -> None:
     runs = {
-        "32768": next(Path.cwd().rglob("fe2s2.jsonl")),
-        "8192": next(Path.cwd().rglob("fe2s2_eloc8192.jsonl")),
-        "1e-4": next(Path.cwd().rglob("fe2s2_eps1e-4.jsonl")),
-        "1e-5": next(Path.cwd().rglob("fe2s2_eps1e-5.jsonl")),
-        "1e-6": next(Path.cwd().rglob("fe2s2_eps1e-6.jsonl")),
+        # "old1024": next(Path.cwd().rglob("fe2s2_old1024.jsonl")),
+        # "old8192": next(Path.cwd().rglob("fe2s2_old8192.jsonl")),
+        # "old32768": next(Path.cwd().rglob("fe2s2_old32768.jsonl")),
+        "new1024": next(Path.cwd().rglob("fe2s2.jsonl")),
+        "born": next(Path.cwd().rglob("fe2s2_born.jsonl")),
     }
     benchmark = -116.6056091  # Fe2S2
     figure, axes = plt.subplots(

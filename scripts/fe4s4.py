@@ -6,11 +6,11 @@ import jax
 import numpy as np
 import optax
 
-from fvmc import Hamiltonian, MCState, VMC
+from fvmc import Hamiltonian, IRState, VMC
 from fvmc.model import PBackflow, slater_reference
 from fvmc.operator import S2
 from fvmc.optimizer import psr
-from fvmc.sampler import MCSampler, sample_slater
+from fvmc.sampler import HamSampler, sample_slater
 from fvmc.utils import Logger, batch, precision
 
 
@@ -53,14 +53,12 @@ def main() -> None:
         init_scale=1.0e-3,
     )
 
-    sampler = MCSampler(
+    sampler = HamSampler(
         n_samples=4096,
         n_chains=4096,
-        burn_in=4096,
-        discard=16,
-        proposal="ham",
-        beta=0.5,
-        alpha=None,
+        thermal_steps=4096,
+        discard_steps=16,
+        eps1=1.0e-3,
     )
     chains = sample_slater(
         sector,
@@ -69,15 +67,16 @@ def main() -> None:
         seed=seed,
     )
 
-    state = MCState.init(
+    state = IRState.init(
         model=model,
         hamiltonian=hamiltonian,
         sampler=sampler,
         chains=chains,
         key=jax.random.key(seed),
-        eps1=1.0e-3,
+        alpha=None,
+        beta=0.5,
         eps2=1.0e-12,
-        n_eloc=32768,
+        n_eloc=1024,
     )
     optimizer = optax.chain(
         psr(shift=1.0e-3, mu=0.95),
@@ -92,10 +91,10 @@ def main() -> None:
     vmc.run(
         5000,
         obs={"s2": S2(sector)},
-        log=Logger(file=f"{name}.jsonl", every=10),
+        log=Logger(file=f"{name}.jsonl", every=100),
         profile=True,
         checkpoint=f"{name}_{{step:05d}}.npz",
-        checkpoint_every=1000,
+        checkpoint_every=5000,
     )
 
 

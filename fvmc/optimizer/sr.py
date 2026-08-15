@@ -16,7 +16,7 @@ from .base import Geometry
 class SRState(NamedTuple):
     """Warm start for parameter-space SR."""
 
-    x0: jax.Array
+    guess: jax.Array
 
 
 def sr(
@@ -33,7 +33,7 @@ def sr(
 
     def init_fn(params: Any) -> SRState:
         flat, _ = ravel_pytree(params)
-        return SRState(x0=jnp.zeros_like(flat))
+        return SRState(guess=jnp.zeros_like(flat))
 
     def update_fn(
         updates: Any,
@@ -68,16 +68,16 @@ def sr(
                 grad,
                 shift_t,
             )
-            x0 = state.x0
+            guess = state.guess
         else:
-            delta, x0 = _matvec_step(
+            delta, guess = _matvec_step(
                 geometry.coord,
                 theta,
                 x,
                 w,
                 grad,
                 shift_t,
-                state.x0,
+                state.guess,
                 max_iter,
             )
 
@@ -87,7 +87,7 @@ def sr(
             theta,
         )
 
-        return delta, SRState(x0=x0)
+        return delta, SRState(guess=guess)
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
@@ -129,7 +129,7 @@ def _matvec_step(
     w: jax.Array,
     grad: Any,
     shift: jax.Array,
-    x0: jax.Array,
+    guess: jax.Array,
     max_iter: int,
 ) -> tuple[Any, jax.Array]:
     """Solve matrix-free parameter-space SR."""
@@ -161,16 +161,16 @@ def _matvec_step(
         return precision.cast(flat, "sr").astype(vec.dtype)
 
     rhs = precision.cast(grad_flat, "sr")
-    x0 = precision.cast(x0, "sr").astype(rhs.dtype)
+    guess = precision.cast(guess, "sr").astype(rhs.dtype)
 
     delta = linalg.solve_matvec(
         matvec,
         rhs,
         shift,
-        x0=x0,
+        x0=guess,
         max_iter=max_iter,
     )
     return (
         unravel(delta.astype(grad_flat.dtype)),
-        delta.astype(x0.dtype),
+        delta.astype(guess.dtype),
     )

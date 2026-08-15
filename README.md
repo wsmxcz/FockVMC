@@ -13,12 +13,9 @@ pip install -e .
 ```
 
 ```bash
-python scripts/test.py
 python examples/vmc.py
 ```
-
-`scripts/test.py` checks the complete small-system path. `examples/vmc.py` is
-the standard VMC experiment. FCIDUMP inputs are stored in `scripts/FCIDUMP/`.
+`examples/vmc.py` is a minimal VMC example. FCIDUMP inputs are stored in `scripts/FCIDUMP/`.
 
 ## Scope
 
@@ -27,7 +24,7 @@ hilbert    sectors and configurations
 operator   electronic Hamiltonians and libdet primitives
 model      RBM and backflow wavefunctions
 sampler    Markov chains and proposals
-vstate     exact, selected-space, and Monte Carlo estimators
+vstate     exact, selected-space, Monte Carlo, and IR estimators
 optimizer  SR and predictive sample-space SR
 driver     optimization loop, logging, and MC checkpoints
 ```

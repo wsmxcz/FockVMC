@@ -5,11 +5,12 @@ import numpy as np
 import optax
 import pytest
 
-from fvmc import ExactState, Hamiltonian, MCState, SelectedState, VMC
+from fvmc import ExactState, Hamiltonian, IRState, MCState, SelectedState, VMC
+from fvmc.hilbert import DetSector
 from fvmc.model import RBM
 from fvmc.operator import number
-from fvmc.sampler import MCSampler
-from fvmc.utils import Logger, batch
+from fvmc.sampler import HamSampler, MCSampler
+from fvmc.utils import batch
 
 
 FCIDUMP = Path(__file__).parents[1] / "scripts" / "FCIDUMP" / "H2.FCIDUMP"
@@ -45,8 +46,8 @@ def test_selected() -> None:
         np.testing.assert_allclose(b, a)
 
 
-@pytest.mark.parametrize("proposal", ("ham", "single"))
-def test_sampler(proposal: str) -> None:
+@pytest.mark.parametrize("rank", (1, 2, None))
+def test_mc(rank: int | None) -> None:
     batch.configure(
         forward_chunk=None,
         backward_chunk=None,
@@ -58,10 +59,8 @@ def test_sampler(proposal: str) -> None:
     sampler = MCSampler(
         n_samples=16,
         n_chains=8,
-        burn_in=1,
-        proposal=proposal,
-        alpha=2.0,
-        beta=0.0 if proposal == "single" else 0.5,
+        thermal_steps=1,
+        rank=rank,
     )
     chains = ham.sector.random(sampler.n_chains, seed=2)
     state_a = MCState.init(
@@ -70,9 +69,7 @@ def test_sampler(proposal: str) -> None:
         sampler=sampler,
         chains=chains,
         key=jax.random.key(2),
-        eps1=0.0,
-        eps2=0.0,
-        n_eloc=0,
+        alpha=2.0,
     )
     state_b = MCState.init(
         model,
@@ -80,27 +77,25 @@ def test_sampler(proposal: str) -> None:
         sampler=sampler,
         chains=chains,
         key=jax.random.key(2),
-        eps1=0.0,
-        eps2=0.0,
-        n_eloc=0,
+        alpha=2.0,
     )
 
     out_a = sampler.draw(
         state_a.params,
-        ham,
         model,
-        state_a.sampler_state,
-        eps1=0.0,
+        ham.sector,
+        state_a.chain,
+        alpha=2.0,
     )
     out_b = sampler.draw(
         state_b.params,
-        ham,
         model,
-        state_b.sampler_state,
-        eps1=0.0,
+        ham.sector,
+        state_b.chain,
+        alpha=2.0,
     )
-    next_a, x_a, mass_a, rec = out_a
-    next_b, x_b, mass_b, _ = out_b
+    next_a, samples_a, rec = out_a
+    next_b, samples_b, _ = out_b
 
     np.testing.assert_array_equal(next_b.x, next_a.x)
     np.testing.assert_array_equal(next_b.logabs, next_a.logabs)
@@ -108,12 +103,52 @@ def test_sampler(proposal: str) -> None:
         jax.random.key_data(next_b.key),
         jax.random.key_data(next_a.key),
     )
-    np.testing.assert_array_equal(x_b, x_a)
-    np.testing.assert_array_equal(mass_b, mass_a)
-    np.testing.assert_array_equal(number(x_a, spin=0), ham.sector.n_alpha)
-    np.testing.assert_array_equal(number(x_a, spin=1), ham.sector.n_beta)
-    assert np.isfinite(mass_a).all() and (mass_a > 0.0).all()
+    np.testing.assert_array_equal(samples_b, samples_a)
+    np.testing.assert_array_equal(number(samples_a, spin=0), ham.sector.n_alpha)
+    np.testing.assert_array_equal(number(samples_a, spin=1), ham.sector.n_beta)
     assert 0.0 <= rec["acceptance_rate"] <= 1.0
+    _, state_rec = state_a.expect()
+    assert np.isfinite(state_rec["energy"])
+
+
+def test_ham() -> None:
+    sector = DetSector(norb=2, nelec=2, spin=0)
+    ham = Hamiltonian(
+        sector,
+        np.zeros((2, 2)),
+        np.zeros(6),
+    )
+    model = RBM(norb=sector.norb, alpha=1)
+    sampler = HamSampler(
+        n_samples=8,
+        n_chains=8,
+        thermal_steps=0,
+        eps1=0.0,
+    )
+    chains = sector.random(sampler.n_chains, seed=7)
+    state = IRState.init(
+        model,
+        ham,
+        sampler=sampler,
+        chains=chains,
+        key=jax.random.key(7),
+        alpha=2.0,
+        beta=1.0,
+        eps2=0.0,
+        n_eloc=0,
+    )
+    chain, samples, _ = sampler.draw(
+        state.params,
+        model,
+        ham,
+        state.chain,
+        alpha=2.0,
+        beta=1.0,
+    )
+    np.testing.assert_array_equal(samples, chains)
+    np.testing.assert_array_equal(chain.x, chains)
+    _, rec = state.expect()
+    assert rec["energy"] == 0.0
 
 
 def test_driver(tmp_path: Path) -> None:
@@ -125,30 +160,25 @@ def test_driver(tmp_path: Path) -> None:
     )
     ham = Hamiltonian.load(FCIDUMP)
     model = RBM(norb=ham.sector.norb, alpha=1)
-    sampler = MCSampler(
-        n_samples=16,
-        n_chains=8,
-        burn_in=0,
-        proposal="single",
-        alpha=2.0,
-        beta=0.0,
-    )
-    state = MCState.init(
+    chains = ham.sector.random(8, seed=4)
+    state = IRState.init(
         model,
         ham,
-        sampler=sampler,
-        chains=ham.sector.random(sampler.n_chains, seed=3),
-        key=jax.random.key(3),
-        eps1=0.0,
+        sampler=HamSampler(
+            n_samples=16,
+            n_chains=8,
+            thermal_steps=0,
+            eps1=0.0,
+        ),
+        chains=chains,
+        key=jax.random.key(4),
+        alpha=2.0,
         eps2=0.0,
         n_eloc=0,
     )
+
     vmc = VMC.init(state, optax.adam(1.0e-3), geometry=False)
-    vmc.run(
-        1,
-        log=Logger(tmp_path / "vmc.jsonl", verbose=False),
-        profile=True,
-    )
+    vmc.run(1)
 
     saved = vmc.state.state_dict()
     saved_opt = vmc.opt_state
@@ -159,19 +189,15 @@ def test_driver(tmp_path: Path) -> None:
     vmc.load(path)
 
     assert vmc.step_count == step
-    np.testing.assert_array_equal(vmc.state.chains, saved["chains"])
+    np.testing.assert_array_equal(vmc.state.chain.x, saved["chain"]["x"])
     np.testing.assert_array_equal(
-        vmc.state.sampler_state.x,
-        saved["sampler_state"]["x"],
+        vmc.state.chain.logabs,
+        saved["chain"]["logabs"],
     )
+    assert vmc.state.alpha_value == saved["alpha_value"]
     np.testing.assert_array_equal(
-        vmc.state.sampler_state.logabs,
-        saved["sampler_state"]["logabs"],
-    )
-    assert vmc.state.sampler_state.alpha == saved["sampler_state"]["alpha"]
-    np.testing.assert_array_equal(
-        jax.random.key_data(vmc.state.sampler_state.key),
-        jax.random.key_data(saved["sampler_state"]["key"]),
+        jax.random.key_data(vmc.state.chain.key),
+        jax.random.key_data(saved["chain"]["key"]),
     )
     for actual, expected in zip(
         jax.tree.leaves(vmc.state.params),

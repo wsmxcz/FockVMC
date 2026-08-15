@@ -5,26 +5,30 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from ..model import Model
 from ..model.base import to_logabs, to_ratio
 from ..optimizer.base import Geometry
-from ..sampler import ChainState, MCSampler
-from ..utils import Timer, batch, precision, stats, tree
+from ..sampler import ChainState, HamSampler
+from ..utils import Timer, batch, math, precision, stats, tree
 
 
 @dataclass(slots=True)
-class MCState:
-    """Standard Monte Carlo variational state"""
+class IRState:
+    """Importance-reweighted variational state."""
 
     model: Model
     params: Any
     hamiltonian: Any
-    sampler: MCSampler
+    sampler: HamSampler
     chain: ChainState
     alpha: float | None
     alpha_value: float
+    beta: float
+    eps2: float
+    n_eloc: int
 
     @classmethod
     def init(
@@ -32,15 +36,26 @@ class MCState:
         model: Model,
         hamiltonian: Any,
         *,
-        sampler: MCSampler,
+        sampler: HamSampler,
         chains: Any,
         key: jax.Array,
         alpha: float | None = None,
-    ) -> MCState:
+        beta: float = 0.5,
+        eps2: float = 1.0e-6,
+        n_eloc: int = 256,
+    ) -> IRState:
         if alpha is not None and (
             not np.isfinite(alpha) or not 0.0 <= alpha <= 2.0
         ):
             raise ValueError("alpha must be None or satisfy 0 <= alpha <= 2")
+        if not 0.0 <= beta <= 1.0:
+            raise ValueError("beta must satisfy 0 <= beta <= 1")
+        if not 0.0 <= eps2 <= sampler.eps1:
+            raise ValueError("screening requires 0 <= eps2 <= eps1")
+        if n_eloc < 0:
+            raise ValueError("n_eloc must be nonnegative")
+        if eps2 < sampler.eps1 and (eps2 == 0.0 or n_eloc == 0):
+            raise ValueError("weak sampling requires eps2 > 0 and n_eloc > 0")
 
         _, init_key, sample_key = jax.random.split(key, 3)
         params = model.init(init_key, hamiltonian.sector.zeros(1))["params"]
@@ -48,7 +63,7 @@ class MCState:
         chain = sampler.init(
             params,
             model,
-            hamiltonian.sector,
+            hamiltonian,
             chains=chains,
             key=sample_key,
             alpha=alpha_value,
@@ -61,9 +76,12 @@ class MCState:
             chain=chain,
             alpha=alpha,
             alpha_value=alpha_value,
+            beta=float(beta),
+            eps2=float(eps2),
+            n_eloc=n_eloc,
         )
 
-    def replace(self, **updates: Any) -> MCState:
+    def replace(self, **updates: Any) -> IRState:
         return replace(self, **updates)
 
     def state_dict(self) -> dict[str, Any]:
@@ -78,7 +96,7 @@ class MCState:
             "alpha_value": self.alpha_value,
         }
 
-    def load_state(self, data: dict[str, Any]) -> MCState:
+    def load_state(self, data: dict[str, Any]) -> IRState:
         """Restore dynamic state from a checkpoint."""
         saved = data["chain"]
         chain = ChainState(
@@ -118,9 +136,10 @@ class MCState:
         chain, samples, sample_rec = self.sampler.draw(
             self.params,
             self.model,
-            sector,
+            self.hamiltonian,
             chain,
             alpha=alpha,
+            beta=self.beta,
             timer=timer,
         )
 
@@ -129,10 +148,22 @@ class MCState:
             n_ket = ket.shape[0]
         with timer("reduce"):
             count = np.bincount(sample_index, minlength=n_ket)
+            seed = 0
+            if self.eps2 < self.sampler.eps1:
+                key, subkey = jax.random.split(chain.key)
+                seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
+                chain = replace(chain, key=key)
 
         with timer("conns"):
-            conn = self.hamiltonian.conn(ket, 0.0)
-            n_conn = conn.h.size
+            conn = self.hamiltonian.local_conn(
+                ket,
+                self.sampler.eps1,
+                self.eps2,
+                self.n_eloc,
+                seed=seed,
+            )
+            n_strong = conn.strong_h.size
+            n_weak = conn.weak_coeff.size
             bra_parts = [conn.bra]
             obs_conn = []
             start = conn.bra.shape[0]
@@ -158,41 +189,118 @@ class MCState:
                 if any(np.iscomplexobj(a) for a in jax.tree.leaves(ket_logpsi))
                 else dtype
             )
+            strong_h = np.asarray(conn.strong_h, dtype=dtype)
+            weak_coeff = np.asarray(conn.weak_coeff, dtype=dtype)
+            degree = np.asarray(conn.strong_degree, dtype=dtype)
+            strong_slice = slice(n_ket, n_ket + n_strong)
+            weak_slice = slice(n_ket + n_strong, n_ket + n_strong + n_weak)
+            strong_count = np.diff(conn.strong_ptr)
+            strong_row = np.flatnonzero(strong_count)
+            strong_start = conn.strong_ptr[strong_row]
+            strong_ket = np.repeat(
+                np.arange(n_ket, dtype=np.int32),
+                strong_count,
+            )
+            strong_logpsi = jax.tree.map(
+                lambda a: a[strong_slice],
+                bra_logpsi,
+            )
+
             eloc = np.array(conn.diag, dtype=eloc_dtype, copy=True)
-            if n_conn:
-                conn_count = np.diff(conn.ptr)
-                row = np.flatnonzero(conn_count)
-                start = conn.ptr[row]
-                conn_ket = np.repeat(
-                    np.arange(n_ket, dtype=np.int32),
-                    conn_count,
-                )
-                conn_logpsi = jax.tree.map(
-                    lambda a: a[n_ket : n_ket + n_conn],
-                    bra_logpsi,
-                )
+            if n_strong:
                 ratio = np.asarray(
                     to_ratio(
-                        conn_logpsi,
-                        jax.tree.map(lambda a: a[conn_ket], ket_logpsi),
+                        strong_logpsi,
+                        jax.tree.map(lambda a: a[strong_ket], ket_logpsi),
                     ),
                     dtype=eloc_dtype,
                 )
-                eloc[row] += np.add.reduceat(
-                    np.asarray(conn.h, dtype=dtype) * ratio,
-                    start,
+                eloc[strong_row] += np.add.reduceat(
+                    strong_h * ratio,
+                    strong_start,
                 )
 
-            log_r = dtype(alpha) * ket_logabs
+            tiny = dtype(precision.tiny("calc"))
+            alpha_logabs = dtype(alpha) * ket_logabs
+            log_stay = np.full(n_ket, -np.inf, dtype=dtype)
+            active = degree > 0.0
+            if self.beta < 1.0:
+                log_stay[active] = (
+                    np.log1p(-dtype(self.beta))
+                    + np.log(degree[active])
+                    + alpha_logabs[active]
+                )
+            log_stay[~active] = alpha_logabs[~active]
+
+            terms = np.empty(0, dtype=dtype)
+            strong_logabs = np.empty(0, dtype=dtype)
+            if self.beta > 0.0 and n_strong:
+                strong_logabs = np.asarray(
+                    to_logabs(strong_logpsi),
+                    dtype=dtype,
+                ).reshape(-1)
+                terms = (
+                    np.log(np.maximum(np.abs(strong_h), tiny))
+                    + dtype(alpha) * strong_logabs
+                )
+                log_move = np.log(dtype(self.beta)) + math.segment_logsumexp(
+                    conn.strong_ptr,
+                    terms,
+                    n_ket,
+                )
+                log_r = np.logaddexp(log_stay, log_move)
+            else:
+                log_r = log_stay
+
+            if n_weak:
+                weak_count = np.diff(conn.weak_ptr)
+                weak_row = np.flatnonzero(weak_count)
+                weak_start = conn.weak_ptr[weak_row]
+                weak_ket = np.repeat(
+                    np.arange(n_ket, dtype=np.int32),
+                    weak_count,
+                )
+                ratio = np.asarray(
+                    to_ratio(
+                        jax.tree.map(lambda a: a[weak_slice], bra_logpsi),
+                        jax.tree.map(lambda a: a[weak_ket], ket_logpsi),
+                    ),
+                    dtype=eloc_dtype,
+                )
+                eloc[weak_row] += np.add.reduceat(
+                    weak_coeff * ratio,
+                    weak_start,
+                )
+
             weight, weight_rec = stats.weight(count, ket_logabs, log_r)
             energy, eloc_var = stats.moments(weight, eloc)
             residual = eloc - energy
 
             alpha_value = self.alpha_value
             if self.alpha is None:
-                tiny = dtype(precision.tiny("calc"))
-                score = ket_logabs
-                score2 = score * score
+                finite = np.isfinite(log_stay) & np.isfinite(log_r)
+                stay_weight = np.zeros(n_ket, dtype=dtype)
+                stay_weight[finite] = np.exp(log_stay[finite] - log_r[finite])
+                score = stay_weight * ket_logabs
+                score2 = score * ket_logabs
+                if self.beta > 0.0 and n_strong:
+                    term_log = (
+                        np.log(dtype(self.beta))
+                        + terms
+                        - log_r[strong_ket]
+                    )
+                    finite = np.isfinite(term_log)
+                    conn_weight = np.zeros_like(term_log, dtype=dtype)
+                    conn_weight[finite] = np.exp(term_log[finite])
+                    score[strong_row] += np.add.reduceat(
+                        conn_weight * strong_logabs,
+                        strong_start,
+                    )
+                    score2[strong_row] += np.add.reduceat(
+                        conn_weight * strong_logabs * strong_logabs,
+                        strong_start,
+                    )
+
                 res_weight = weight * np.abs(residual)
                 res_norm = float(np.sum(res_weight))
                 count_norm = float(np.sum(count))
@@ -287,7 +395,7 @@ class MCState:
         }
         rec.update(timer.stats())
         if timer.timing:
-            rec["n_conn"] = n_conn
+            rec["n_conn"] = n_strong + n_weak
 
         if data:
             return new_state, rec, {

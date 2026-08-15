@@ -9,37 +9,29 @@ from . import precision
 
 
 def weight(
-    mass: NDArray[Any],
-    mass2: NDArray[Any],
+    count: NDArray[Any],
     logabs: NDArray[Any],
-    log_induced: NDArray[Any],
+    log_r: NDArray[Any],
 ) -> tuple[NDArray[Any], dict[str, float]]:
     """Construct normalized importance weights.
 
     Unique-ket convention:
 
-        omega_x = M_x exp(2 log|psi(x)| - log r(x)),
+        omega_x = N_x exp(2 log|psi(x)| - log r(x)),
         w_x = omega_x / sum_y omega_y.
     """
     dtype = precision.real("calc", host=True)
     tiny = dtype(precision.tiny("calc"))
 
-    mass = precision.cast(mass, "calc", "real", host=True).reshape(-1)
-    mass2 = precision.cast(mass2, "calc", "real", host=True).reshape(-1)
+    count = precision.cast(count, "calc", "real", host=True).reshape(-1)
     logabs = precision.cast(logabs, "calc", "real", host=True).reshape(-1)
-    log_induced = precision.cast(
-        log_induced,
-        "calc",
-        "real",
-        host=True,
-    ).reshape(-1)
+    log_r = precision.cast(log_r, "calc", "real", host=True).reshape(-1)
 
-    logw = dtype(2.0) * logabs - log_induced
+    logw = dtype(2.0) * logabs - log_r
     valid = (
         np.isfinite(logw)
-        & np.isfinite(mass)
-        & np.isfinite(mass2)
-        & (mass > 0.0)
+        & np.isfinite(count)
+        & (count > 0.0)
     )
 
     if not valid.any():
@@ -49,19 +41,17 @@ def weight(
     unorm = np.zeros_like(logw, dtype=dtype)
     unorm[valid] = np.exp(logw[valid] - scale)
 
-    weighted = mass * unorm
+    weighted = count * unorm
     norm = np.sum(weighted)
 
     if norm <= 0.0 or not np.isfinite(norm):
         raise FloatingPointError("importance weights have zero total mass")
 
     weight = weighted / norm
-    ess = norm * norm / max(np.sum(mass2 * unorm * unorm), tiny)
-    unique_ess = 1.0 / max(np.sum(weight * weight), tiny)
+    ess = norm * norm / max(np.sum(count * unorm * unorm), tiny)
 
     return weight, {
-        "ess_frac": float(ess / max(1.0, np.sum(mass))),
-        "unique_eff": float(unique_ess / max(1, weight.size)),
+        "ess_frac": float(ess / max(1.0, np.sum(count))),
         "w_max": float(np.max(weight)) if weight.size else 0.0,
     }
 

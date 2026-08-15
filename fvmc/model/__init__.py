@@ -1,6 +1,5 @@
 from .backflow import Backflow, GBackflow, PBackflow, SBackflow
-from .base import Model
-from .init import slater_reference
+from .base import Model, slater_reference
 from .rbm import RBM
 
 __all__ = (

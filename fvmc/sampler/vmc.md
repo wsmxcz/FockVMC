@@ -1,8 +1,9 @@
 # Monte Carlo estimator
 
-`MCSampler` advances chains for an auxiliary distribution. `MCState` constructs
-a self-normalized importance estimator for the Born distribution. Sampling may
-change coverage and variance, never the variational objective.
+`MCSampler` and `MCState` provide the exact Born reference path. `HamSampler`
+and `IRState` provide Hamiltonian-guided sampling and a semistochastic local
+energy. Sampling may change coverage and variance, never the variational
+objective.
 
 ## Distributions and kernels
 
@@ -29,9 +30,35 @@ r_\theta(y)=\sum_x\rho_\theta(x)K_\theta(y|x)
 \quad\text{induced distribution}.
 $$
 
-The distinction between $p$, $\rho$, $K$, and $r$ is the estimator contract.
+The distinction between $p$, $\rho$, $K$, and $r$ is the `IRState` estimator
+contract.
 
-## Auxiliary chains
+## Born chains
+
+`MCSampler` targets
+
+$$
+p_\alpha(x)\propto |\psi_\theta(x)|^\alpha.
+$$
+
+`rank=k` mixes excitation ranks $1,\ldots,k$; `rank=None` mixes every legal
+rank. Rank probabilities decay geometrically, while spin splits are weighted
+by their number of legal determinants. The resulting proposal is symmetric,
+so
+
+$$
+A(x\to y)=\min\!\left(1,e^{\alpha[\ell_\theta(y)-\ell_\theta(x)]}\right).
+$$
+
+After repeated samples are merged, `MCState` uses
+
+$$
+w_x\propto N_x|\psi_\theta(x)|^{2-\alpha}
+$$
+
+and evaluates the complete local energy.
+
+## Hamiltonian chains
 
 For cutoff $\varepsilon_1$, define
 
@@ -69,10 +96,8 @@ A(x\to y)
 =\min\!\left(1,e^{\alpha[\ell_\theta(y)-\ell_\theta(x)]}\right).
 $$
 
-The MH chain must be ergodic and leave $\rho_{\theta,\alpha}$ invariant. The
-`single` proposal is a Born distribution baseline restricted to `alpha=2` and
-`beta=0`. For Hamiltonian proposals, smaller `alpha` tempers the auxiliary
-distribution.
+The MH chain must be ergodic and leave $\rho_{\theta,\alpha}$ invariant.
+Smaller `alpha` tempers the auxiliary distribution.
 
 `ChainState` contains only persistent sampling state:
 
@@ -80,18 +105,17 @@ distribution.
 key       random key
 x         auxiliary configurations
 logabs    log|psi(x)| at the current parameters
-alpha     auxiliary tempering exponent
 ```
 
 ```text
-burn_in          transitions whenever a sampler state is initialized
-discard          transitions before observations are collected in each draw
-sweep            transitions between successive collection rounds
+thermal_steps    transitions during initialization
+discard_steps    transitions between observation rounds
 ```
 
-Initial configurations are passed to `MCState.init`; the sampler does not
-choose an initialization policy. Burn-in occurs once, then estimator calls
-advance the persistent chains.
+Initial configurations are passed to `MCState.init` or `IRState.init`; the
+sampler does not choose an initialization policy. Thermalization occurs once,
+then estimator calls advance the persistent chains. `alpha` belongs to the
+State; `alpha=None` enables adaptation.
 
 ## Markov kernel and importance weights
 
@@ -104,6 +128,7 @@ K_\beta(y|x)
 $$
 
 The proposal term is absent when $d_{\varepsilon_1}(x)=0$.
+The same Hamiltonian proposal supplies both the observation and MH transition.
 
 Using the unnormalized form of the auxiliary distribution, the induced
 distribution is proportional to
@@ -129,9 +154,8 @@ $$
 \widehat\mu_f=\sum_n w_n f(y_n).
 $$
 
-Repeated outputs are merged by summing their empirical mass. Energy,
-observables, gradients, and geometry use the same normalized importance
-weights.
+Repeated outputs are merged into integer multiplicities. Energy, observables,
+gradients, and geometry use the same normalized importance weights.
 
 ## Local energy
 
@@ -142,7 +166,8 @@ E_{\mathrm{loc}}(x)
 =\sum_y H_{yx}\frac{\psi_\theta(y)}{\psi_\theta(x)}.
 $$
 
-`Hamiltonian.local_conn` partitions the retained action:
+`MCState` obtains the full action from `Hamiltonian.conn`. `IRState` uses
+`Hamiltonian.local_conn`, which partitions the retained action:
 
 ```text
 strong    |H_yx| >= eps1                 deterministic
@@ -153,6 +178,7 @@ Weak connections are sampled from equal-probability strata and carry their
 final unbiased coefficients. With `eps1=eps2=0`, the full action is deterministic.
 
 Weak sampling requires `eps2 > 0` and `n_eloc > 0` when `eps2 < eps1`.
+`n_eloc` is the number of weak samples per unique outer ket.
 
 Kets and all connected bras share one `logpsi` evaluation pool. The final
 energy, residual, gradient cotangent, and SR residual are
@@ -171,18 +197,18 @@ $$
 
 ## Execution order
 
-Every `MCState.expect` or `expect_and_grad` call follows one flow:
+Every `MCState.expect` or `IRState.expect` call follows one flow:
 
 ```text
 1. synchronize chain log amplitudes
-2. advance auxiliary chains and apply the Markov kernel
+2. draw outer samples
 3. merge repeated outputs
 4. generate Hamiltonian and observable connections
 5. evaluate the shared logpsi pool
 6. assemble local quantities
 7. construct normalized importance weights
 8. evaluate self-normalized importance estimators and Geometry
-9. return the advanced chains and tempering state
+9. return the advanced chains and adaptive state
 ```
 
 ## Stable development rules
@@ -190,9 +216,9 @@ Every `MCState.expect` or `expect_and_grad` call follows one flow:
 - A proposal distribution must define its auxiliary distribution and acceptance
   probability together.
 - A Markov kernel must provide its induced distribution.
-- Sampling ends at Markov-kernel outputs; estimation and differentiation stay
-  in `MCState`.
+- Sampling ends at raw observations; estimation and differentiation stay in
+  the State.
 - New observables reuse the shared configuration pool and normalized importance
   weights.
-- `alpha` changes only the auxiliary distribution. `alpha=None` may adapt future
-  chains, but never changes the Born distribution.
+- `alpha` changes only the sampling distribution. `alpha=None` may adapt future
+  chains, but never changes the Born objective.

@@ -41,8 +41,8 @@ class IRState:
         key: jax.Array,
         alpha: float | None = None,
         beta: float = 0.5,
-        eps2: float = 1.0e-6,
-        n_eloc: int = 256,
+        eps2: float = 1.0e-12,
+        n_eloc: int = 1024,
     ) -> IRState:
         if alpha is not None and (
             not np.isfinite(alpha) or not 0.0 <= alpha <= 2.0

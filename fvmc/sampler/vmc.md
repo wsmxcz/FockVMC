@@ -1,9 +1,9 @@
 # Monte Carlo estimator
 
-`MCSampler` and `MCState` provide the exact Born reference path. `HamSampler`
-and `IRState` provide Hamiltonian-guided sampling and a semistochastic local
-energy. Sampling may change coverage and variance, never the variational
-objective.
+`MCSampler` and `MCState` provide the Born sampling path. `HamSampler` and
+`IRState` provide Hamiltonian-guided importance resampling. Both states use a
+semistochastic local energy. Sampling may change coverage and variance, never
+the variational objective.
 
 ## Distributions and kernels
 
@@ -41,10 +41,11 @@ $$
 p_\alpha(x)\propto |\psi_\theta(x)|^\alpha.
 $$
 
-`rank=k` mixes excitation ranks $1,\ldots,k$; `rank=None` mixes every legal
-rank. Rank probabilities decay geometrically, while spin splits are weighted
-by their number of legal determinants. The resulting proposal is symmetric,
-so
+`rank=k` mixes excitation ranks $1,\ldots,k$ with geometric probabilities;
+`rank=None` mixes every legal rank. A mapping selects exact ranks and their
+probabilities, for example `rank={1: 0.25, 2: 0.5, 4: 0.25}`. Spin splits are
+weighted by their number of legal determinants. The resulting proposal is
+symmetric, so
 
 $$
 A(x\to y)=\min\!\left(1,e^{\alpha[\ell_\theta(y)-\ell_\theta(x)]}\right).
@@ -56,7 +57,7 @@ $$
 w_x\propto N_x|\psi_\theta(x)|^{2-\alpha}
 $$
 
-and evaluates the complete local energy.
+and evaluates the same semistochastic local energy as `IRState`.
 
 ## Hamiltonian chains
 
@@ -166,8 +167,8 @@ E_{\mathrm{loc}}(x)
 =\sum_y H_{yx}\frac{\psi_\theta(y)}{\psi_\theta(x)}.
 $$
 
-`MCState` obtains the full action from `Hamiltonian.conn`. `IRState` uses
-`Hamiltonian.local_conn`, which partitions the retained action:
+Both Monte Carlo states use `Hamiltonian.local_conn`, which partitions the
+retained action:
 
 ```text
 strong    |H_yx| >= eps1                 deterministic
@@ -179,6 +180,7 @@ final unbiased coefficients. With `eps1=eps2=0`, the full action is deterministi
 
 Weak sampling requires `eps2 > 0` and `n_eloc > 0` when `eps2 < eps1`.
 `n_eloc` is the number of weak samples per unique outer ket.
+The defaults are `eps1=1e-3`, `eps2=1e-12`, and `n_eloc=1024`.
 
 Kets and all connected bras share one `logpsi` evaluation pool. The final
 energy, residual, gradient cotangent, and SR residual are

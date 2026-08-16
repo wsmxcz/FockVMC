@@ -25,20 +25,25 @@ def rank_table(
     norb: int,
     n_alpha: int,
     n_beta: int,
-    rank: int | None,
+    rank: int | tuple[tuple[int, float], ...] | None,
 ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
     """Build rank and spin-split distributions."""
     max_alpha = min(n_alpha, norb - n_alpha)
     max_beta = min(n_beta, norb - n_beta)
     max_rank = max_alpha + max_beta
-    stop = max_rank if rank is None else min(rank, max_rank)
-    ranks = np.arange(1, stop + 1, dtype=np.int32)
+    if isinstance(rank, tuple):
+        ranks = np.array([item[0] for item in rank], dtype=np.int32)
+        rank_prob = np.array([item[1] for item in rank], dtype=np.float64)
+        if ranks[0] < 1 or ranks[-1] > max_rank:
+            raise ValueError("rank probability contains an illegal rank")
+    else:
+        stop = max_rank if rank is None else min(rank, max_rank)
+        ranks = np.arange(1, stop + 1, dtype=np.int32)
+        if not stop:
+            return ranks, np.empty(0), (), ()
+        rank_prob = np.exp2(-ranks.astype(np.float64))
+        rank_prob /= rank_prob.sum()
 
-    if not stop:
-        return ranks, np.empty(0), (), ()
-
-    weight = np.exp2(-ranks.astype(np.float64))
-    rank_prob = weight / weight.sum()
     splits = []
     split_prob = []
 
@@ -76,7 +81,7 @@ def sample_orbitals(
     for i in range(width):
         active = i < count
         last = size - count + i
-        draw = (rng.random(n) * (last + 1)).astype(np.int32)
+        draw = rng.integers(last + 1, dtype=np.int32)
         if i:
             duplicate = (rank[:, :i] == draw[:, None]).any(axis=1)
             draw = np.where(duplicate, last, draw)

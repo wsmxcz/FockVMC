@@ -46,8 +46,12 @@ def test_selected() -> None:
         np.testing.assert_allclose(b, a)
 
 
-@pytest.mark.parametrize("rank", (1, 2, None))
-def test_mc(rank: int | None) -> None:
+@pytest.mark.parametrize(
+    "rank",
+    (1, 2, None, {1: 0.25, 2: 0.75}),
+    ids=("single", "double", "all", "custom"),
+)
+def test_mc(rank: int | dict[int, float] | None) -> None:
     batch.configure(
         forward_chunk=None,
         backward_chunk=None,
@@ -70,6 +74,8 @@ def test_mc(rank: int | None) -> None:
         chains=chains,
         key=jax.random.key(2),
         alpha=2.0,
+        eps1=1,
+        n_eloc=8,
     )
     state_b = MCState.init(
         model,
@@ -78,6 +84,8 @@ def test_mc(rank: int | None) -> None:
         chains=chains,
         key=jax.random.key(2),
         alpha=2.0,
+        eps1=1.0,
+        n_eloc=8,
     )
 
     out_a = sampler.draw(

@@ -19,13 +19,11 @@ def smooth(y: np.ndarray, window: int = 11) -> np.ndarray:
 
 def main() -> None:
     runs = {
-        # "old1024": next(Path.cwd().rglob("fe2s2_old1024.jsonl")),
-        # "old8192": next(Path.cwd().rglob("fe2s2_old8192.jsonl")),
-        # "old32768": next(Path.cwd().rglob("fe2s2_old32768.jsonl")),
-        "new1024": next(Path.cwd().rglob("fe2s2.jsonl")),
-        "born": next(Path.cwd().rglob("fe2s2_born.jsonl")),
+        "born": next(Path.cwd().rglob("H2O_ccpvdz_1.0re_born.jsonl")),
+        "tempered": next(Path.cwd().rglob("H2O_ccpvdz_1.0re_tempered.jsonl")),
+        "ir": next(Path.cwd().rglob("H2O_ccpvdz_1.0re.jsonl")),
     }
-    benchmark = -116.6056091  # Fe2S2
+    benchmark = -76.241860  # Fe2S2
     figure, axes = plt.subplots(
         2,
         3,

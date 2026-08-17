@@ -27,6 +27,7 @@ class IRState:
     alpha: float | None
     alpha_value: float
     beta: float
+    eps1: float
     eps2: float
     n_eloc: int
 
@@ -41,20 +42,24 @@ class IRState:
         key: jax.Array,
         alpha: float | None = None,
         beta: float = 0.5,
+        eps1: float | None = None,
         eps2: float = 1.0e-12,
         n_eloc: int = 1024,
     ) -> IRState:
+        eps1 = sampler.eps1 if eps1 is None else eps1
         if alpha is not None and (
             not np.isfinite(alpha) or not 0.0 <= alpha <= 2.0
         ):
             raise ValueError("alpha must be None or satisfy 0 <= alpha <= 2")
         if not 0.0 <= beta <= 1.0:
             raise ValueError("beta must satisfy 0 <= beta <= 1")
-        if not 0.0 <= eps2 <= sampler.eps1:
-            raise ValueError("screening requires 0 <= eps2 <= eps1")
+        if not 0.0 <= eps2 <= eps1 <= sampler.eps1:
+            raise ValueError(
+                "screening requires 0 <= eps2 <= eps1 <= sampler.eps1"
+            )
         if n_eloc < 0:
             raise ValueError("n_eloc must be nonnegative")
-        if eps2 < sampler.eps1 and (eps2 == 0.0 or n_eloc == 0):
+        if eps2 < eps1 and (eps2 == 0.0 or n_eloc == 0):
             raise ValueError("weak sampling requires eps2 > 0 and n_eloc > 0")
 
         _, init_key, sample_key = jax.random.split(key, 3)
@@ -77,6 +82,7 @@ class IRState:
             alpha=alpha,
             alpha_value=alpha_value,
             beta=float(beta),
+            eps1=float(eps1),
             eps2=float(eps2),
             n_eloc=n_eloc,
         )
@@ -149,7 +155,7 @@ class IRState:
         with timer("reduce"):
             count = np.bincount(sample_index, minlength=n_ket)
             seed = 0
-            if self.eps2 < self.sampler.eps1:
+            if self.eps2 < self.eps1:
                 key, subkey = jax.random.split(chain.key)
                 seed = int(jax.random.bits(subkey, (), dtype=jnp.uint32))
                 chain = replace(chain, key=key)
@@ -157,7 +163,7 @@ class IRState:
         with timer("conns"):
             conn = self.hamiltonian.local_conn(
                 ket,
-                self.sampler.eps1,
+                self.eps1,
                 self.eps2,
                 self.n_eloc,
                 seed=seed,
@@ -191,7 +197,6 @@ class IRState:
             )
             strong_h = np.asarray(conn.strong_h, dtype=dtype)
             weak_coeff = np.asarray(conn.weak_coeff, dtype=dtype)
-            degree = np.asarray(conn.strong_degree, dtype=dtype)
             strong_slice = slice(n_ket, n_ket + n_strong)
             weak_slice = slice(n_ket + n_strong, n_ket + n_strong + n_weak)
             strong_count = np.diff(conn.strong_ptr)
@@ -205,6 +210,15 @@ class IRState:
                 lambda a: a[strong_slice],
                 bra_logpsi,
             )
+            graph = np.abs(strong_h) >= self.sampler.eps1
+            graph_h = strong_h[graph]
+            graph_ket = strong_ket[graph]
+            graph_count = np.bincount(graph_ket, minlength=n_ket)
+            graph_ptr = np.cumulative_sum(graph_count, include_initial=True)
+            graph_row = np.flatnonzero(graph_count)
+            graph_start = graph_ptr[graph_row]
+            degree = np.zeros(n_ket, dtype=dtype)
+            degree[graph_row] = np.add.reduceat(np.abs(graph_h), graph_start)
 
             eloc = np.array(conn.diag, dtype=eloc_dtype, copy=True)
             if n_strong:
@@ -233,18 +247,19 @@ class IRState:
             log_stay[~active] = alpha_logabs[~active]
 
             terms = np.empty(0, dtype=dtype)
-            strong_logabs = np.empty(0, dtype=dtype)
-            if self.beta > 0.0 and n_strong:
-                strong_logabs = np.asarray(
-                    to_logabs(strong_logpsi),
+            graph_logabs = np.empty(0, dtype=dtype)
+            if self.beta > 0.0 and graph_h.size:
+                graph_logpsi = jax.tree.map(lambda a: a[graph], strong_logpsi)
+                graph_logabs = np.asarray(
+                    to_logabs(graph_logpsi),
                     dtype=dtype,
                 ).reshape(-1)
                 terms = (
-                    np.log(np.maximum(np.abs(strong_h), tiny))
-                    + dtype(alpha) * strong_logabs
+                    np.log(np.maximum(np.abs(graph_h), tiny))
+                    + dtype(alpha) * graph_logabs
                 )
                 log_move = np.log(dtype(self.beta)) + math.segment_logsumexp(
-                    conn.strong_ptr,
+                    graph_ptr,
                     terms,
                     n_ket,
                 )
@@ -283,22 +298,22 @@ class IRState:
                 stay_weight[finite] = np.exp(log_stay[finite] - log_r[finite])
                 score = stay_weight * ket_logabs
                 score2 = score * ket_logabs
-                if self.beta > 0.0 and n_strong:
+                if self.beta > 0.0 and graph_h.size:
                     term_log = (
                         np.log(dtype(self.beta))
                         + terms
-                        - log_r[strong_ket]
+                        - log_r[graph_ket]
                     )
                     finite = np.isfinite(term_log)
                     conn_weight = np.zeros_like(term_log, dtype=dtype)
                     conn_weight[finite] = np.exp(term_log[finite])
-                    score[strong_row] += np.add.reduceat(
-                        conn_weight * strong_logabs,
-                        strong_start,
+                    score[graph_row] += np.add.reduceat(
+                        conn_weight * graph_logabs,
+                        graph_start,
                     )
-                    score2[strong_row] += np.add.reduceat(
-                        conn_weight * strong_logabs * strong_logabs,
-                        strong_start,
+                    score2[graph_row] += np.add.reduceat(
+                        conn_weight * graph_logabs * graph_logabs,
+                        graph_start,
                     )
 
                 res_weight = weight * np.abs(residual)

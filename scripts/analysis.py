@@ -71,8 +71,9 @@ def main() -> None:
         alpha=None,
         alpha_value=float(np.asarray(saved_state["alpha_value"])),
         beta=0.5,
-        eps2=1.0e-12,
-        n_eloc=1024,
+        eps1=0.0,
+        eps2=0.0,
+        n_eloc=0,
     )
 
     state, stats, data = state.expect(data=True)

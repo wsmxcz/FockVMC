@@ -29,7 +29,6 @@ class Logger:
                 "energy",
                 "eloc_var",
                 "ess_frac",
-                "unique_eff",
                 "acceptance_rate",
                 "alpha",
             )

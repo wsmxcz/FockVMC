@@ -56,7 +56,6 @@ def main() -> None:
             "energy",
             "eloc_var",
             "ess_frac",
-            "unique_eff",
             "w_max",
             "acceptance_rate",
             "unique_frac",

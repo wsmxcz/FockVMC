@@ -7,8 +7,8 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "fvmc"
-version = "0.3.0"
-description = "A compact, high-performance framework for Fock-space variational Monte Carlo"
+version = "2.0.0"
+description = "A research codebase for Fock-space variational Monte Carlo"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -20,8 +20,7 @@ authors = [
 
 dependencies = [
   "flax>=0.12",
-  "jax>=0.10",
-  "jaxlib>=0.10",
+  "jax[cuda12]>=0.10",
   "matplotlib>=3.8",
   "numpy>=2.4",
   "optax>=0.2",

@@ -1,8 +1,10 @@
 # FockVMC
 
-FockVMC is a compact research codebase for Fock-space variational Monte Carlo.
+FockVMC is a research codebase for Fock-space variational Monte Carlo, currently tailored for molecular electronic structure Hamiltonians.
 
-## Install and run
+Please note that this is an experimental codebase under active development, subject to frequent refactoring and breaking changes.
+
+## Install
 
 Python 3.12+ and a C++20 compiler are required.
 
@@ -12,37 +14,22 @@ cd FockVMC
 pip install -e .
 ```
 
-```bash
-python examples/vmc.py
-```
-`examples/vmc.py` is a minimal VMC example. FCIDUMP inputs are stored in `scripts/FCIDUMP/`.
-
 ## Scope
 
 ```text
 hilbert    sectors and configurations
-operator   electronic Hamiltonians and libdet primitives
+operator   Hamiltonians and operators
 model      RBM and backflow wavefunctions
 sampler    Markov chains and proposals
 vstate     exact, selected-space, Monte Carlo, and IR estimators
-optimizer  SR and predictive sample-space SR
+optimizer  SR and sample-space SR
 driver     optimization loop, logging, and MC checkpoints
 ```
-
-Models include `RBM`, `Backflow`, `GBackflow`, `SBackflow`, and `PBackflow`.
-Optimizers include parameter-space SR and PSR; `psr(mu=0)` is sample-space SR.
-
-## Documentation
-
-- [Design and conventions](fvmc/README.md)
-- [Monte Carlo estimator](fvmc/sampler/vmc.md)
-- [SR and PSR](fvmc/optimizer/sr.md)
-- [libdet](fvmc/operator/libdet/README.md)
 
 ## Citation
 
 ```bibtex
-@article{che2026fvmc,
+@article{che2026detnqs,
   title = {A Deterministic Framework for Neural Network Quantum States in Quantum Chemistry},
   author = {Che, Zheng},
   journal = {Journal of Chemical Theory and Computation},
@@ -51,4 +38,10 @@ Optimizers include parameter-space SR and PSR; `psr(mu=0)` is sample-space SR.
 }
 ```
 
+The early implementation corresponding to this paper is archived in the 1.0.0 branch. Starting from version 2.0.0, the codebase has undergone a major refactor and is now built around SelectedState.
+
+## License
+
 Apache-2.0. See [LICENSE](LICENSE).
+
+**Note**: I am open to PhD opportunities for Fall 2027. If our research interests align, feel free to reach out at [wsmxcz@gmail.com](mailto:wsmxcz@gmail.com) or visit my [Personal Homepage](https://wsmxcz.github.io/).

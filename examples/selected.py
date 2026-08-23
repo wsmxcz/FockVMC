@@ -1,59 +1,42 @@
-from __future__ import annotations
-
-from pathlib import Path
-
 import jax
-import numpy as np
 import optax
+from pyscf import ao2mo, gto, scf
 
 from fvmc import Hamiltonian, SelectedState, VMC
-from fvmc.model import Backflow, slater_reference
-from fvmc.utils import Logger, batch, precision
+from fvmc.hilbert import DetSector
+from fvmc.model import Backflow
+from fvmc.optimizer import psr
+from fvmc.utils import Logger
 from fvmc.vstate import topk_selector
 
 
-def main() -> None:
-    batch.configure(
-        forward_chunk=128,
-        backward_chunk=128,
-        param_chunk=None,
-        bucket_min=128,
-    )
-    precision.configure("single")
+mol = gto.M(
+    atom="H 0 0 0; H 0 0 2.00",
+    basis="cc-pvdz",
+    unit="Angstrom",
+    verbose=0,
+)
+mf = scf.RHF(mol).run()
 
-    fcidump = next(Path.cwd().rglob("H2.FCIDUMP"))
-    hamiltonian = Hamiltonian.load(fcidump)
-    sector = hamiltonian.sector
+norb = mf.mo_coeff.shape[1]
+n_alpha, n_beta = mol.nelec
+h1 = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
+eri = ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb)
 
-    orbitals = np.eye(sector.norb)
-    ref_mat = slater_reference(
-        orbitals[:, :sector.n_alpha],
-        orbitals[:, :sector.n_beta],
-    )
-    model = Backflow(
-        norb=sector.norb,
-        n_alpha=sector.n_alpha,
-        n_beta=sector.n_beta,
-        hidden=(64,),
-        ref_mat=ref_mat,
-    )
+sector = DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
+hamiltonian = Hamiltonian(sector, h1, eri, ecore=mol.energy_nuc())
 
-    state = SelectedState.init(
-        model=model,
-        hamiltonian=hamiltonian,
-        basis=sector.reference(1),
-        key=jax.random.key(0),
-    )
+model = Backflow(
+    norb=norb,
+    n_alpha=n_alpha,
+    n_beta=n_beta,
+)
+state = SelectedState.init(model, hamiltonian, key=jax.random.key(0))
+optimizer = optax.chain(
+    psr(),
+    optax.scale_by_learning_rate(5.0e-2),
+)
 
-    vmc = VMC.init(state, optax.adamw(1.0e-3), geometry=False)
-    log = Logger(every=1, keys=("step", "outer", "energy", "eloc_var", "n_basis"))
-    for outer in range(2):
-        vmc.state = vmc.state.evolve(topk_selector(k=128), eps=1.0e-6)
-        rec = vmc.run(50)
-        rec["outer"] = outer + 1
-        rec["n_basis"] = vmc.state.n_basis
-        log(rec)
-
-
-if __name__ == "__main__":
-    main()
+vmc = VMC.init(state, optimizer)
+vmc.state = vmc.state.evolve(topk_selector(128), eps=1.0e-6)
+vmc.run(200, log=Logger(every=10))

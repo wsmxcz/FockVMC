@@ -13,7 +13,7 @@ from fvmc.utils import Logger
 
 
 @dataclass(slots=True)
-class _HCIState:
+class HCIState:
     """Selected-CI wavefunction data used by variational and PT2 stages."""
 
     basis: np.ndarray
@@ -21,7 +21,7 @@ class _HCIState:
     energy: float
 
 
-def _ground(
+def ground(
     hamiltonian: Hamiltonian,
     basis: np.ndarray,
     initial: np.ndarray | None = None,
@@ -116,13 +116,13 @@ def _ground(
     return energy, coeff, conn_time, solve_time, other_time
 
 
-def _select(
+def select(
     hamiltonian: Hamiltonian,
     *,
     eps: float = 1e-4,
     max_cycle: int = 10,
     mode: str = "sparse",
-) -> _HCIState:
+) -> HCIState:
     """Grow a heat-bath selected determinant basis and diagonalize in it."""
     start = time.perf_counter()
 
@@ -162,7 +162,7 @@ def _select(
         initial = np.zeros(len(basis), dtype=np.float64)
         initial[:old_size] = coeff
 
-        energy, coeff, conn_time, solve_time, other_time = _ground(
+        energy, coeff, conn_time, solve_time, other_time = ground(
             hamiltonian,
             basis,
             initial,
@@ -184,19 +184,19 @@ def _select(
 
     print(f"Total time: {time.perf_counter() - start:.3f}s")
 
-    return _HCIState(
+    return HCIState(
         basis=basis,
         coeff=coeff,
         energy=energy,
     )
 
 
-def _pt2(
+def pt2(
     hamiltonian: Hamiltonian,
-    state: _HCIState,
+    state: HCIState,
     *,
-    eps1: float = 1e-4,
-    eps2: float = 1e-6,
+    eps1: float = 1e-6,
+    eps2: float = 1e-12,
     counts: int = 16,
     n_rep: int = 4,
     seed: int = 0,
@@ -254,57 +254,35 @@ def _pt2(
     return det_pt2 + sample_pt2, det_pt2, sample_pt2, err
 
 
-def main() -> None:
-    mol = gto.M(
-        atom="""
-        O   0.00000000,  0.00000000,  0.00000000
-        H   0.75700000,  0.00000000,  0.58590000
-        H  -0.75700000,  0.00000000,  0.58590000
-        """,
-        basis="6-31g",
-        unit="Angstrom",
-        spin=0,
-        verbose=0,
-    )
 
-    mf = scf.ROHF(mol).run()
-    norb = mf.mo_coeff.shape[1]
-    n_alpha, n_beta = mol.nelec
+mol = gto.M(
+    atom="""
+    O   0.00000000,  0.00000000,  0.00000000
+    H   0.75700000,  0.00000000,  0.58590000
+    H  -0.75700000,  0.00000000,  0.58590000
+    """,
+    basis="6-31g",
+    unit="Angstrom",
+    spin=0,
+    verbose=0,
+)
 
-    h1e = np.asarray(mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, dtype=np.float64)
-    eri = np.asarray(
-        ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb),
-        dtype=np.float64,
-    )
+mf = scf.ROHF(mol).run()
+norb = mf.mo_coeff.shape[1]
+n_alpha, n_beta = mol.nelec
+h1 = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
+eri = ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb)
 
-    sector = DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
-    hamiltonian = Hamiltonian(sector, h1e, eri, ecore=mol.energy_nuc())
+sector = DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
+hamiltonian = Hamiltonian(sector, h1, eri, ecore=mol.energy_nuc())
 
-    state = _select(
-        hamiltonian,
-        eps=1e-4,
-        max_cycle=10,
-        mode="sparse",
-    )
+state = select(hamiltonian)
+correction, deterministic, stochastic, error = pt2(hamiltonian, state)
 
-    pt2, det_pt2, sample_pt2, error = _pt2(
-        hamiltonian,
-        state,
-        eps1=1e-6,
-        eps2=1e-6,
-        counts=16,
-        n_rep=4,
-        seed=0,
-    )
-
-    print()
-    print(f"SCF          : {mf.e_tot:.6f}")
-    print(f"HCI var      : {state.energy:.6f}  Ndet: {len(state.basis)}")
-    print(f"PT2 det      : {det_pt2:.6f}")
-    print(f"PT2 stoch    : {sample_pt2:.6f} +/- {error:.6e}")
-    print(f"PT2 total    : {pt2:.6f} +/- {error:.6e}")
-    print(f"HCI + PT2    : {state.energy + pt2:.6f} +/- {error:.6e}")
-
-
-if __name__ == "__main__":
-    main()
+print()
+print(f"SCF          : {mf.e_tot:.6f}")
+print(f"HCI var      : {state.energy:.6f}  Ndet: {len(state.basis)}")
+print(f"PT2 det      : {deterministic:.6f}")
+print(f"PT2 stoch    : {stochastic:.6f} +/- {error:.6e}")
+print(f"PT2 total    : {correction:.6f} +/- {error:.6e}")
+print(f"HCI + PT2    : {state.energy + correction:.6f} +/- {error:.6e}")

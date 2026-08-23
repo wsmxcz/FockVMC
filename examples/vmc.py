@@ -1,32 +1,48 @@
-from pathlib import Path
-
 import jax
 import optax
+from pyscf import ao2mo, gto, scf
 
 from fvmc import Hamiltonian, MCState, VMC
-from fvmc.model import RBM
+from fvmc.hilbert import DetSector
+from fvmc.model import Backflow
+from fvmc.optimizer import psr
 from fvmc.sampler import MCSampler
-from fvmc.optimizer import sr
 from fvmc.utils import Logger
 
 
-def main() -> None:
-    hamiltonian = Hamiltonian.load(next(Path.cwd().parent.rglob("H2.FCIDUMP")))
-    sector = hamiltonian.sector
-    model = RBM(norb=sector.norb, alpha=1)
-    sampler = MCSampler(n_samples=128, n_chains=128, rank=None)
-    chains = sector.random(sampler.n_chains, seed=0)
+mol = gto.M(
+    atom="H 0 0 0; H 0 0 2.00",
+    basis="cc-pvdz",
+    unit="Angstrom",
+    verbose=0,
+)
+mf = scf.RHF(mol).run()
 
-    state = MCState.init(
-        model,
-        hamiltonian,
-        sampler=sampler,
-        chains=chains,
-        key=jax.random.key(0),
-    )
-    vmc = VMC.init(state, optax.chain(sr(), optax.scale_by_learning_rate(5.0e-2)))
-    vmc.run(200, log=Logger(every=10))
+norb = mf.mo_coeff.shape[1]
+n_alpha, n_beta = mol.nelec
+h1 = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
+eri = ao2mo.restore(8, ao2mo.kernel(mol, mf.mo_coeff), norb)
 
+sector = DetSector(norb, nelec=n_alpha + n_beta, spin=mol.spin)
+hamiltonian = Hamiltonian(sector, h1, eri, ecore=mol.energy_nuc())
 
-if __name__ == "__main__":
-    main()
+model = Backflow(
+    norb=norb,
+    n_alpha=n_alpha,
+    n_beta=n_beta,
+)
+sampler = MCSampler(n_samples=128, n_chains=128, rank=None)
+state = MCState.init(
+    model,
+    hamiltonian,
+    sampler=sampler,
+    chains=sector.reference(sampler.n_chains),
+    key=jax.random.key(0),
+)
+optimizer = optax.chain(
+    psr(),
+    optax.scale_by_learning_rate(5.0e-2),
+)
+
+vmc = VMC.init(state, optimizer)
+vmc.run(200, log=Logger(every=10))

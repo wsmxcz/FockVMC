@@ -38,7 +38,7 @@ driver     optimization loop, logging, and MC checkpoints
 }
 ```
 
-The early implementation corresponding to this paper is archived in the 1.0.0 branch. Starting from version 2.0.0, the codebase has undergone a major refactor and is now built around SelectedState.
+The early implementation corresponding to this paper is archived in the 1.0 branch. Starting from version 2.0, the codebase has undergone a major refactor and is now built around SelectedState.
 
 ## License
 

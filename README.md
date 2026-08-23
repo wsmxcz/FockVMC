@@ -42,6 +42,6 @@ The early implementation corresponding to this paper is archived in the 1.0.0 br
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).
 
 **Note**: I am open to PhD opportunities for Fall 2027. If our research interests align, feel free to reach out at [wsmxcz@gmail.com](mailto:wsmxcz@gmail.com) or visit my [Personal Homepage](https://wsmxcz.github.io/).

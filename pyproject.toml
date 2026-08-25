@@ -11,7 +11,7 @@ version = "2.0.0"
 description = "A research codebase for Fock-space variational Monte Carlo"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "Apache-2.0"
+license = "MIT"
 license-files = ["LICENSE"]
 
 authors = [

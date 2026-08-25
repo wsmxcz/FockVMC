@@ -26,7 +26,7 @@ optimizer  SR and sample-space SR
 driver     optimization loop, logging, and MC checkpoints
 ```
 
-## Citation
+## Related Papers
 
 ```bibtex
 @article{che2026detnqs,
@@ -39,6 +39,15 @@ driver     optimization loop, logging, and MC checkpoints
 ```
 
 The early implementation corresponding to this paper is archived in the 1.0 branch. Starting from version 2.0, the codebase has undergone a major refactor and is now built around SelectedState.
+
+```bibtex
+@online{che2026importance,
+  title = {Importance-Reweighted Fock-Space Variational Monte Carlo},
+  author = {Che, Zheng},
+  year = {2026},
+  doi = {10.48550/arXiv.2608.22925},
+}
+```
 
 ## License
 
